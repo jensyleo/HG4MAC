@@ -7,6 +7,7 @@
 //
 
 #import "GrowlApplicationBridge.h"
+#import <UserNotifications/UserNotifications.h>
 #import "GrowlApplicationBridge_Private.h"
 #include "CFURLAdditions.h"
 #import "GrowlDefinesInternal.h"
@@ -176,7 +177,7 @@ static dispatch_queue_t notificationQueue_Queue;
 
 -(void)dealloc {
    [[NSWorkspace sharedWorkspace] removeObserver:self forKeyPath:@"runningApplications"];
-   [[NSUserNotificationCenter defaultUserNotificationCenter] removeAllDeliveredNotifications];
+   [[UNUserNotificationCenter currentNotificationCenter] removeAllDeliveredNotifications];
 	[super dealloc];
 }
 
@@ -473,9 +474,8 @@ static dispatch_queue_t notificationQueue_Queue;
     if([self _growlIsReachableUpdateCache:NO])
        result = NO;
     
-    //If on Mountain Lion, Mist won't be used.
-    if (NSClassFromString(@"NSUserNotificationCenter"))
-       result = NO;
+    // UNUserNotificationCenter is always available — Mist not used.
+    result = NO;
 
     return result;
 }

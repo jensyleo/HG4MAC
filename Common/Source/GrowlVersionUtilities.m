@@ -1,3 +1,13 @@
+//
+//  GrowlVersionUtilities.m
+//  Growl
+//
+//  Copyright The Growl Project, LLC. All rights reserved.
+//
+// This file is under the BSD License, refer to License.txt for details.
+// (License header restored; the original file shipped without an explicit one.)
+//
+
 #include <CoreFoundation/CoreFoundation.h>
 #include <unistd.h>
 

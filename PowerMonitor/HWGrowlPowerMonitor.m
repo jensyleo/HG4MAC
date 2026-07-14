@@ -6,6 +6,7 @@
 //  Copyright (c) 2012 The Growl Project, LLC. All rights reserved.
 //
 
+// compile with ARC: -fobjc-arc
 #import "HWGrowlPowerMonitor.h"
 #include <IOKit/IOKitLib.h>
 #include <IOKit/ps/IOPSKeys.h>
@@ -26,7 +27,7 @@
 @property (nonatomic, assign) HGPowerSource powerType;
 @property (nonatomic, assign) NSInteger remainingTime;
 
-@property (nonatomic, retain) NSString *typeString;
+@property (nonatomic, strong) NSString *typeString;
 
 -(id)initWithPowerSourceDescription:(CFDictionaryRef)description;
 
@@ -35,7 +36,7 @@
 @implementation GrowlPowerSourceDescription
 
 +(GrowlPowerSourceDescription*)descriptionWithDescription:(CFDictionaryRef)description {
-	return [[[GrowlPowerSourceDescription alloc] initWithPowerSourceDescription:description] autorelease];
+	return [[GrowlPowerSourceDescription alloc] initWithPowerSourceDescription:description];
 }
 
 -(id)initWithPowerSourceDescription:(CFDictionaryRef)description {
@@ -105,11 +106,7 @@
 	return self;
 }
 
--(void)dealloc {
-	[_typeString release];
-	_typeString = nil;
-	[super dealloc];
-}
+// ARC: no manual dealloc needed (typeString is strong, auto-released).
 
 -(NSString*)notificationDescriptionForCurrentSource:(HGPowerSource)currentSource {
 	NSMutableString *description = nil;
@@ -118,7 +115,11 @@
 	NSString *time = nil;
 	NSString *percentage = nil;
 	
-	if(_charging)
+	// At 100% the battery is full even if IOKit still reports isCharging/finishing
+	// (macOS keeps "finishing charge" briefly at 100%). Never say "Charging at 100%".
+	if(_percentage >= 100)
+		state = NSLocalizedString(@"Charged", @"");
+	else if(_charging)
 		state = NSLocalizedString(@"Charging", @"");
 	else if(_finishingCharge)
 		state = NSLocalizedString(@"Finishing", @"");
@@ -160,19 +161,21 @@
 
 @interface HWGrowlPowerMonitor ()
 
-@property (nonatomic, assign) id<HWGrowlPluginControllerProtocol> delegate;
+@property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
+// Core Foundation pointer — ARC does NOT manage this; keep assign.
 @property (nonatomic, assign)	CFRunLoopSourceRef notificationRunLoopSource;
 
 @property (nonatomic, assign) HGPowerSource lastPowerSource;
 @property (nonatomic, assign) NSTimeInterval lastKnownTime;
 
-@property (nonatomic, retain) NSTimer *refireTimer;
+@property (nonatomic, strong) NSTimer *refireTimer;
 @property (nonatomic, assign) BOOL lastWarnState;
+@property (nonatomic, assign) BOOL announcedFullyCharged;
 
-@property (nonatomic, retain) NSString *refireBatteryStatusLabel;
-@property (nonatomic, retain) NSString *refireEveryLabel;
-@property (nonatomic, retain) NSString *minutesLabel;
-@property (nonatomic, retain) NSString *refireOnlyOnBatteryLabel;
+@property (nonatomic, strong) NSString *refireBatteryStatusLabel;
+@property (nonatomic, strong) NSString *refireEveryLabel;
+@property (nonatomic, strong) NSString *minutesLabel;
+@property (nonatomic, strong) NSString *refireOnlyOnBatteryLabel;
 
 @end
 
@@ -185,13 +188,14 @@
 @synthesize lastKnownTime;
 @synthesize refireTimer;
 @synthesize lastWarnState;
+@synthesize announcedFullyCharged;
 
 -(id)init {
 	if((self = [super init])){
-		self.notificationRunLoopSource = IOPSNotificationCreateRunLoopSource(powerSourceChanged, self);
+		self.notificationRunLoopSource = IOPSNotificationCreateRunLoopSource(powerSourceChanged, (__bridge void *)self);
 		
 		if (notificationRunLoopSource)
-			CFRunLoopAddSource(CFRunLoopGetCurrent(), notificationRunLoopSource, kCFRunLoopDefaultMode);
+			CFRunLoopAddSource(CFRunLoopGetMain(), notificationRunLoopSource, kCFRunLoopDefaultMode);
 		lastPowerSource = HGUnknownPower;
 		lastKnownTime = kIOPSTimeRemainingUnknown;
 		lastWarnState = NO;
@@ -205,24 +209,12 @@
 }
 
 -(void)dealloc {
-	CFRunLoopRemoveSource(CFRunLoopGetCurrent(), notificationRunLoopSource, kCFRunLoopDefaultMode);
-	CFRelease(notificationRunLoopSource);
+	// ARC handles the ObjC ivars; keep the CF teardown + timer invalidation.
+	if (notificationRunLoopSource) {
+		CFRunLoopRemoveSource(CFRunLoopGetMain(), notificationRunLoopSource, kCFRunLoopDefaultMode);
+		CFRelease(notificationRunLoopSource);
+	}
 	[refireTimer invalidate];
-	[refireTimer release];
-	
-	[_refireBatteryStatusLabel release];
-    _refireBatteryStatusLabel = nil;
-	
-	[_refireEveryLabel release];
-    _refireEveryLabel = nil;
-	
-    [_minutesLabel release];
-	_minutesLabel = nil;
-	
-    [_refireOnlyOnBatteryLabel release];
-	_refireOnlyOnBatteryLabel = nil;
-    
-	[super dealloc];
 }
 
 -(void)fireOnLaunchNotes {
@@ -320,7 +312,7 @@
 	CFTypeRef sourcesBlob = IOPSCopyPowerSourcesInfo();
 	if(sourcesBlob)
 	{
-		NSString *source = (NSString*)IOPSGetProvidingPowerSourceType(sourcesBlob);
+		NSString *source = (__bridge NSString*)IOPSGetProvidingPowerSourceType(sourcesBlob);
 		
 		HGPowerSource currentSource;
 		if([source compare:@"AC Power"] == NSOrderedSame) {
@@ -394,7 +386,45 @@
 		else if(lastWarnState && !warnBattery)
 			lastWarnState = NO;
 		
-		if(changedType || sendTime || warnBattery || force){
+		// The periodic refire (force) re-announces status every X min — useful for
+		// charge/discharge PROGRESS, but pointless once the battery is fully charged on
+		// AC (nothing changes at 100%). Suppress a refire-ONLY fire when fully charged;
+		// the one-time "charged" transition still fires via changedType/sendTime (so 100%
+		// is announced exactly once), and the refire keeps working while charging/on battery.
+		BOOL fullyCharged = (currentSource == HGACPower && !chargingOrFinishing);
+		BOOL refireOnly   = force && !changedType && !sendTime && !warnBattery;
+
+		// One-time "fully charged" notice. Reaching 100% doesn't change the power-source
+		// type and (empirically) doesn't flip the time-known state, so the normal
+		// changedType/sendTime/refire path never announces it. Announce it explicitly,
+		// exactly once, when the battery TRANSITIONS to full; re-arm when it drops below
+		// 100% or is unplugged. Don't announce at launch if it's already full — only on a
+		// real transition (on the first check lastPowerSource is still Unknown).
+		BOOL isFull = (currentSource == HGACPower && hasBattery && percentage >= 100);
+		if(isFull && !announcedFullyCharged){
+			BOOL firstCheck = (lastPowerSource == HGUnknownPower);
+			announcedFullyCharged = YES;
+			if(!firstCheck){
+				@autoreleasepool {
+					NSString *desc = [self chargingDescriptionForPowerSources:powerSourceDescriptions
+															 currentSource:currentSource];
+					NSData *fullIcon = [[NSImage imageNamed:@"Power-Plugged"] TIFFRepresentation];
+					// Distinct identifier so the dedup key (name+identifier+description) doesn't
+					// collide with the generic "On AC Power" notice (same description).
+					[delegate notifyWithName:@"PowerChange"
+									   title:NSLocalizedString(@"Battery Fully Charged", @"")
+								 description:desc ?: @""
+										icon:fullIcon
+							identifierString:@"PowerFullyCharged"
+							   contextString:nil
+									  plugin:self];
+				}
+			}
+		} else if(!isFull){
+			announcedFullyCharged = NO;
+		}
+
+		if((changedType || sendTime || warnBattery || force) && !(refireOnly && fullyCharged)){
 			NSString *title = nil;
 			NSString *name = nil;
 			NSString *localizedSource = [self localizedNameForSource:currentSource];
@@ -419,10 +449,18 @@
 			NSString *imageName = nil;
 			switch (currentSource) {
 				case HGACPower:
-					if(chargingOrFinishing)
-						imageName = @"Power-Charging";
-					else
-						imageName = @"Power-Plugged";
+					// Plugged but NOT full → charging ramp by level (Power-Charging-0…100),
+					// even if IOKit momentarily reports isCharging=NO right after connecting.
+					// Only a full (or unknown) battery shows the plain "plugged" icon — this
+					// avoids showing a full-battery icon when you plug in at e.g. 10%.
+					if(percentage >= 0 && percentage < 100){
+						CGFloat adjusted = roundf((CGFloat)percentage / 10.0f);
+						imageName = [NSString stringWithFormat:@"Power-Charging-%ld0", (NSInteger)adjusted];
+						if(adjusted == 0)
+							imageName = @"Power-Charging-0";
+					} else {
+						imageName = @"Power-Plugged";   // full (100%) or unknown %
+					}
 					break;
 				case HGBatteryPower:
 				case HGUPSPower:
@@ -446,8 +484,7 @@
 			
 			@autoreleasepool
 			{
-				NSString *imagePath = [[NSBundle mainBundle] pathForResource:imageName ofType:@"tif"];
-            NSData *iconData = [NSData dataWithContentsOfFile:imagePath];
+	NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
             
             [delegate notifyWithName:name
                                title:title
@@ -466,18 +503,22 @@
 }
 
 -(NSMutableString*)chargingDescriptionForPowerSources:(NSArray*)sources currentSource:(HGPowerSource)currentSource {
+	// P20 (MRC): the old code did [[NSMutableString string] retain] + autorelease
+	// to survive a nested @autoreleasepool in the caller (powerSourceChanged:).
+	// Under ARC this resolves itself: the __block var is strong (keeps it alive in
+	// the block) and the returned value is retained by the caller before the pool drains.
 	__block NSMutableString *description = nil;
-	[sources enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {		
+	[sources enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
 		NSString *sourceString = [obj notificationDescriptionForCurrentSource:currentSource];
 		if(sourceString){
 			if(!description)
-				description = [[NSMutableString string] retain];
+				description = [NSMutableString string];
 			else
 				[description appendString:@"\n"];
 			[description appendString:sourceString];
 		}
 	}];
-	return [description autorelease];
+	return description;
 }
 
 +(NSInteger)batteryPercentageForPowerSourceDescription:(CFDictionaryRef)description {
@@ -488,9 +529,13 @@
 		CFNumberRef maxCapacityNum = CFDictionaryGetValue(description, CFSTR(kIOPSMaxCapacityKey));
 		
 		CFIndex currentCapacity, maxCapacity, sourceCapacity = -1;
-		
-		if (CFNumberGetValue(currentCapacityNum, kCFNumberCFIndexType, &currentCapacity) &&
-			 CFNumberGetValue(maxCapacityNum, kCFNumberCFIndexType, &maxCapacity))
+
+		// Guard: the capacity keys can be absent (NULL) on some third-party UPS, and
+		// maxCapacity could be 0 → CFNumberGetValue(NULL) is UB and /0 yields NaN.
+		if (currentCapacityNum && maxCapacityNum &&
+			 CFNumberGetValue(currentCapacityNum, kCFNumberCFIndexType, &currentCapacity) &&
+			 CFNumberGetValue(maxCapacityNum, kCFNumberCFIndexType, &maxCapacity) &&
+			 maxCapacity > 0)
 			sourceCapacity = roundf((currentCapacity / (float)maxCapacity) * 100.0f);
 		
 		if(sourceCapacity > percentageCapacity)
@@ -521,19 +566,14 @@
 }
 
 static void powerSourceChanged(void *context) {
-	HWGrowlPowerMonitor *monitor = (HWGrowlPowerMonitor*)context;
+	HWGrowlPowerMonitor *monitor = (__bridge HWGrowlPowerMonitor*)context;
 	[monitor powerSourceChanged:NO];
 	[monitor checkTimer];
 }
 
 #pragma mark HWGrowlPluginProtocol
 
--(void)setDelegate:(id<HWGrowlPluginControllerProtocol>)aDelegate{
-	delegate = aDelegate;
-}
--(id<HWGrowlPluginControllerProtocol>)delegate {
-	return delegate;
-}
+// delegate accessors are auto-synthesized from the @property (weak).
 -(NSString*)pluginDisplayName {
 	return NSLocalizedString(@"Power Monitor", @"");
 }
@@ -541,14 +581,15 @@ static void powerSourceChanged(void *context) {
 	static NSImage *_icon = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_icon = [[NSImage imageNamed:@"HWGPrefsPower"] retain];
+		_icon = [NSImage imageNamed:@"HWGPrefsPower"];
 	});
 	return _icon;
 }
 -(NSView*)preferencePane {
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		[NSBundle loadNibNamed:@"PowerMonitorPrefs" owner:self];
+		// The nib lives in THIS plugin's bundle, not the main app bundle.
+		[[NSBundle bundleForClass:[self class]] loadNibNamed:@"PowerMonitorPrefs" owner:self topLevelObjects:nil];
 	});
 	return prefsView;
 }

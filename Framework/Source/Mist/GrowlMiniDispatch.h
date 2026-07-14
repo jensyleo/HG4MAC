@@ -5,6 +5,7 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import <UserNotifications/UserNotifications.h>
 #import "GrowlDefines.h"
 
 @class GrowlNote;
@@ -17,7 +18,7 @@
 
 @class GrowlPositionController;
 
-@interface GrowlMiniDispatch : NSObject <NSAnimationDelegate, NSUserNotificationCenterDelegate> {
+@interface GrowlMiniDispatch : NSObject <NSAnimationDelegate, UNUserNotificationCenterDelegate> {
 	GrowlPositionController *positionController;
    NSMutableDictionary *windowDictionary;
 	NSMutableArray *queuedWindows;

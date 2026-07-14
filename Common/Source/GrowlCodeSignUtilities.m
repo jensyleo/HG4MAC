@@ -9,24 +9,12 @@
 #import "GrowlCodeSignUtilities.h"
 #import <Security/CodeSigning.h>
 
-#ifndef NSFoundationVersionNumber10_7
-#define NSFoundationVersionNumber10_7   833.1
-#endif
-#ifndef NSFoundationVersionNumber10_7_1
-#define NSFoundationVersionNumber10_7_1 NSFoundationVersionNumber10_7 // Foundation wasn't updated in 10.7.1
-#endif
-#ifndef NSFoundationVersionNumber10_7_2
-#define NSFoundationVersionNumber10_7_2 833.20
-#endif
-#ifndef NSFoundationVersionNumber10_7_3
-#define NSFoundationVersionNumber10_7_3 833.24
-#endif
-
 @implementation GrowlCodeSignUtilities
 
 
 + (BOOL) isLionOrGreater {
-	return (BOOL)(isgreaterequal(NSFoundationVersionNumber, NSFoundationVersionNumber10_7));
+	// Deployment target is 13.0 — always Lion or greater.
+	return YES;
 }
 
 + (BOOL) hasEntitlement:(NSString*)entitlement

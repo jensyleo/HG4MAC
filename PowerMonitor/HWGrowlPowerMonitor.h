@@ -18,6 +18,8 @@ typedef enum {
 
 @interface HWGrowlPowerMonitor : NSObject <HWGrowlPluginProtocol, HWGrowlPluginNotifierProtocol>
 
-@property (nonatomic, assign) IBOutlet NSView *prefsView;
+// strong (not assign/weak): the prefs nib's top-level view must be owned by us, or
+// it deallocs right after loadNibNamed:owner:topLevelObjects: (blank pane otherwise).
+@property (nonatomic, strong) IBOutlet NSView *prefsView;
 
 @end

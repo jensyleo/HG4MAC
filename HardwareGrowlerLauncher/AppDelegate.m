@@ -12,17 +12,21 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
-   NSArray *growlInstances = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.growl.hardwaregrowler"];
+   NSArray *growlInstances = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.jensyleo.hg4mac"];
    if(!growlInstances.count)
    {
-      NSURL* appURL = [[[[NSBundle mainBundle] bundleURL] URLByAppendingPathComponent:@"../../../../Contents/MacOS/HardwareGrowler" isDirectory:NO] URLByResolvingSymlinksInPath];
-      NSLog(@"Launching HardwareGrowler at URL: %@", appURL);
-      NSDictionary* conf = [NSDictionary dictionary];
-      NSError* error = nil;
-      [[NSWorkspace sharedWorkspace] launchApplicationAtURL:appURL options:NSWorkspaceLaunchDefault configuration:conf error:&error];
-      if (error) {
-         NSLog(@"%@", error);
-      }
+      NSURL* appURL = [[[[NSBundle mainBundle] bundleURL] URLByAppendingPathComponent:@"../../../../Contents/MacOS/HG4MAC" isDirectory:NO] URLByResolvingSymlinksInPath];
+      NSLog(@"Launching HG4MAC at URL: %@", appURL);
+      // Modern replacement for the deprecated launchApplicationAtURL:options:
+      // configuration:error:. Terminate only after the launch attempt returns.
+      NSWorkspaceOpenConfiguration *conf = [NSWorkspaceOpenConfiguration configuration];
+      [[NSWorkspace sharedWorkspace] openApplicationAtURL:appURL
+                                            configuration:conf
+                                        completionHandler:^(NSRunningApplication *app, NSError *error) {
+         if (error) NSLog(@"%@", error);
+         dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+      }];
+      return;
    }
 	[NSApp terminate:nil];
 }

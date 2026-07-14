@@ -6,6 +6,7 @@
 //  Copyright (c) 2012 The Growl Project, LLC. All rights reserved.
 //
 
+// compile with ARC: -fobjc-arc
 #import "HWGrowlVolumeMonitor.h"
 
 #define VolumeNotifierUnmountWaitSeconds	600.0
@@ -22,7 +23,7 @@
 	static NSImage *_ejectIconImage = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_ejectIconImage = [[NSImage imageNamed:@"DisksVolumes-Eject"] retain];
+		_ejectIconImage = [NSImage imageNamed:@"DisksVolumes-Eject"];
 	});
 	return _ejectIconImage;
 }
@@ -31,96 +32,63 @@
 	static NSData *_mountIconData = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-        NSArray *representations = [[[NSWorkspace sharedWorkspace] iconForFileType:NSFileTypeForHFSTypeCode(kGenericRemovableMediaIcon)] representations];
-        NSBitmapImageRep *bitmapRep = [representations objectAtIndex:0U];
-
-		_mountIconData = [bitmapRep representationUsingType: NSPNGFileType
-                                                 properties: nil];
+		// Custom colored mount icon from the asset catalog (replaces the old
+		// generic SF Symbol "externaldrive").
+		_mountIconData = [[NSImage imageNamed:@"DisksVolumes-Mounted"] TIFFRepresentation];
 	});
 	return _mountIconData;
 }
 
 + (VolumeInfo *) volumeInfoForMountWithPath:(NSString *)aPath {
-	return [[[VolumeInfo alloc] initForMountWithPath:aPath] autorelease];
+	return [[VolumeInfo alloc] initForMountWithPath:aPath];
 }
 
 + (VolumeInfo *) volumeInfoForUnmountWithPath:(NSString *)aPath {
-	return [[[VolumeInfo alloc] initForUnmountWithPath:aPath] autorelease];
+	return [[VolumeInfo alloc] initForUnmountWithPath:aPath];
 }
 
 - (id) initForMountWithPath:(NSString *)aPath {
 	if ((self = [self initWithPath:aPath])) {
-		if (path) {
-            NSImage *icon = [[NSWorkspace sharedWorkspace] iconForFile:path];
-            CGImageRef iconRef = [icon CGImageForProposedRect:nil context:nil hints:nil];
-            NSBitmapImageRep *bitmapRep = [[[NSBitmapImageRep alloc] initWithCGImage:iconRef] autorelease];
-			self.iconData = [bitmapRep representationUsingType: NSPNGFileType
-                                                      properties: nil];
-		} else {
-			self.iconData = [VolumeInfo mountIconData];
-		}
+		// Always use the generic mount icon. Reading the volume's actual
+		// icon (via iconForFile: or NSURLEffectiveIconKey) traverses to the
+		// source file (e.g. the .dmg in ~/Downloads) and triggers TCC
+		// permission prompts. We never touch the filesystem here.
+		self.iconData = [VolumeInfo mountIconData];
 	}
-	
 	return self;
 }
 
 - (id) initForUnmountWithPath:(NSString *)aPath {
 	if ((self = [self initWithPath:aPath])) {
-		if (path) {
-			//Get the icon for the volume.
-			NSImage *icon = [[NSWorkspace sharedWorkspace] iconForFile:path];
-			NSSize iconSize = [icon size];
-			//Also get the standard Eject icon.
-			NSImage *ejectIcon = [VolumeInfo ejectIconImage];
-			[ejectIcon setScalesWhenResized:NO]; //Use the high-res rep instead.
-			NSSize ejectIconSize = [ejectIcon size];
-			
-			//Badge the volume icon with the Eject icon. This is what we'll pass off te Growl.
-			//The badge's width and height are 2/3 of the overall icon's width and height. If they were 1/2, it would look small (so I found in testing —boredzo). This looks pretty good.
-			[icon lockFocus];
-			
-			[ejectIcon drawInRect:CGRectMake(0.0f, 0.0f, iconSize.width, iconSize.width)
-							 fromRect:(NSRect){ NSZeroPoint, ejectIconSize }
-							operation:NSCompositeSourceOver
-							 fraction:1.0f];
-			
-			//For some reason, passing [icon TIFFRepresentation] only passes the unbadged volume icon to Growl, even though writing the same TIFF data out to a file and opening it in Preview does show the badge. If anybody can figure that out, you're welcome to do so. Until then:
-			//We get a NSBIR for the current focused view (the image), and make PNG data from it. (There is no reason why this could not be TIFF if we wanted it to be. I just generally prefer PNG. —boredzo)
-			NSBitmapImageRep *imageRep = [[[NSBitmapImageRep alloc] initWithFocusedViewRect:(NSRect){ NSZeroPoint, iconSize }] autorelease];
-			self.iconData = [imageRep representationUsingType:NSPNGFileType properties:nil];
-			
-			[icon unlockFocus];
-		} else {
-			self.iconData = [[[[VolumeInfo ejectIconImage] representations] objectAtIndex:0U]representationUsingType:NSPNGFileType properties:nil];
-		}
+		// Always use the eject icon alone for unmounts. No filesystem access,
+		// no TCC prompts. The volume name in the title is enough to identify
+		// which volume was ejected.
+		NSImage *ejectIcon = [VolumeInfo ejectIconImage];
+		NSData *tiff = [ejectIcon TIFFRepresentation];
+		NSBitmapImageRep *bitmapRep = [NSBitmapImageRep imageRepWithData:tiff];
+		self.iconData = [bitmapRep representationUsingType:NSBitmapImageFileTypePNG
+												properties:@{}];
 	}
-	
+
 	return self;
 }
 
 - (id) initWithPath:(NSString *)aPath {
 	if ((self = [super init])) {
 		if (aPath) {
-			path = [aPath retain];
-			name = [[[NSFileManager defaultManager] displayNameAtPath:path] retain];
+			path = aPath;
+			// Use the last path component as the volume name. This is purely
+			// string manipulation — no filesystem access, no TCC prompts.
+			// For /Volumes/MyDrive this yields "MyDrive", which matches the
+			// display name macOS shows in Finder for nearly all volumes.
+			name = [aPath lastPathComponent];
 		}
 	}
-	
+
 	return self;
 }
 
-- (void) dealloc {
-	[path release];
-	path = nil;
-	
-	[name release];
-	name = nil;
-	
-	[iconData release];
-	iconData = nil;
-	
-	[super dealloc];
-}
+// No -dealloc needed under ARC (the ivars were only released here).
 
 - (NSString *) description {
 	NSMutableDictionary *desc = [NSMutableDictionary dictionary];
@@ -139,12 +107,15 @@
 
 @interface HWGrowlVolumeMonitor ()
 
-@property (nonatomic, assign) id<HWGrowlPluginControllerProtocol> delegate;
-@property (nonatomic, retain) NSMutableDictionary *ejectCache;
-@property (nonatomic, retain) NSString *ignoredVolumeColumnTitle;
+@property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
+@property (nonatomic, strong) NSMutableDictionary *ejectCache;
+@property (nonatomic, strong) NSString *ignoredVolumeColumnTitle;
 
-@property (nonatomic, assign) IBOutlet NSArrayController *arrayController;
-@property (nonatomic, assign) IBOutlet NSTableView *tableView;
+// strong (not assign): these come from the prefs nib. NSArrayController is a
+// top-level nib object — under ARC it needs a strong outlet to survive past
+// nib load (otherwise it deallocs and the prefs pane crashes).
+@property (nonatomic, strong) IBOutlet NSArrayController *arrayController;
+@property (nonatomic, strong) IBOutlet NSTableView *tableView;
 
 @end
 
@@ -175,19 +146,12 @@
 }
 
 - (void)dealloc {
+	// Keep the non-memory teardown (observer + timers); ARC frees the rest.
 	[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
-	
+
 	[ejectCache enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
 		[[obj objectAtIndex:VolumeEjectCacheTimerIndex] invalidate];
-	}];		
-	
-	[ejectCache release];
-	ejectCache = nil;
-	
-    [_ignoredVolumeColumnTitle release];
-	_ignoredVolumeColumnTitle = nil;
-
-	[super dealloc];
+	}];
 }
 
 - (void) sendMountNotificationForVolume:(VolumeInfo*)volume mounted:(BOOL)mounted {
@@ -297,18 +261,52 @@
 }
 
 -(IBAction)addVolumeEntry:(id)sender {
-   NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-   [self.arrayController addObject:dict];
-   [self.arrayController setSelectedObjects:[NSArray arrayWithObject:dict]];
+   // F15: open a native Finder-style picker rooted at /Volumes instead of adding
+   // an empty editable row. The picked volume name(s) go into the exceptions list
+   // (key "justastring"), which sendMountNotificationForVolume: matches against
+   // both the volume name and path.
+   NSOpenPanel *panel = [NSOpenPanel openPanel];
+   panel.canChooseDirectories    = YES;
+   panel.canChooseFiles          = NO;
+   panel.allowsMultipleSelection = YES;
+   panel.directoryURL = [NSURL fileURLWithPath:@"/Volumes" isDirectory:YES];
+   panel.prompt  = NSLocalizedString(@"Ignore", @"OpenPanel confirm button for choosing drives to ignore");
+   panel.message = NSLocalizedString(@"Choose the drive(s) to ignore", @"OpenPanel message for choosing drives to ignore");
+
+   __weak HWGrowlVolumeMonitor *weakSelf = self;
+   void (^addPicked)(void) = ^{
+      HWGrowlVolumeMonitor *strongSelf = weakSelf;
+      if (!strongSelf) return;
+      NSMutableArray *added = [NSMutableArray array];
+      for (NSURL *url in panel.URLs) {
+         // Prefer the volume's localized name (e.g. "Macintosh HD") — the user
+         // picked the URL via the open-panel powerbox, so reading this resource
+         // value doesn't trigger a TCC prompt. Fall back to the path component.
+         NSString *name = nil;
+         [url getResourceValue:&name forKey:NSURLVolumeLocalizedNameKey error:NULL];
+         if (![name length]) name = [url lastPathComponent];
+         // Skip the resolved boot-volume root ("/") and any empty name.
+         if (![name length] || [name isEqualToString:@"/"]) continue;
+         NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithObject:name forKey:@"justastring"];
+         [strongSelf.arrayController addObject:dict];
+         [added addObject:dict];
+      }
+      if ([added count])
+         [strongSelf.arrayController setSelectedObjects:added];
+   };
+
+   NSWindow *window = [self.tableView window];
+   if (window) {
+      [panel beginSheetModalForWindow:window completionHandler:^(NSModalResponse result){
+         if (result == NSModalResponseOK) addPicked();
+      }];
+   } else {
+      if ([panel runModal] == NSModalResponseOK) addPicked();
+   }
 }
 #pragma mark HWGrowlPluginProtocol
 
--(void)setDelegate:(id<HWGrowlPluginControllerProtocol>)aDelegate{
-	delegate = aDelegate;
-}
--(id<HWGrowlPluginControllerProtocol>)delegate {
-	return delegate;
-}
+// -delegate / -setDelegate: auto-generated from @property (weak) + @synthesize.
 -(NSString*)pluginDisplayName{
 	return NSLocalizedString(@"Volume Monitor", @"");
 }
@@ -316,14 +314,15 @@
 	static NSImage *_icon = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_icon = [[NSImage imageNamed:@"HWGPrefsDrivesVolumes"] retain];
+		_icon = [NSImage imageNamed:@"HWGPrefsDrivesVolumes"];
 	});
 	return _icon;
 }
 -(NSView*)preferencePane {
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		[NSBundle loadNibNamed:@"VolumeMonitorPrefs" owner:self];
+		// The nib lives in THIS plugin's bundle, not the main app bundle.
+		[[NSBundle bundleForClass:[self class]] loadNibNamed:@"VolumeMonitorPrefs" owner:self topLevelObjects:nil];
 	});
 	return prefsView;
 }
@@ -346,15 +345,21 @@
 }
 
 -(void)fireOnLaunchNotes{
-	NSArray *paths = [[NSWorkspace sharedWorkspace] mountedLocalVolumePaths];
+	// mountedLocalVolumePaths was deprecated in 10.11; use the NSFileManager URL API.
+	// options:0 (no SkipHiddenVolumes) to match the old behavior of listing ALL
+	// mounted volumes at launch, including system volumes.
+	NSArray<NSURL*> *urls = [[NSFileManager defaultManager]
+		mountedVolumeURLsIncludingResourceValuesForKeys:nil
+												options:0];
 	__block HWGrowlVolumeMonitor *blockSelf = self;
-	[paths enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-		[blockSelf sendMountNotificationForVolume:[VolumeInfo volumeInfoForMountWithPath:obj] mounted:YES];
+	[urls enumerateObjectsUsingBlock:^(NSURL *url, NSUInteger idx, BOOL *stop) {
+		[blockSelf sendMountNotificationForVolume:[VolumeInfo volumeInfoForMountWithPath:url.path] mounted:YES];
 	}];
 }
 -(void)noteClosed:(NSString*)contextString byClick:(BOOL)clicked {
-	if(clicked)
-		[[NSWorkspace sharedWorkspace] openFile:contextString];
+	// openFile: was deprecated in 11.0; use openURL: with a file URL.
+	if(clicked && contextString)
+		[[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:contextString]];
 }
 
 @end

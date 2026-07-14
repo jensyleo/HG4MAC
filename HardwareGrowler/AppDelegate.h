@@ -7,6 +7,7 @@
 //
 
 #import <Cocoa/Cocoa.h>
+#import <UserNotifications/UserNotifications.h>
 
 @class GrowlOnSwitch, HWGrowlPluginController;
 
@@ -17,74 +18,54 @@ typedef enum : NSInteger {
 	kDontShowIcon = 3
 } HWGrowlIconState;
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate, NSTableViewDelegate, NSWindowDelegate> {
-	NSWindow *_window;
-	NSStatusItem *statusItem;
-	IBOutlet NSMenu *statusMenu;
-	
-	IBOutlet NSPopUpButton *iconPopUp;
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSToolbarDelegate, NSTableViewDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate> {
+	// Only ivars WITHOUT a @property live here; the rest are synthesized with the
+	// correct ARC ownership from the @property declarations below.
+	NSStatusItem *statusItem;          // strong (we create/own it); set to nil to release
+	IBOutlet NSMenu *statusMenu;       // top-level nib object
 	IBOutlet GrowlOnSwitch *onLoginSwitch;
-	
+
 	HWGrowlIconState oldIconValue;
 	BOOL oldOnLoginValue;
-	
-	HWGrowlPluginController *pluginController;
-		
-	NSToolbar *toolbar;
-	NSToolbarItem *generalItem;
-	NSToolbarItem *modulesItem;
-	NSTabView *tabView;
-	NSTableView *tableView;
-	NSTableColumn *moduleColumn;
-	NSView *containerView;
-	NSTextField *noPrefsLabel;
-	NSView *placeholderView;
-	NSView *currentView;
-	
-	NSString *showDevices;
-	NSString *quitTitle;
-	NSString *preferencesTitle;
-	NSString *openPreferencesTitle;
-	NSString *iconTitle;
-	NSString *startAtLoginTitle;
-	NSString *noPluginPrefsTitle;
-	NSString *moduleLabel;
-	
-	NSString *iconInMenu;
-	NSString *iconInDock;
-	NSString *iconInBoth;
-	NSString *noIcon;
-   
-   ProcessSerialNumber previousPSN;
 }
 
-@property (nonatomic, retain) IBOutlet NSString *showDevices;
-@property (nonatomic, retain) IBOutlet NSString *quitTitle;
-@property (nonatomic, retain) IBOutlet NSString *preferencesTitle;
-@property (nonatomic, retain) IBOutlet NSString *openPreferencesTitle;
-@property (nonatomic, retain) IBOutlet NSString *iconTitle;
-@property (nonatomic, retain) IBOutlet NSString *startAtLoginTitle;
-@property (nonatomic, retain) IBOutlet NSString *noPluginPrefsTitle;
-@property (nonatomic, retain) IBOutlet NSString *moduleLabel;
+@property (nonatomic, strong) IBOutlet NSString *showDevices;
+@property (nonatomic, strong) IBOutlet NSString *quitTitle;
+@property (nonatomic, strong) IBOutlet NSString *preferencesTitle;
+@property (nonatomic, strong) IBOutlet NSString *openPreferencesTitle;
+@property (nonatomic, strong) IBOutlet NSString *iconTitle;
+@property (nonatomic, strong) IBOutlet NSString *startAtLoginTitle;
+@property (nonatomic, strong) IBOutlet NSString *noPluginPrefsTitle;
+@property (nonatomic, strong) IBOutlet NSString *moduleLabel;
 
-@property (nonatomic, retain) NSString *iconInMenu;
-@property (nonatomic, retain) NSString *iconInDock;
-@property (nonatomic, retain) NSString *iconInBoth;
-@property (nonatomic, retain) NSString *noIcon;
+@property (nonatomic, strong) NSString *iconInMenu;
+@property (nonatomic, strong) NSString *iconInDock;
+@property (nonatomic, strong) NSString *iconInBoth;
+@property (nonatomic, strong) NSString *noIcon;
 
-@property (assign) IBOutlet NSWindow *window;
-@property (nonatomic, assign) IBOutlet NSPopUpButton *iconPopUp;
-@property (nonatomic, retain) HWGrowlPluginController *pluginController;
+// Views/controls owned by the nib/view hierarchy → weak (was assign).
+// EXCEPTION: window is strong. It's a top-level nib object with visibleAtLaunch=NO,
+// so nothing else reliably keeps it alive before the user opens Preferences. Owning
+// it here guarantees it survives (no cycle: window.delegate is weak; AppDelegate is
+// app-lifetime). This mirrors the placeholderView/prefs-pane top-level-object lesson.
+@property (strong) IBOutlet NSWindow *window;
+@property (nonatomic, weak) IBOutlet NSPopUpButton *iconPopUp;
+@property (nonatomic, strong) HWGrowlPluginController *pluginController;
 
-@property (nonatomic, assign) IBOutlet NSToolbar *toolbar;
-@property (nonatomic, assign) IBOutlet NSToolbarItem *generalItem;
-@property (nonatomic, assign) IBOutlet NSToolbarItem *modulesItem;
-@property (nonatomic, assign) IBOutlet NSTabView *tabView;
-@property (nonatomic, assign) IBOutlet NSTableColumn *moduleColumn;
-@property (nonatomic, assign) IBOutlet NSTableView *tableView;
-@property (nonatomic, assign) IBOutlet NSView *containerView;
-@property (nonatomic, assign) IBOutlet NSTextField *noPrefsLabel;
-@property (nonatomic, retain) IBOutlet NSView *placeholderView;
-@property (nonatomic, assign) IBOutlet NSView *currentView;
+@property (nonatomic, weak) IBOutlet NSToolbar *toolbar;
+@property (nonatomic, weak) IBOutlet NSToolbarItem *generalItem;
+@property (nonatomic, weak) IBOutlet NSToolbarItem *modulesItem;
+@property (nonatomic, weak) IBOutlet NSTabView *tabView;
+@property (nonatomic, weak) IBOutlet NSTableColumn *moduleColumn;
+@property (nonatomic, weak) IBOutlet NSTableView *tableView;
+@property (nonatomic, weak) IBOutlet NSView *containerView;
+@property (nonatomic, weak) IBOutlet NSTextField *noPrefsLabel;
+// strong: placeholderView is removed from its superview when another pane shows,
+// so we must own it or it would dealloc (we add it back later).
+@property (nonatomic, strong) IBOutlet NSView *placeholderView;
+@property (nonatomic, weak) IBOutlet NSView *currentView;
+
+- (void)setStartAtLogin:(BOOL)enabled;
+- (BOOL)isRegisteredAtLogin;
 
 @end

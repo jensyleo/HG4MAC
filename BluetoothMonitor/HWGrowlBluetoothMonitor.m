@@ -6,16 +6,19 @@
 //  Copyright (c) 2012 The Growl Project, LLC. All rights reserved.
 //
 
+// compile with ARC: -fobjc-arc
 #import "HWGrowlBluetoothMonitor.h"
 #import <stdlib.h>
 #import <IOBluetooth/IOBluetooth.h>
 
 @interface HWGrowlBluetoothMonitor ()
 
-@property (nonatomic, assign) id<HWGrowlPluginControllerProtocol> delegate;
+@property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL starting;
 
-@property (nonatomic, assign) IOBluetoothUserNotification *connectionNotification;
+// strong: we keep this object to call -unregister on it later, so the monitor
+// must own it.
+@property (nonatomic, strong) IOBluetoothUserNotification *connectionNotification;
 
 @end
 
@@ -27,41 +30,13 @@
 
 -(void)dealloc {
 	[connectionNotification unregister];
-	connectionNotification = nil;
-	[super dealloc];
+	// ARC handles the release; no [super dealloc].
 }
 
-#ifndef NSFoundationVersionNumber10_7
-#define NSFoundationVersionNumber10_7   833.1
-#endif
-#ifndef NSFoundationVersionNumber10_7_3
-#define NSFoundationVersionNumber10_7_3 833.24
-#endif
 -(id)init {
-	if((BOOL)isgreaterequal(NSFoundationVersionNumber, NSFoundationVersionNumber10_7) &&
-		(BOOL)isless(NSFoundationVersionNumber, NSFoundationVersionNumber10_7_3))
-	{
-		NSLog(@"Bluetooth Module does not work on 10.7-10.7.2, please upgrade to 10.7.3");
-		if(![[NSUserDefaults standardUserDefaults] boolForKey:@"SuppressBluetoothModuleWarn"]){
-			NSAlert *alert = [NSAlert alertWithMessageText:NSLocalizedString(@"Bluetooth Module on OSX Lion requires 10.7.3", @"")
-														defaultButton:NSLocalizedString(@"Ok", @"") 
-													 alternateButton:nil
-														  otherButton:nil
-										informativeTextWithFormat:NSLocalizedString(@"In order to receive notifications about Bluetooth devices on OSX Lion, please upgrade to 10.7.3 or above", @"")];
-			alert.showsSuppressionButton = YES;
-			[[alert suppressionButton] bind:NSValueBinding
-										  toObject:[NSUserDefaultsController sharedUserDefaultsController]
-									  withKeyPath:@"values.SuppressBluetoothModuleWarn"
-											options:nil];
-			[alert runModal];
-		}
-		[self release];
-		return nil;
-	}
-	
-	if((self = [super init])){
-		
-	}
+	// Legacy 10.7-10.7.2 incompatibility check removed: the app's deployment
+	// target is 13.0, so that range is unreachable.
+	self = [super init];
 	return self;
 }
 
@@ -76,8 +51,7 @@
 	NSString *title = connected ? NSLocalizedString(@"Bluetooth Connection", @"") : NSLocalizedString(@"Bluetooth Disconnection", @"");
 	
     NSString *imageName = (connected ? @"Bluetooth-On" : @"Bluetooth-Off");
-    NSString *imagePath = [[NSBundle mainBundle] pathForResource:imageName ofType:@"tif"];
-    NSData *iconData = [NSData dataWithContentsOfFile:imagePath];
+	NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
     
 	[delegate notifyWithName:connected ? @"BluetoothConnected" : @"BluetoothDisconnected"
 							 title:title
@@ -107,12 +81,9 @@
 
 #pragma mark HWGrowlPluginProtocol
 
--(void)setDelegate:(id<HWGrowlPluginControllerProtocol>)aDelegate {
-	delegate = aDelegate;
-}
--(id<HWGrowlPluginControllerProtocol>)delegate {
-	return delegate;
-}
+// -delegate / -setDelegate: are auto-generated from the @property (weak) +
+// @synthesize above (satisfies HWGrowlPluginProtocol). No manual accessors —
+// hand-written ones could silently mask the property's weak qualifier.
 -(NSString*)pluginDisplayName {
 	return NSLocalizedString(@"Bluetooth Monitor", @"");
 }
@@ -120,7 +91,7 @@
 	static NSImage *_icon = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_icon = [[NSImage imageNamed:@"HWGPrefsBluetooth"] retain];
+		_icon = [NSImage imageNamed:@"HWGPrefsBluetooth"];
 	});
 	return _icon;
 }

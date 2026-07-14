@@ -11,10 +11,12 @@
 
 #define GROWL_ACCEPTED "Allowed: " VERSION_NAME_VALUE(accepted_major, accepted_minor, accepted_patchfix)
 #define GROWL_FOUND "Found: " VERSION_NAME_VALUE(__clang_major__, __clang_minor__, __clang_patchlevel__)
-#pragma message("Toolchain mismatch")
-#pragma message(GROWL_ACCEPTED)
-#pragma message(GROWL_FOUND)
+// Obsolete toolchain pin (required clang 4.2.0, Xcode 4 era ~2012). Modern
+// clang builds fine, so these mismatch messages are silenced to remove noise.
+// #pragma message("Toolchain mismatch")
+// #pragma message(GROWL_ACCEPTED)
+// #pragma message(GROWL_FOUND)
 
-#error Growl requires a specific toolchain in order to build. you're more than welcome to comment this out in order to attempt building with the toolchain you have. We don't accept patches against the released versions as they are frozen in time.
+// #error Growl requires a specific toolchain in order to build.
     #endif
 #endif

@@ -9,17 +9,16 @@
 // This file is under the BSD License, refer to License.txt for details
 
 #import <Foundation/Foundation.h>
+#import <UserNotifications/UserNotifications.h>
 #import "GrowlDefinesInternal.h"
 #import "GrowlApplicationBridge.h"
 
 @class GrowlNotificationCenter, GrowlMenu, GrowlFirstLaunchWindowController, GrowlPreferencePane;
 
-#if defined(MAC_OS_X_VERSION_10_8) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
-@interface GrowlApplicationNotificationCenterDelegate : NSObject<NSUserNotificationCenterDelegate> {
+@interface GrowlApplicationNotificationCenterDelegate : NSObject<UNUserNotificationCenterDelegate> {
 }
 
 @end
-#endif
 
 @interface GrowlApplicationController : NSObject<NSApplicationDelegate> {
 	// local GrowlNotificationCenter
@@ -34,9 +33,7 @@
 	
 	GrowlFirstLaunchWindowController *firstLaunchWindow;
 	
-#if defined(MAC_OS_X_VERSION_10_8) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
    GrowlApplicationNotificationCenterDelegate *appleNotificationDelegate;
-#endif
    NSString						*urlOnLaunch;
    
    GrowlPreferencePane		*preferencesWindow;

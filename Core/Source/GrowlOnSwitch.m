@@ -16,8 +16,23 @@
 - (id)initWithFrame:(NSRect)frameRect
 {
    if((self = [super initWithFrame:frameRect])){
-      [self addObserver:self 
-             forKeyPath:@"state" 
+      [self addObserver:self
+             forKeyPath:@"state"
+                options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld
+                context:nil];
+   }
+   return self;
+}
+
+// Loaded from a NIB (as onLoginSwitch is), AppKit calls initWithCoder:, NOT
+// initWithFrame: — so the observer must be registered here too, otherwise the
+// "state" KVO never fires (ON label color never updates) AND dealloc's
+// removeObserver: is unbalanced → exception if this view is ever deallocated.
+- (id)initWithCoder:(NSCoder *)coder
+{
+   if((self = [super initWithCoder:coder])){
+      [self addObserver:self
+             forKeyPath:@"state"
                 options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld
                 context:nil];
    }
@@ -45,7 +60,12 @@
 {
     if([keyPath isEqualToString:@"state"])
     {
-        self.onLabel.textColor = (self.state ? [NSColor blueColor] : [NSColor blackColor]);
+        // labelColor (not blackColor) so the OFF label stays legible in dark mode;
+        // controlAccentColor follows the system accent for the ON state.
+        self.onLabel.textColor = (self.state ? [NSColor controlAccentColor] : [NSColor labelColor]);
+    }
+    else
+    {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
 }

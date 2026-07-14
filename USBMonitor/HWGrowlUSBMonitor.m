@@ -6,22 +6,31 @@
 //  Copyright (c) 2012 The Growl Project, LLC. All rights reserved.
 //
 
+// compile with ARC: -fobjc-arc
 #import "HWGrowlUSBMonitor.h"
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USB.h>
 
+// kIOMainPortDefault is available since macOS 12 (deployment target is 13).
+// (It's a const, not a macro — a #ifndef fallback would wrongly redefine it to
+// the deprecated kIOMasterPortDefault.)
+
 static void usbDeviceAdded(void *refCon, io_iterator_t iterator);
 static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 
 @interface HWGrowlUSBMonitor ()
 
-@property (nonatomic, assign) id<HWGrowlPluginControllerProtocol> delegate;
+@property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL notificationsArePrimed;
 
+// C / Core Foundation pointers — ARC does NOT manage these; keep assign.
 @property (nonatomic, assign) IONotificationPortRef ioKitNotificationPort;
 @property (nonatomic, assign)	CFRunLoopSourceRef notificationRunLoopSource;
+// Persistent IOKit notification iterators — must be IOObjectRelease'd in dealloc.
+@property (nonatomic, assign) io_iterator_t addedIterator;
+@property (nonatomic, assign) io_iterator_t removedIterator;
 
 @end
 
@@ -31,23 +40,27 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 @synthesize notificationsArePrimed;
 @synthesize ioKitNotificationPort;
 @synthesize notificationRunLoopSource;
+@synthesize addedIterator;
+@synthesize removedIterator;
 
 -(void)dealloc {
+	// Keep the CF/IOKit teardown; ARC handles ObjC memory. No [super dealloc].
+	if (addedIterator)   { IOObjectRelease(addedIterator);   addedIterator = 0; }
+	if (removedIterator) { IOObjectRelease(removedIterator); removedIterator = 0; }
 	if (self.ioKitNotificationPort) {
-		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), self.notificationRunLoopSource, kCFRunLoopDefaultMode);
+		CFRunLoopRemoveSource(CFRunLoopGetMain(), self.notificationRunLoopSource, kCFRunLoopDefaultMode);
 		IONotificationPortDestroy(self.ioKitNotificationPort);
 	}
-	[super dealloc];
 }
 
 -(id)init {
 	if((self = [super init])){
 		self.notificationsArePrimed = NO;
 
-		self.ioKitNotificationPort = IONotificationPortCreate(kIOMasterPortDefault);
+		self.ioKitNotificationPort = IONotificationPortCreate(kIOMainPortDefault);
 		self.notificationRunLoopSource = IONotificationPortGetRunLoopSource(ioKitNotificationPort);
-		
-		CFRunLoopAddSource(CFRunLoopGetCurrent(),
+
+		CFRunLoopAddSource(CFRunLoopGetMain(),
 								 notificationRunLoopSource,
 								 kCFRunLoopDefaultMode);
 	}
@@ -62,9 +75,8 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 	//http://developer.apple.com/documentation/DeviceDrivers/Conceptual/AccessingHardware/AH_Finding_Devices/chapter_4_section_2.html#//apple_ref/doc/uid/TP30000379/BABEACCJ
 	kern_return_t	matchingResult;
 	kern_return_t	removeNoteResult;
-	io_iterator_t	addedIterator;
-	io_iterator_t	removedIterator;
-	
+	// addedIterator / removedIterator are now ivars (released in dealloc).
+
 	//	NSLog(@"registerForUSBNotifications");
 	
 	//	Setup a matching Dictionary.
@@ -76,7 +88,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 																	  kIOFirstPublishNotification,
 																	  myMatchDictionary,
 																	  usbDeviceAdded,
-																	  self,
+																	  (__bridge void *)self,
 																	  &addedIterator);
 	
 	if (matchingResult)
@@ -93,29 +105,31 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 																		 kIOTerminatedNotification,
 																		 myMatchDictionary,
 																		 usbDeviceRemoved,
-																		 self,
+																		 (__bridge void *)self,
 																		 &removedIterator);
 	
 	// Matching notification must be "primed" by iterating over the
 	// iterator returned from IOServiceAddMatchingNotification(), so
 	// we call our device removed method here...
 	//
-	if (kIOReturnSuccess != removeNoteResult)
+	if (kIOReturnSuccess != removeNoteResult) {
 		NSLog(@"Couldn't add device removal notification");
-	else
+	} else {
+		// Prime the removal iterator exactly once. (The old code drained it
+		// twice — once here and again via usbDeviceRemoved(NULL, …) which ran
+		// unconditionally due to a missing-braces bug — leaving the removal
+		// notification mis-primed.)
 		[self usbDeviceRemoved:removedIterator];
-		usbDeviceRemoved(NULL, removedIterator);
-	
+	}
+
 	self.notificationsArePrimed = YES;
 }
 
 -(void)usbDeviceID:(uint64_t)deviceID name:(NSString*)deviceName added:(BOOL)added {
 	NSString *title = added ? NSLocalizedString(@"USB Connection", @"") : NSLocalizedString(@"USB Disconnection", @"");
 	
-    NSData *iconData = nil;
     NSString *imageName = added ? @"USB-On" : @"USB-Off";
-    NSString *imagePath = [[NSBundle mainBundle] pathForResource:imageName ofType:@"tif"];
-    iconData = [NSData dataWithContentsOfFile:imagePath];
+    NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
 	[delegate notifyWithName:added ? @"USBConnected" : @"USBDisconnected"
 							 title:title
 					 description:deviceName
@@ -161,7 +175,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 }
 
 static void usbDeviceAdded(void *refCon, io_iterator_t iterator) {
-	HWGrowlUSBMonitor *monitor = (HWGrowlUSBMonitor*)refCon;
+	HWGrowlUSBMonitor *monitor = (__bridge HWGrowlUSBMonitor*)refCon;
 	[monitor usbDeviceAdded:iterator];
 }
 
@@ -199,7 +213,7 @@ static void usbDeviceAdded(void *refCon, io_iterator_t iterator) {
 }
 
 static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
-	HWGrowlUSBMonitor *monitor = (HWGrowlUSBMonitor*)refCon;
+	HWGrowlUSBMonitor *monitor = (__bridge HWGrowlUSBMonitor*)refCon;
 	[monitor usbDeviceRemoved:iterator];
 }
 
@@ -219,12 +233,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 
 #pragma mark HWGrowlPluginProtocol
 
--(void)setDelegate:(id<HWGrowlPluginControllerProtocol>)aDelegate{
-	delegate = aDelegate;
-}
--(id<HWGrowlPluginControllerProtocol>)delegate {
-	return delegate;
-}
+// delegate accessors are auto-synthesized from the @property (weak).
 -(NSString*)pluginDisplayName {
 	return NSLocalizedString(@"USB Monitor", @"");
 }
@@ -232,7 +241,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	static NSImage *_icon = nil;
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_icon = [[NSImage imageNamed:@"HWGPrefsUSB"] retain];
+		_icon = [NSImage imageNamed:@"HWGPrefsUSB"];
 	});
 	return _icon;
 }
