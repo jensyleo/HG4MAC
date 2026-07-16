@@ -39,14 +39,15 @@ Apple Silicon**, starting from the upstream linked above.
   | **Volume** | mount / unmount (with a Finder "click to open"), ignore-list picker |
   | **USB** | device connect / disconnect |
   | **Thunderbolt** | device connect / disconnect |
-  | **Network** | Wi-Fi connect/disconnect (SSID + BSSID via CoreWLAN, signal-strength icon, reported at launch too), Ethernet/interface link up/down + media speed, IPv4/IPv6 + CIDR + gateway |
+  | **Network** | Wi-Fi connect/disconnect (SSID + BSSID via CoreWLAN, signal-strength icon, reported at launch too), Ethernet/interface link up/down + media speed/duplex, IPv4/IPv6 + CIDR + gateway |
   | **Bluetooth** | device connect / disconnect |
   | **Power** | AC/battery transitions, a battery-level icon ramp (0–100), a charging-level ramp, time remaining / time-to-charge, periodic status refire, low-battery warning (announces "fully charged" once, no repeats) |
 - **Duplicate suppression** and **"unstable device"** detection (flags a device that
   rapidly connects/disconnects).
-- **Modern macOS integration**: "Start at Login" via `SMAppService`, menu-bar item via
-  `NSStatusItem.button` (template image), show-in-menu/dock/both/none, and a **clean
-  Uninstall** that leaves no orphan files.
+- **Modern macOS integration**: "Start at Login" via `SMAppService`, a custom-drawn
+  colored menu-bar icon (`NSStatusItem.button`, not a template image — it keeps its own
+  color and swaps light/dark variants with the menu bar's appearance), show-in-menu/dock/both/none,
+  and a **clean Uninstall** that leaves no orphan files.
 
 ## What's modernized in this fork
 
@@ -67,8 +68,7 @@ Apple Silicon**, starting from the upstream linked above.
 - **Reliability fixes** from a full static-analysis + review pass (clang analyzer clean):
   corrected IOKit name/iterator handling, thread-safety of CoreWLAN callbacks, power
   capacity guards, KVO balance, and more — see [`CHANGELOG.md`](CHANGELOG.md).
-- Build warnings reduced from 44 to 1 (the remaining one is the ad-hoc launcher
-  code-signing notice — expected without a Developer ID).
+- Build warnings reduced from 44 to **0**.
 
 See **[`CHANGELOG.md`](CHANGELOG.md)** for the full, itemized list of modernization work.
 
@@ -96,6 +96,18 @@ open /Applications/HG4MAC.app
 > You can also open `HardwareGrowler.xcodeproj` in Xcode and build the `HardwareGrowler`
 > scheme. The app and its monitor plugins are bundled together; HardwareGrowler is one
 > target within the larger Growl source tree this repo descends from.
+
+## Known limitations
+
+- **Ethernet duplex reporting can mismatch a switch's own view.** The app reads the link
+  speed/duplex via the standard `SIOCGIFMEDIA` ioctl — the same data source `ifconfig`
+  uses. On at least one tested setup (a managed/enterprise switch port forced to
+  half-duplex), both this app **and** `ifconfig` reported "full-duplex" while the switch's
+  own management console reported half-duplex. This is a mismatch between the actual PHY
+  negotiation and what the network adapter's macOS driver surfaces to the OS — outside
+  what any app can read via public APIs. Needs testing across more adapters/switches to
+  tell whether it's specific to one driver/chipset or more general; treat reported duplex
+  as informational, not authoritative, until then.
 
 ## Permissions
 

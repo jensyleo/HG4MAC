@@ -6,6 +6,139 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## Modernization (2026)
 
+### New: Wi-Fi band, generation, and security in the connect notice (Jul 2026)
+- "AirPort Connected" now also shows the channel band (2.4/5/6 GHz), the Wi-Fi generation
+  (Wi-Fi 4/5/6/6E/7, derived from the active 802.11 PHY mode — 6GHz-band 802.11ax is
+  labeled "Wi-Fi 6E" per the consumer naming, not plain "Wi-Fi 6"), and the network's
+  security type (Open, WEP, WPA/WPA2/WPA3 Personal or Enterprise, OWE) via CoreWLAN
+  (`CWInterface.wlanChannel`/`activePHYMode`/`security`) — none of which require Location
+  permission (unlike SSID/BSSID). Configurable: a new checkbox in Preferences → Modules →
+  Network Monitor ("Show band, generation, and security in the Wi-Fi connect notice"),
+  on by default.
+
+### Fixed: Ethernet link detection reverted from NWPathMonitor back to raw link state (Jul 2026)
+- A recent "proactive modernization" had switched wired-link detection from the legacy
+  `SCDynamicStore` `.../Link` key to `NWPathMonitor`. This introduced real regressions:
+  an interface with a cable plugged in but no DHCP-assigned IP never reported "Network
+  Link Up" at all (NWPathMonitor only lists an interface once it has a usable network
+  path — not just carrier/link), and even with a static IP, reporting could lag by many
+  minutes waiting for the path to be judged "satisfied" — vs. instant reporting in System
+  Settings, which reads the raw link state directly. Reverted: wired Link Up/Down is now
+  detected via the same raw `.../Link` `SCDynamicStore` key (watched via a pattern across
+  every interface, not a fixed literal key), independent of DHCP/IP/routing — confirmed
+  by log to fire instantly in both the no-DHCP and reconnect scenarios that previously
+  failed or lagged. `NWPathMonitor`/`Network.framework` usage and its now-unused framework
+  reference were removed from the project entirely.
+- Watching every interface's link key also picked up `en0` (WiFi on Apple Silicon — already
+  reported separately via "AirPort Connected") and `awdl0` (AWDL, used by AirDrop/Handoff/
+  Continuity — flaps constantly in the background). Filtered to interfaces `SCNetworkInterface`
+  itself classifies as Ethernet (the same registry System Settings' Network pane reads),
+  which correctly includes USB/Thunderbolt-Ethernet adapters without hardcoding interface
+  name prefixes.
+- **Investigated but NOT a bug**: a report that the app never distinguishes full- vs.
+  half-duplex, and always reports "full-duplex" even when a switch is known to force
+  half-duplex. Confirmed via raw `ifconfig <if> | grep media` (the same OS-level data our
+  code reads via `SIOCGIFMEDIA`, no app code involved) that **macOS itself** also reports
+  "full-duplex" in this situation, while the switch's own management console reported
+  half-duplex — a mismatch between the actual PHY negotiation and what the network
+  adapter's driver surfaces to the OS, outside this app's reach. The app's duplex-reading
+  code is confirmed correct (matches `ifconfig` exactly); this needs testing across other
+  adapters/switches to see if it's specific to one driver/chipset.
+
+### Improved: "Disk Not Readable" now distinguishes device-level vs. partition-level failure (Jul 2026)
+- Previously the notice always quoted the first unreadable PARTITION's own name (e.g.
+  "android_meta could not be read"), which read as if that partition name WAS the device —
+  confusing on multi-partition cards where some partitions mount fine and others (like an
+  Android card's internal `android_meta`/`android_expand`) never do. Now `VolumeMonitor`
+  waits a 2s settle window after the first unreadable partition on a card before firing the
+  notice, during which it also cross-references any sibling partition that mounts
+  successfully (via the mounted volume's BSD device node) against the same physical-card
+  grouping used for the "one notice per card" behavior. Two distinct messages result:
+  nothing on the card readable at all → names the DEVICE ("Generic MassStorageClass Media
+  could not be read..."); some partitions mounted fine, this one didn't → names it as part of
+  the device ("Part of this device (android_meta) could not be read..."). Still one notice
+  per physical card. Confirmed working: the normal "Volume Mounted" notice for the readable
+  partition(s) now visibly arrives before the "Disk Not Readable" one for the same card.
+
+### New: "Disk Not Readable" notification (Jul 2026)
+- The Volume monitor previously relied only on `NSWorkspaceDidMountNotification`, which
+  only fires once a filesystem successfully mounts — media inserted into an already-present
+  reader/dock (e.g. a microSD card) that can't be mounted (unformatted, corrupt, or an
+  unsupported filesystem) was completely invisible: no connection and no "not readable"
+  notice. Added a **DiskArbitration** session (new framework link on the Volume monitor
+  target) that detects media at the disk/physical level, independent of mounting. When a
+  disk (or a totally blank/unpartitioned one, after a short grace period) never gets a
+  recognized filesystem, it now sends a **"Disk Not Readable"** notice. A normal card that
+  mounts successfully is untouched — the existing mount flow still handles it as before, so
+  there's no duplicate notice. Bounce detection works here too (keyed by the media's name,
+  which stays stable across reconnects — unlike its BSD device node, which gets a fresh
+  number every time).
+- **Multiple unreadable partitions on one physical card collapse into a single notice.**
+  A card with several unrecognized partitions (e.g. an Android device's internal
+  `android_meta`/`android_expand` partitions) previously fired one "Disk Not Readable"
+  notice per partition. Now they group by the physical disk (its own media identity via
+  `DADiskCopyWholeDisk`), so removing/reinserting the SAME card is still detected correctly
+  while multiple partitions on one insertion only ever produce one notice.
+- **Fixed: repeated remove/reinsert cycles of the same unreadable card stopped notifying
+  after the first time.** The "already reported" state for a physical card was being reset
+  by re-reading `kDADiskDescriptionMediaWholeKey` from a freshly-copied disk description at
+  disappearance time — unreliable for a vanishing disk, so the reset silently never
+  happened after the first cycle, permanently suppressing that card. Replaced with
+  bookkeeping populated once, reliably, at appearance time (a BSD-device-node → physical-card
+  group map), consulted via the lightweight `DADiskGetBSDName` accessor at disappearance
+  time instead of re-deriving group identity from a possibly-stale description. Confirmed
+  working across multiple consecutive remove/reinsert cycles.
+- **New dedicated icon for "Disk Not Readable"**: previously reused the generic
+  "Device-Unstable" (yellow warning triangle) icon, the same one used for the "Unstable
+  device" bounce alert — the two looked identical, making it hard to tell them apart at a
+  glance. Added a new `Device-Critical` icon (red rounded-triangle badge, hazard/radioactive
+  glyph, 1024×1024, transparent background) reserved for genuinely unreadable/failed media
+  and future catastrophic-failure notices; `reportUnreadableForGroup:partitionName:` in
+  `VolumeMonitor/HWGrowlVolumeMonitor.m` now uses it. The bounce/"Unstable device" alert in
+  `HWGrowlPluginController.m` is untouched and keeps the original yellow warning triangle.
+
+### Bounce detection audited across all monitors (Jul 2026)
+- Audited every monitor's bounce/dedup identifier for stability across reconnects (after
+  fixing the USB one — see above): Bluetooth, Volume, Thunderbolt, and Network already used
+  stable identifiers (device name, volume path, or a fixed per-notification-type string) and
+  were confirmed working. Added friendly "Unstable device" labels for the remaining
+  internal identifiers so the alert always reads naturally: Wi-Fi, Wi-Fi Signal, and Power
+  (previously these would have shown raw internal strings like "PowerChange" if they ever
+  bounced).
+
+### Fixed: "unstable device" bounce detection never fired for USB (Jul 2026)
+- USB connect/disconnect notifications were identified by the IOKit registry entry ID
+  (`IORegistryEntryGetRegistryEntryID`) — a fresh, ephemeral kernel object ID assigned on
+  every single enumeration, never the same across reconnects of the same physical device.
+  Since bounce detection keys off this identifier, a rapidly bouncing USB device or hub
+  never crossed the threshold — it always looked like a different device each time, so
+  "Unstable device" never fired for USB. Fixed by using the device **name** as the
+  identifier instead (matches Bluetooth, Volume, and Thunderbolt, which already did this
+  correctly).
+
+### Per-interface gateway reporting (Jul 2026)
+- "IP Addresses Updated" previously showed a single Gateway line taken from the system's
+  one primary/default-route interface (`State:/Network/Global/IPv4(6)`) — with multiple
+  active interfaces on **different subnets** (e.g. Wi-Fi + a USB-Ethernet dock), the
+  secondary interface's gateway was silently dropped. Now each interface's own gateway is
+  read from its live service state (`State:/Network/Service/<uuid>/IPv4(6)`, keyed by
+  `InterfaceName`) and shown right under that interface's IP line — every interface that
+  reports an IP now also reports its own Gateway.
+
+### Network Link Up notification: split Speed / Mode (Jul 2026)
+- The "Network Link Up" notification previously showed one combined line —
+  `Media: 1000baseT <full-duplex>`. It's now split into two clearly labeled lines:
+  `Speed: 1000baseT` and `Mode: full-duplex` (the Mode line only appears when the
+  interface reports duplex/other shared media options).
+
+### USB hub/dock detection (Jul 2026)
+- The USB monitor now identifies **hubs and multiport docks** specifically: it reads the
+  connected device's USB device class (`bDeviceClass`, standard USB-IF code `9` = Hub) and,
+  when it matches, shows **"USB Hub/Dock Connection"** / **"...Disconnection"** instead of
+  the generic "USB Connection" title. Useful for USB-C docks/hubs, which previously only
+  showed as their individual sub-devices (e.g. "4-Port USB 3.0 Hub", an Ethernet adapter, a
+  card reader) with no indication that a hub/dock itself was plugged in.
+
 ### English-only, no unused localizations (Jul 2026)
 - Removed 26 unused, unmaintained locale folders (`es`, `es-MX`, `fr`, `de`, `zh-Hans`,
   `zh-Hant`, `ja`, `ru`, etc.) inherited from Growl — the app only ships **English**
