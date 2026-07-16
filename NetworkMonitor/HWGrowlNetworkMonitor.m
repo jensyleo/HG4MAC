@@ -12,7 +12,6 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <CoreWLAN/CoreWLAN.h>
 #import <CoreLocation/CoreLocation.h>
-#import <Network/Network.h>
 
 #include <sys/socket.h>
 #include <sys/sockio.h>
@@ -32,6 +31,9 @@
 #define HWG_WIFI_POLL_DEFAULT 12.0
 #define HWG_WIFI_POLL_MIN     5.0
 #define HWG_WIFI_POLL_MAX     60.0
+
+// F32: user-configurable — include band/generation/security in the WiFi connect notice.
+#define HWG_WIFI_EXTRA_INFO_KEY @"HWGWifiShowExtraInfo"
 
 static struct ifmedia_description ifm_subtype_ethernet_descriptions[] = IFM_SUBTYPE_ETHERNET_DESCRIPTIONS;
 static struct ifmedia_description ifm_shared_option_descriptions[] = IFM_SHARED_OPTION_DESCRIPTIONS;
@@ -84,12 +86,14 @@ typedef enum {
 @property (nonatomic, strong) NSMutableDictionary *networkInterfaceStates;
 @property (nonatomic, strong) NSString *previousIPCombined;
 
-// F20/P10: Ethernet (wired) link up/down is detected via NWPathMonitor (modern
-// Network.framework) instead of the legacy SCDynamicStore Link keys. SCDynamicStore is
-// still used for IP addresses / gateway.
-@property (nonatomic, strong) nw_path_monitor_t pathMonitor;
-@property (nonatomic, strong) NSMutableSet *trackedWiredInterfaces;
-@property (nonatomic, assign) BOOL nwPathPrimed;
+// P10 (reverted 16-jul-2026): Ethernet (wired) link up/down was briefly detected via
+// NWPathMonitor, but that only reports an interface once it has a USABLE network path
+// (an IP + working route) — an interface with link but no DHCP-assigned IP (or one with a
+// slow-to-settle static IP) never appeared at all, or appeared very late. Back to watching
+// the RAW physical-link SCDynamicStore key (".../Link"), which reflects carrier/link state
+// alone, independent of DHCP/IP — the same signal System Settings uses, and the same one
+// already confirmed firing correctly on this exact machine (see iPhone USB test, 30-jun-2026,
+// before this ever became NWPathMonitor). SCDynamicStore is also still used for IP/gateway.
 
 // Remembers, per interface, whether it had recognized Ethernet media when it came up,
 // so the Link-Down notification uses the same icon family as the Link-Up (the media is
@@ -124,9 +128,6 @@ typedef enum {
 @synthesize networkInterfaceStates;
 @synthesize previousIPCombined;
 @synthesize interfaceIsEthernet;
-@synthesize pathMonitor;
-@synthesize trackedWiredInterfaces;
-@synthesize nwPathPrimed;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
 @synthesize lastReportedWifiBars;
@@ -141,7 +142,6 @@ typedef enum {
 		self.previousIPCombined = nil;
 		self.networkInterfaceStates = [NSMutableDictionary dictionary];
 		self.interfaceIsEthernet = [NSMutableDictionary dictionary];
-		self.trackedWiredInterfaces = [NSMutableSet set];
 		self.lastReportedWifiBars = -1;
 
 		[self startObserving];
@@ -178,7 +178,6 @@ typedef enum {
 	// CF teardown, stop CoreWLAN monitoring, drop delegates).
 	[NSObject cancelPreviousPerformRequestsWithTarget:self];
 	[signalPollTimer invalidate];
-	if (pathMonitor) nw_path_monitor_cancel(pathMonitor);
 
 	if (rlSrc)
 		CFRunLoopRemoveSource(CFRunLoopGetMain(), rlSrc, kCFRunLoopDefaultMode);
@@ -433,76 +432,104 @@ typedef enum {
 -(void)startObserving
 {
    [self setupDynamicStore];
-	
+
     // AirPort key removed — WiFi events are now handled by CoreWLAN
     // (CWWiFiClient). Keeping it would fire duplicate disconnect notifications.
-    // Wired/Ethernet link up/down is now detected via NWPathMonitor; SCDynamicStore only
-    // watches the IP keys (the legacy ".../Link" key is no longer needed here).
+    // Wired/Ethernet link up/down: watch EVERY interface's own ".../Link" key via a
+    // pattern (not a literal key, since we don't know interface names up front) — this is
+    // the raw physical-link/carrier state, independent of DHCP/IP (see property comment
+    // above for why NWPathMonitor was reverted).
     NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", nil];
+    NSArray *watchedPatterns = [NSArray arrayWithObject:@"State:/Network/Interface/[^/]+/Link"];
 	if (!SCDynamicStoreSetNotificationKeys(dynStore,
-                                          NULL,
-                                          (__bridge CFArrayRef)watchedKeys))
+                                          (__bridge CFArrayRef)watchedKeys,
+                                          (__bridge CFArrayRef)watchedPatterns))
    {
 		NSLog(@"SCDynamicStoreSetNotificationKeys() failed: %s", SCErrorString(SCError()));
 		CFRelease(dynStore);
 		dynStore = NULL;
 	}
 
-	[self startWiredPathMonitor];
+	[self primeWiredLinkState];
 }
 
-// P10: modern replacement for the legacy SCDynamicStore ".../Link" watching. NWPathMonitor
-// reports the set of available WIRED interfaces; we diff it across updates to detect
-// Ethernet/USB-ethernet link up (interface appears) and down (interface disappears), then
-// feed the existing updateInterface: flow (which keeps the media/icon logic + notifications).
--(void)startWiredPathMonitor {
-	self.pathMonitor = nw_path_monitor_create_with_type(nw_interface_type_wired);
-	nw_path_monitor_set_queue(pathMonitor, dispatch_get_main_queue());
-	__weak HWGrowlNetworkMonitor *weakSelf = self;
-	nw_path_monitor_set_update_handler(pathMonitor, ^(nw_path_t path) {
-		[weakSelf handleWiredPath:path];
-	});
-	nw_path_monitor_start(pathMonitor);
+// Extracts the BSD interface name (e.g. "en0") from a "State:/Network/Interface/<bsd>/Link" key.
+-(NSString *)bsdNameFromLinkKey:(NSString *)key {
+	NSArray *parts = [key componentsSeparatedByString:@"/"];
+	if ([parts count] < 2) return nil;
+	return parts[[parts count] - 2];
 }
 
--(void)handleWiredPath:(nw_path_t)path {
-	NSMutableSet *now = [NSMutableSet set];
-	nw_path_enumerate_interfaces(path, ^bool(nw_interface_t iface) {
-		if (nw_interface_get_type(iface) == nw_interface_type_wired) {
-			const char *n = nw_interface_get_name(iface);
-			if (n) [now addObject:[NSString stringWithUTF8String:n]];
-		}
-		return true;
-	});
+// Reads the raw link-active bit for one interface's ".../Link" key. This reflects
+// carrier/link presence alone — no IP, no DHCP, no route involved.
+-(BOOL)readLinkActiveForKey:(NSString *)key {
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)key);
+	if (!d) return NO;
+	NSDictionary *dict = (__bridge_transfer NSDictionary *)d;
+	return [dict[(__bridge NSString *)kSCPropNetLinkActive] boolValue];
+}
 
-	if (!nwPathPrimed) {
-		// First update = current state at launch. Report existing wired links only if
-		// "show existing" is enabled; otherwise seed the state silently so a later real
-		// change still fires correctly.
-		self.nwPathPrimed = YES;
-		BOOL announce = [delegate onLaunchEnabled];
-		for (NSString *ifname in now) {
-			if (announce) {
-				[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @1}];
-			} else {
-				HWGrowlNetworkInterfaceStatus *st = [[HWGrowlNetworkInterfaceStatus alloc]
-					initForInterface:ifname ofType:HWGEthernetInterface withStatus:@{@"Active": @1}];
-				[networkInterfaceStates setObject:st forKey:ifname];
+// Watching EVERY interface's ".../Link" key (needed to fix the DHCP/static-IP bugs above)
+// picks up more than physical Ethernet: en0 is WiFi on Apple Silicon Macs (already reported
+// separately via CoreWLAN/"AirPort Connected") and awdl0 is AWDL (Apple Wireless Direct
+// Link — AirDrop/Handoff/Continuity), which flaps constantly in the background and isn't a
+// cable a user connected. Filter to interfaces SCNetworkInterface itself classifies as
+// Ethernet — this is the same registry System Settings' Network pane reads, so it correctly
+// includes USB/Thunderbolt-Ethernet adapters (which register as Ethernet-type) without
+// hardcoding interface-name prefixes.
+// PENDING (F35, not yet implemented): make this filter itself configurable from
+// Preferences → Modules → Network Monitor (e.g. a toggle to also show WiFi's own/AWDL link
+// events for advanced users) — for now it's hardcoded to "real Ethernet only".
+-(BOOL)isWiredEthernetInterface:(NSString *)bsdName {
+	BOOL isEthernet = NO;
+	CFArrayRef ifaces = SCNetworkInterfaceCopyAll();
+	if (ifaces) {
+		for (CFIndex i = 0; i < CFArrayGetCount(ifaces); i++) {
+			SCNetworkInterfaceRef iface = (SCNetworkInterfaceRef)CFArrayGetValueAtIndex(ifaces, i);
+			NSString *bsd = (__bridge NSString *)SCNetworkInterfaceGetBSDName(iface);
+			if (bsd && [bsd isEqualToString:bsdName]) {
+				NSString *type = (__bridge NSString *)SCNetworkInterfaceGetInterfaceType(iface);
+				isEthernet = [type isEqualToString:(__bridge NSString *)kSCNetworkInterfaceTypeEthernet];
+				break;
 			}
 		}
-		[trackedWiredInterfaces setSet:now];
-		return;
+		CFRelease(ifaces);
 	}
+	return isEthernet;
+}
 
-	NSMutableSet *added = [now mutableCopy];
-	[added minusSet:trackedWiredInterfaces];
-	NSMutableSet *removed = [trackedWiredInterfaces mutableCopy];
-	[removed minusSet:now];
-	for (NSString *ifname in added)
-		[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @1}];
-	for (NSString *ifname in removed)
-		[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @0}];
-	[trackedWiredInterfaces setSet:now];
+// At launch: read the CURRENT raw link state of every WIRED ETHERNET interface (by listing
+// all existing ".../Link" keys and filtering out WiFi/AWDL/other virtual ones), and report
+// the ones already up — mirrors what fireOnLaunchNotes does for IP/WiFi. Gated by
+// onLaunchEnabled, same as before.
+-(void)primeWiredLinkState {
+	CFArrayRef keys = SCDynamicStoreCopyKeyList(dynStore, CFSTR("State:/Network/Interface/[^/]+/Link"));
+	if (!keys) return;
+	BOOL announce = [delegate onLaunchEnabled];
+	CFIndex count = CFArrayGetCount(keys);
+	for (CFIndex i = 0; i < count; i++) {
+		NSString *key = (__bridge NSString *)CFArrayGetValueAtIndex(keys, i);
+		NSString *ifname = [self bsdNameFromLinkKey:key];
+		if (!ifname || ![self isWiredEthernetInterface:ifname] || ![self readLinkActiveForKey:key]) continue;
+		if (announce) {
+			[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @1}];
+		} else {
+			HWGrowlNetworkInterfaceStatus *st = [[HWGrowlNetworkInterfaceStatus alloc]
+				initForInterface:ifname ofType:HWGEthernetInterface withStatus:@{@"Active": @1}];
+			[networkInterfaceStates setObject:st forKey:ifname];
+		}
+	}
+	CFRelease(keys);
+}
+
+// Fired by scCallback for a changed ".../Link" key: ignore anything that isn't a real wired
+// Ethernet interface (see isWiredEthernetInterface: above), then feed the existing
+// updateInterface: flow (dedup against the previous state happens there).
+-(void)handleLinkKeyChanged:(NSString *)key {
+	NSString *ifname = [self bsdNameFromLinkKey:key];
+	if (!ifname || ![self isWiredEthernetInterface:ifname]) return;
+	BOOL active = [self readLinkActiveForKey:key];
+	[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @(active)}];
 }
 
 -(void)updateInterface:(NSString*)interface forType:(NetworkInterfaceType)type withStatus:(NSDictionary*)status {
@@ -590,6 +617,82 @@ typedef enum {
 	return [NSString stringWithFormat:@"Network-Wifi-%ld", (long)[self wifiBarsForRSSI:rssi]];
 }
 
+// F32: whether to include band/generation/security in the WiFi connect notice.
+// Configurable in Preferences → Modules → Network Monitor; default ON.
+-(BOOL)wifiShowExtraInfo {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_WIFI_EXTRA_INFO_KEY];
+	return stored ? [stored boolValue] : YES;
+}
+
+// "2.4 GHz" / "5 GHz" / "6 GHz". None of channelBand/activePHYMode/security require
+// Location permission (unlike ssid/bssid) — they describe the RADIO/PROTOCOL, not the
+// network's identity.
+-(NSString*)wifiBandStringForChannel:(CWChannel*)channel {
+	switch ([channel channelBand]) {
+		case kCWChannelBand2GHz: return NSLocalizedString(@"2.4 GHz", @"");
+		case kCWChannelBand5GHz: return NSLocalizedString(@"5 GHz", @"");
+		case kCWChannelBand6GHz: return NSLocalizedString(@"6 GHz", @"");
+		default:                 return NSLocalizedString(@"Unknown", @"");
+	}
+}
+
+// Maps the 802.11 PHY mode to the consumer "Wi-Fi N" generation name most people
+// recognize. 6GHz-band 802.11ax is marketed as "Wi-Fi 6E" rather than plain "Wi-Fi 6".
+-(NSString*)wifiGenerationStringForPHYMode:(CWPHYMode)mode band:(CWChannelBand)band {
+	switch (mode) {
+		case kCWPHYMode11be: return NSLocalizedString(@"Wi-Fi 7", @"");
+		case kCWPHYMode11ax: return (band == kCWChannelBand6GHz)
+			? NSLocalizedString(@"Wi-Fi 6E", @"")
+			: NSLocalizedString(@"Wi-Fi 6", @"");
+		case kCWPHYMode11ac: return NSLocalizedString(@"Wi-Fi 5", @"");
+		case kCWPHYMode11n:  return NSLocalizedString(@"Wi-Fi 4", @"");
+		case kCWPHYMode11a:
+		case kCWPHYMode11b:
+		case kCWPHYMode11g:  return NSLocalizedString(@"Legacy 802.11", @"");
+		default:             return NSLocalizedString(@"Unknown", @"");
+	}
+}
+
+-(NSString*)wifiSecurityStringForSecurity:(CWSecurity)security {
+	switch (security) {
+		case kCWSecurityNone:               return NSLocalizedString(@"Open (no security)", @"");
+		case kCWSecurityWEP:
+		case kCWSecurityDynamicWEP:          return @"WEP";
+		case kCWSecurityWPAPersonal:
+		case kCWSecurityWPAPersonalMixed:    return @"WPA Personal";
+		case kCWSecurityWPA2Personal:
+		case kCWSecurityPersonal:            return @"WPA2 Personal";
+		case kCWSecurityWPA3Personal:        return @"WPA3 Personal";
+		case kCWSecurityWPA3Transition:      return @"WPA2/WPA3 Personal";
+		case kCWSecurityWPAEnterprise:
+		case kCWSecurityWPAEnterpriseMixed:  return @"WPA Enterprise";
+		case kCWSecurityWPA2Enterprise:
+		case kCWSecurityEnterprise:          return @"WPA2 Enterprise";
+		case kCWSecurityWPA3Enterprise:      return @"WPA3 Enterprise";
+		case kCWSecurityOWE:
+		case kCWSecurityOWETransition:       return NSLocalizedString(@"Enhanced Open (OWE)", @"");
+		default:                             return NSLocalizedString(@"Unknown", @"");
+	}
+}
+
+// Builds the extra "Band:/Wi-Fi:/Security:" lines for the current connection, or nil if
+// the feature is disabled or the interface isn't associated.
+-(NSString*)wifiExtraInfoLines {
+	if (![self wifiShowExtraInfo]) return nil;
+	CWInterface *iface = [self.wifiClient interface];
+	if (!iface) return nil;
+	CWChannel *channel = [iface wlanChannel];
+	if (!channel) return nil;
+
+	NSString *band = [self wifiBandStringForChannel:channel];
+	NSString *gen  = [self wifiGenerationStringForPHYMode:[iface activePHYMode] band:[channel channelBand]];
+	NSString *sec  = [self wifiSecurityStringForSecurity:[iface security]];
+
+	return [NSString stringWithFormat:
+		NSLocalizedString(@"Band:\t%@ (%@)\nSecurity:\t%@", "First %@ = band e.g. '5 GHz', second %@ = generation e.g. 'Wi-Fi 6', third %@ = security e.g. 'WPA2 Personal'"),
+		band, gen, sec];
+}
+
 -(void)airportConnected:(NSString*)name bssid:(NSData*)data {
 	// BSSID is nil when Location permission is denied (macOS 10.14+). Build a
 	// description with whatever info we have, never deref a NULL buffer.
@@ -599,13 +702,15 @@ typedef enum {
 		NSString *bssid = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
 								 bssidBytes[0], bssidBytes[1], bssidBytes[2],
 								 bssidBytes[3], bssidBytes[4], bssidBytes[5]];
-		description = [NSString stringWithFormat:NSLocalizedString(@"Joined network.\nSSID:\t\t%@\nBSSID:\t%@", ""),
+		description = [NSString stringWithFormat:NSLocalizedString(@"Joined network.\nSSID:\t%@\nBSSID:\t%@", ""),
 						   name, bssid];
 	} else {
 		description = [NSString stringWithFormat:NSLocalizedString(@"Joined network %@.", @""), name];
 	}
-	
-    
+
+	NSString *extra = [self wifiExtraInfoLines];
+	if (extra) description = [description stringByAppendingFormat:@"\n%@", extra];
+
 	NSData *iconData = [[NSImage imageNamed:[self wifiIconNameForCurrentSignal]] TIFFRepresentation];
 
 	[delegate notifyWithName:@"AirportConnected"
@@ -632,15 +737,24 @@ typedef enum {
 		// Use the Ethernet connector icon only for interfaces with a recognized Ethernet
 		// media (e.g. "1000baseT/full-duplex"); unidentified interfaces (media "Unknown"
 		// or unreadable — e.g. an iPhone/USB net interface) get a generic interface icon.
-		NSString *media = [self getMediaForInterface:interfaceString];
-		BOOL isEthernet = (media != nil && ![media hasPrefix:@"Unknown"]);
+		NSString *mode = nil;
+		NSString *speed = [self getMediaTypeForInterface:interfaceString mode:&mode];
+		BOOL isEthernet = (speed != nil && ![speed hasPrefix:@"Unknown"]);
 		[interfaceIsEthernet setObject:@(isEthernet) forKey:interfaceString];
 		noteName = @"NetworkLinkUp";
 		noteTitle = NSLocalizedString(@"Network Link Up", @"");
-		noteDescription = [NSString stringWithFormat:
-								 NSLocalizedString(@"Interface:\t%@\nMedia:\t%@", "The first %@ will be replaced with the interface (en0, en1, etc) second %@ will be replaced by a description of the Ethernet media such as '100BT/full-duplex'"),
-								 interfaceString,
-								 media ?: NSLocalizedString(@"Unknown", @"")];
+		if (mode) {
+			noteDescription = [NSString stringWithFormat:
+									 NSLocalizedString(@"Interface:\t%@\nSpeed:\t%@\nMode:\t%@", "First %@ = interface (en0, en1, etc), second %@ = link speed (e.g. '1000baseT'), third %@ = duplex/other shared options (e.g. 'full-duplex')"),
+									 interfaceString,
+									 speed ?: NSLocalizedString(@"Unknown", @""),
+									 mode];
+		} else {
+			noteDescription = [NSString stringWithFormat:
+									 NSLocalizedString(@"Interface:\t%@\nSpeed:\t%@", "First %@ = interface (en0, en1, etc), second %@ = link speed (e.g. '1000baseT')"),
+									 interfaceString,
+									 speed ?: NSLocalizedString(@"Unknown", @"")];
+		}
 		imageName = isEthernet ? @"Network-Ethernet-On" : @"Network-Interface-On";
 	} else if (!newActive && oldActive) {
 		// Match the icon family chosen when the interface came up (media is often
@@ -667,16 +781,22 @@ typedef enum {
 }
 
 /* TO DO: REWRITE ME WITH BETTER METHODS OF GETTING INFO */
-- (NSString *)getMediaForInterface:(NSString*)interfaceString {
+// Returns the media speed (e.g. "1000baseT"), and — via `outMode` — the duplex/other
+// shared options (e.g. "full-duplex"), kept as SEPARATE pieces so the caller can label
+// them individually ("Speed:" / "Mode:") instead of one combined "100baseT <full-duplex>"
+// string. `outMode` is set to nil when there are no shared options to report.
+- (NSString *)getMediaTypeForInterface:(NSString*)interfaceString mode:(NSString **)outMode {
 	// This is all made by looking through Darwin's src/network_cmds/ifconfig.tproj.
 	// There's no pretty way to get media stuff; I've stripped it down to the essentials
 	// for what I'm doing.
-	
+
+	if (outMode) *outMode = nil;
+
 	const char *interface = [interfaceString UTF8String];
 	size_t length = strlen(interface);
 	if (length >= IFNAMSIZ)
 		NSLog(@"Interface name too long");
-	
+
 	int s = socket(AF_INET, SOCK_DGRAM, 0);
 	if (s < 0) {
 		NSLog(@"Can't open datagram socket");
@@ -685,21 +805,21 @@ typedef enum {
 	struct ifmediareq ifmr;
 	memset(&ifmr, 0, sizeof(ifmr));
 	strncpy(ifmr.ifm_name, interface, sizeof(ifmr.ifm_name));
-	
+
 	if (ioctl(s, SIOCGIFMEDIA, (caddr_t)&ifmr) < 0) {
 		// Media not supported.
 		close(s);
 		return NULL;
 	}
-	
+
 	close(s);
-	
+
 	// Now ifmr.ifm_current holds the selected type (probably auto-select)
 	// ifmr.ifm_active holds details (100baseT <full-duplex> or similar)
 	// We only want the ifm_active bit.
-	
+
 	const char *type = "Unknown";
-	
+
 	// We'll only look in the Ethernet list. I don't care about anything else.
 	struct ifmedia_description *desc;
 	for (desc = ifm_subtype_ethernet_descriptions; desc->ifmt_string; ++desc) {
@@ -708,9 +828,9 @@ typedef enum {
 			break;
 		}
 	}
-	
+
 	NSMutableString *options = nil;
-	
+
 	// And fill in the duplex settings.
 	for (desc = ifm_shared_option_descriptions; desc->ifmt_string; desc++) {
 		if (ifmr.ifm_active & desc->ifmt_word) {
@@ -721,17 +841,10 @@ typedef enum {
 			}
 		}
 	}
-	
-	NSString *media;
-	if (options) {
-		media = [NSString stringWithFormat:@"%s <%@>",
-					type,
-					options];
-	} else {
-		media = [NSString stringWithUTF8String:type];
-	}
-	
-	return media;
+
+	if (outMode) *outMode = options;
+
+	return [NSString stringWithUTF8String:type];
 }
 
 // Counts the number of leading 1-bits in a 32-bit IPv4 netmask.
@@ -801,28 +914,32 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	return out;
 }
 
-// Reads the IPv4 gateway from SCDynamicStore Global/IPv4 dictionary.
-- (NSString *)readIPv4Gateway {
-	NSString *gw = nil;
-	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/IPv4"));
-	if (d) {
-		NSString *router = [(__bridge NSDictionary *)d objectForKey:@"Router"];
-		if (router) gw = [NSString stringWithString:router];
+// Reads the gateway (Router) PER INTERFACE from SCDynamicStore, keyed by BSD interface
+// name (e.g. "en0" -> "10.4.200.2"), by enumerating every network service's live State
+// dictionary — "State:/Network/Service/<uuid>/IPv4" or ".../IPv6" — which each carry their
+// own "InterfaceName" and "Router". This replaces reading only the single Global/IPv4(6)
+// dictionary, which reflects just the system's ONE primary/default route: with multiple
+// active interfaces on DIFFERENT subnets (e.g. Wi-Fi + a USB-Ethernet dock), the Global
+// dictionary silently drops every gateway except the primary one. Per-service lookup
+// reports every interface's own gateway, matching what's actually shown for each interface.
+- (NSDictionary *)gatewaysByInterfaceForProtocol:(NSString *)proto {
+	NSMutableDictionary *result = [NSMutableDictionary dictionary];
+	NSString *pattern = [NSString stringWithFormat:@"State:/Network/Service/[^/]+/%@", proto];
+	CFArrayRef keys = SCDynamicStoreCopyKeyList(dynStore, (__bridge CFStringRef)pattern);
+	if (!keys) return result;
+	CFIndex count = CFArrayGetCount(keys);
+	for (CFIndex i = 0; i < count; i++) {
+		CFStringRef key = CFArrayGetValueAtIndex(keys, i);
+		CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, key);
+		if (!d) continue;
+		NSDictionary *dict = (__bridge NSDictionary *)d;
+		NSString *ifname = dict[@"InterfaceName"];
+		NSString *router = dict[@"Router"];
+		if (ifname && router) result[ifname] = router;
 		CFRelease(d);
 	}
-	return gw;
-}
-
-// Reads the IPv6 gateway from SCDynamicStore Global/IPv6 dictionary.
-- (NSString *)readIPv6Gateway {
-	NSString *gw = nil;
-	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/IPv6"));
-	if (d) {
-		NSString *router = [(__bridge NSDictionary *)d objectForKey:@"Router"];
-		if (router) gw = [NSString stringWithString:router];
-		CFRelease(d);
-	}
-	return gw;
+	CFRelease(keys);
+	return result;
 }
 
 // Maps BSD interface names (en0, en1…) to friendly names (Wi-Fi, Ethernet…).
@@ -843,11 +960,11 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 }
 
 -(void)updateIP {
-	NSDictionary *friendly = [self bsdToFriendlyNameMap];
-	NSArray  *ipv4Info  = [self collectIPv4InfoFromKernel];
-	NSArray  *ipv6Info  = [self collectIPv6InfoFromKernel];
-	NSString *gateway   = [self readIPv4Gateway];
-	NSString *gateway6  = [self readIPv6Gateway];
+	NSDictionary *friendly     = [self bsdToFriendlyNameMap];
+	NSArray  *ipv4Info         = [self collectIPv4InfoFromKernel];
+	NSArray  *ipv6Info         = [self collectIPv6InfoFromKernel];
+	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
+	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
 
 	NSString *nonRoutableTag = NSLocalizedString(@"(non-routable)", @"");
 	BOOL anyRoutable = NO;
@@ -856,23 +973,26 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	for (NSDictionary *info in ipv4Info) {
 		BOOL r = [info[@"routable"] boolValue];
 		if (r) anyRoutable = YES;
-		NSString *ifname = friendly[info[@"if"]] ?: info[@"if"];
+		NSString *bsdName = info[@"if"];
+		NSString *ifname = friendly[bsdName] ?: bsdName;
 		[lines addObject:[NSString stringWithFormat:@"%@ — IPv4:\t%@/%@",
 		                  ifname, info[@"ip"], info[@"cidr"]]];
 		if (!r) [lines addObject:nonRoutableTag];   // tag on its own line
-	}
-	if (gateway && [ipv4Info count] > 0) {
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gateway]];
+		// Each interface's own gateway (not just the system's single primary route) —
+		// so a secondary interface (e.g. a USB-Ethernet dock on a different subnet)
+		// still gets its gateway reported.
+		NSString *gw = ipv4Gateways[bsdName];
+		if (gw) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
 	}
 	for (NSDictionary *info in ipv6Info) {
 		BOOL r = [info[@"routable"] boolValue];
 		if (r) anyRoutable = YES;
-		NSString *ifname = friendly[info[@"if"]] ?: info[@"if"];
+		NSString *bsdName = info[@"if"];
+		NSString *ifname = friendly[bsdName] ?: bsdName;
 		[lines addObject:[NSString stringWithFormat:@"%@ — IPv6:\t%@", ifname, info[@"ip"]]];
 		if (!r) [lines addObject:nonRoutableTag];   // tag on its own line
-	}
-	if (gateway6 && [ipv6Info count] > 0) {
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gateway6]];
+		NSString *gw = ipv6Gateways[bsdName];
+		if (gw) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
 	}
 
 	NSString *combined = [lines componentsJoinedByString:@"\n"];
@@ -912,18 +1032,21 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 
 - (void) interateInterfaces
 {
-    // Wired/Ethernet link priming at launch is handled by NWPathMonitor's first update.
-    // Here we just fire the current IP state (gated by onLaunchEnabled via fireOnLaunchNotes).
+    // Wired/Ethernet link priming at launch is handled by primeWiredLinkState (called from
+    // startObserving before this runs). Here we just fire the current IP state (gated by
+    // onLaunchEnabled via fireOnLaunchNotes).
     [self updateIP];
 }
 
 static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *info) {
 	@autoreleasepool {
         HWGrowlNetworkMonitor *observer = (__bridge HWGrowlNetworkMonitor *)info;
-        // Only the Global IPv4/IPv6 keys are watched now (wired link → NWPathMonitor).
+        // Global IPv4/IPv6 keys (exact) + every interface's own ".../Link" key (pattern).
         [(__bridge NSArray*)changedKeys enumerateObjectsUsingBlock:^(NSString *key, NSUInteger idx, BOOL *stop) {
             if([key hasPrefix:@"State:/Network/Global"])
                 [observer updateIP];
+            else if ([key hasSuffix:@"/Link"])
+                [observer handleLinkKeyChanged:key];
         }];
     }
 }
@@ -949,10 +1072,16 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[self restartSignalPollTimer];   // apply the new interval immediately
 }
 
+// F32: toggle for including band/generation/security in the WiFi connect notice.
+-(IBAction)wifiExtraInfoChanged:(NSButton*)sender {
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn)
+											 forKey:HWG_WIFI_EXTRA_INFO_KEY];
+}
+
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 120)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 190)];
 	NSTimeInterval cur = [self signalPollInterval];
 
 	NSTextField *title = [NSTextField labelWithString:NSLocalizedString(@"Wi-Fi signal check interval", @"")];
@@ -969,7 +1098,12 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	caption.textColor = [NSColor secondaryLabelColor];
 	caption.font = [NSFont systemFontOfSize:11];
 
-	for (NSView *sv in @[title, slider, value, caption]) {
+	NSButton *extraInfoCheck = [NSButton checkboxWithTitle:
+		NSLocalizedString(@"Show band, generation, and security in the Wi-Fi connect notice", @"")
+													 target:self action:@selector(wifiExtraInfoChanged:)];
+	extraInfoCheck.state = [self wifiShowExtraInfo] ? NSControlStateValueOn : NSControlStateValueOff;
+
+	for (NSView *sv in @[title, slider, value, caption, extraInfoCheck]) {
 		sv.translatesAutoresizingMaskIntoConstraints = NO;
 		[v addSubview:sv];
 	}
@@ -983,6 +1117,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[value.leadingAnchor  constraintEqualToAnchor:slider.trailingAnchor constant:10],
 		[caption.topAnchor     constraintEqualToAnchor:slider.bottomAnchor constant:10],
 		[caption.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16],
+		[extraInfoCheck.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:20],
+		[extraInfoCheck.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16],
 	]];
 
 	prefsView = v;

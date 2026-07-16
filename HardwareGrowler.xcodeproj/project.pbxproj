@@ -75,7 +75,7 @@
 		BCECA3681552D22100F49280 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCECA3661552D1FA00F49280 /* SystemConfiguration.framework */; };
 		C0FE0001C0FE0001C0FE0001 /* CoreWLAN.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0FE0002C0FE0002C0FE0002 /* CoreWLAN.framework */; };
 		C0FE0003C0FE0003C0FE0003 /* CoreLocation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0FE0004C0FE0004C0FE0004 /* CoreLocation.framework */; };
-		C0FE0005C0FE0005C0FE0005 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0FE0006C0FE0006C0FE0006 /* Network.framework */; };
+		C0FE0007C0FE0007C0FE0007 /* DiskArbitration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0FE0008C0FE0008C0FE0008 /* DiskArbitration.framework */; };
 		BCECA38D155322D200F49280 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCB805EB155153330088C69A /* Cocoa.framework */; };
 		BCECA394155322D200F49280 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = BCECA392155322D200F49280 /* InfoPlist.strings */; };
 		BCECA3AB155322FD00F49280 /* HWGrowlVolumeMonitor.m in Sources */ = {isa = PBXBuildFile; fileRef = BCECA3AA155322FD00F49280 /* HWGrowlVolumeMonitor.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
@@ -388,7 +388,7 @@
 		BCECA3661552D1FA00F49280 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		C0FE0002C0FE0002C0FE0002 /* CoreWLAN.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreWLAN.framework; path = System/Library/Frameworks/CoreWLAN.framework; sourceTree = SDKROOT; };
 		C0FE0004C0FE0004C0FE0004 /* CoreLocation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreLocation.framework; path = System/Library/Frameworks/CoreLocation.framework; sourceTree = SDKROOT; };
-		C0FE0006C0FE0006C0FE0006 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		C0FE0008C0FE0008C0FE0008 /* DiskArbitration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DiskArbitration.framework; path = System/Library/Frameworks/DiskArbitration.framework; sourceTree = SDKROOT; };
 		BCECA3691552D24C00F49280 /* GrowlNetworkUtilities.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = GrowlNetworkUtilities.h; path = ../Common/Source/GrowlNetworkUtilities.h; sourceTree = "<group>"; };
 		BCECA36A1552D24C00F49280 /* GrowlNetworkUtilities.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; name = GrowlNetworkUtilities.m; path = ../Common/Source/GrowlNetworkUtilities.m; sourceTree = "<group>"; };
 		BCECA38C155322D200F49280 /* VolumeMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VolumeMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -466,7 +466,6 @@
 				BCECA3681552D22100F49280 /* SystemConfiguration.framework in Frameworks */,
 				C0FE0001C0FE0001C0FE0001 /* CoreWLAN.framework in Frameworks */,
 				C0FE0003C0FE0003C0FE0003 /* CoreLocation.framework in Frameworks */,
-				C0FE0005C0FE0005C0FE0005 /* Network.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -475,6 +474,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BCECA38D155322D200F49280 /* Cocoa.framework in Frameworks */,
+				C0FE0007C0FE0007C0FE0007 /* DiskArbitration.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -622,7 +622,7 @@
 				BCA26B7015558837009C5ABC /* IOBluetooth.framework */,
 				C0FE0002C0FE0002C0FE0002 /* CoreWLAN.framework */,
 				C0FE0004C0FE0004C0FE0004 /* CoreLocation.framework */,
-				C0FE0006C0FE0006C0FE0006 /* Network.framework */,
+				C0FE0008C0FE0008C0FE0008 /* DiskArbitration.framework */,
 			);
 			name = "Other Frameworks";
 			sourceTree = "<group>";
