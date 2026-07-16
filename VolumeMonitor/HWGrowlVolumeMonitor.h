@@ -7,6 +7,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <DiskArbitration/DiskArbitration.h>
 #import "HardwareGrowlPlugin.h"
 
 @interface VolumeInfo : NSObject {
