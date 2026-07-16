@@ -211,6 +211,10 @@
 			NSDictionary *labelMap = @{
 				@"HWGrowlNetworkLink":     @"Ethernet",
 				@"HWGrowlIPAddressChange": @"Network",
+				@"HWGrowlAirPort":         @"Wi-Fi",
+				@"HWGrowlAirPortSignal":   @"Wi-Fi Signal",
+				@"PowerChange":            @"Power",
+				@"PowerWarning":           @"Power",
 			};
 			NSString *deviceLabel = identifier;
 			if ([labelMap objectForKey:identifier]) {

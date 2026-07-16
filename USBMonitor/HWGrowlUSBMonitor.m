@@ -125,18 +125,49 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 	self.notificationsArePrimed = YES;
 }
 
--(void)usbDeviceID:(uint64_t)deviceID name:(NSString*)deviceName added:(BOOL)added {
-	NSString *title = added ? NSLocalizedString(@"USB Connection", @"") : NSLocalizedString(@"USB Disconnection", @"");
-	
+-(void)usbDeviceID:(uint64_t)deviceID name:(NSString*)deviceName added:(BOOL)added isHub:(BOOL)isHub {
+	(void)deviceID; // no longer used for identity — see identifierString below.
+	NSString *title;
+	if (isHub) {
+		title = added ? NSLocalizedString(@"USB Hub/Dock Connection", @"")
+						  : NSLocalizedString(@"USB Hub/Dock Disconnection", @"");
+	} else {
+		title = added ? NSLocalizedString(@"USB Connection", @"") : NSLocalizedString(@"USB Disconnection", @"");
+	}
+
     NSString *imageName = added ? @"USB-On" : @"USB-Off";
     NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
+	// Use the device NAME as the bounce/dedup identifier (matches Bluetooth/Volume/
+	// Thunderbolt), not the IOKit registry entry ID: that ID is a fresh, ephemeral
+	// kernel object ID assigned on every single enumeration, so it's NEVER the same
+	// across reconnects of the same physical device — bounce detection (which keys off
+	// this identifier) could never see "the same device" flapping, so a rapidly
+	// bouncing USB device/hub never triggered "Unstable device".
 	[delegate notifyWithName:added ? @"USBConnected" : @"USBDisconnected"
 							 title:title
 					 description:deviceName
 							  icon:iconData
-			  identifierString:[NSString stringWithFormat:@"%llu", deviceID]
+			  identifierString:deviceName
 				  contextString:nil
 							plugin:self];
+}
+
+// USB-IF standard device class code for hubs (0x09) — stable, permanent value
+// from the USB spec, used to tell an actual hub/dock apart from an ordinary
+// device (e.g. so a connected USB-C dock reads as "USB Hub/Dock" rather than
+// showing only its individual sub-devices, none of which self-identify as
+// the dock itself).
+static const uint8_t kHWGUSBHubDeviceClass = 9;
+
+-(BOOL)deviceIsHub:(io_object_t)device {
+	CFTypeRef classNum = IORegistryEntryCreateCFProperty(device, CFSTR("bDeviceClass"), kCFAllocatorDefault, 0);
+	if (!classNum) return NO;
+	uint8_t deviceClass = 0;
+	if (CFGetTypeID(classNum) == CFNumberGetTypeID()) {
+		CFNumberGetValue((CFNumberRef)classNum, kCFNumberSInt8Type, &deviceClass);
+	}
+	CFRelease(classNum);
+	return deviceClass == kHWGUSBHubDeviceClass;
 }
 
 -(void)usbDeviceAdded:(io_iterator_t)iterator {
@@ -148,28 +179,29 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 			io_name_t		deviceNameChars;
 			kern_return_t	idResult;
 			uint64_t			deviceID;
-			
+
 			//	This works with USB devices...
 			//	but apparently not firewire
 			nameResult = IORegistryEntryGetName(thisObject, deviceNameChars);
 			if (nameResult != KERN_SUCCESS) {
 				continue;
 			}
-			
+
 			idResult = IORegistryEntryGetRegistryEntryID(thisObject, &deviceID);
 			if(idResult != KERN_SUCCESS) {
 				continue;
 			}
-			
+
 			NSString *deviceName = [NSString stringWithCString:deviceNameChars encoding:NSASCIIStringEncoding];
 			if (deviceName) {
 				deviceName = [self deviceBusNameSwap:deviceName];
-				
+				BOOL isHub = [self deviceIsHub:thisObject];
+
 				// NSLog(@"USB Device Attached: %@" , deviceName);
-				[self usbDeviceID:deviceID name:deviceName added:YES];
+				[self usbDeviceID:deviceID name:deviceName added:YES isHub:isHub];
 			}
 		}
-		
+
 		IOObjectRelease(thisObject);
 	}
 }
@@ -203,9 +235,10 @@ static void usbDeviceAdded(void *refCon, io_iterator_t iterator) {
 		NSString *deviceName = [NSString stringWithCString:deviceNameChars encoding:NSASCIIStringEncoding];
 		if (deviceName) {
 			deviceName = [self deviceBusNameSwap:deviceName];
-			
+			BOOL isHub = [self deviceIsHub:thisObject];
+
 			// NSLog(@"USB Device Detached: %@" , deviceName);
-			[self usbDeviceID:deviceID name:deviceName added:NO];
+			[self usbDeviceID:deviceID name:deviceName added:NO isHub:isHub];
 		}
 		
 		IOObjectRelease(thisObject);
