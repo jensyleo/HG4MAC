@@ -4,6 +4,23 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## 2026-07-17
+
+### New: per-field notification settings for Power Monitor
+- Every field in the power/battery notification body is now independently toggleable from
+  Preferences → Modules → Power Monitor: power source type (Battery/UPS/Unknown), charge
+  state (Charging/Finishing/Charged), battery percentage, and time remaining/to-charge. All
+  default on, matching prior always-on behavior. Added as a new "Notification fields"
+  section below the existing refire-settings panel (that nib was left untouched) rather
+  than converting the whole pane to a programmatic layout.
+- Fixed a layout bug hit while building this: `PowerMonitorPrefs.xib`'s own content only
+  occupies the top half of its declared frame (its lowest control's bottom edge sits well
+  above the frame's actual bottom, with unused space baked in below it) — stacking new
+  content from the frame's full height left a large gap. Found via Accessibility
+  introspection of the live running app (queried real on-screen element positions rather
+  than guessing from screenshots) and fixed by resuming the layout from the xib's actual
+  content bottom instead.
+
 ## 2026-07-16
 
 ### New: Wi-Fi band, generation, and security in the connect notice
