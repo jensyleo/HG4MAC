@@ -46,6 +46,26 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
   code is confirmed correct (matches `ifconfig` exactly); this needs testing across other
   adapters/switches to see if it's specific to one driver/chipset.
 
+### New: per-field notification settings for Network Monitor, in Wi-Fi / Ethernet / IP tabs
+- Every individual piece of information Network Monitor can show is now independently
+  toggleable from Preferences → Modules → Network Monitor, organized into 3 tabs:
+  - **Wi-Fi**: SSID, BSSID, band, generation, security type (all default on), plus the
+    existing signal-check-interval slider.
+  - **Ethernet**: interface name, speed, mode/duplex (all default on), and a new toggle to
+    also report Wi-Fi's own link and AWDL/AirDrop events (default off — these are normally
+    filtered out as noise, see the link-detection fix above).
+  - **IP**: IPv4 address, IPv6 address, gateway, the "(non-routable)" tag, and whether to
+    use friendly interface names instead of raw BSD names (all default on).
+  All defaults match prior always-on behavior, so no existing notification content changes
+  unless a box is unchecked. The "released" transition in "IP Addresses Updated" is now
+  decided from actual address presence rather than the (now potentially empty, depending on
+  toggles) displayed text, so hiding every IP field doesn't misreport a live connection as
+  disconnected.
+- Fixed a related, longer-standing cosmetic bug while adding this panel: the Preferences
+  window's "Modules" box didn't grow when the window was resized, for any monitor — two
+  `autoresizesSubviews="NO"` flags in `MainMenu.xib` (on the General/Modules tab switcher
+  and the per-monitor settings box) were blocking the resize from propagating down.
+
 ### Repository cleanup
 - Removed `NOTICE.md` (content was already duplicated in the README's Credits & license
   section) and `SFSymbols-Migration-Notes.md` (unimplemented internal planning notes) —
