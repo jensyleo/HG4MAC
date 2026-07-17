@@ -32,8 +32,26 @@
 #define HWG_WIFI_POLL_MIN     5.0
 #define HWG_WIFI_POLL_MAX     60.0
 
-// F32: user-configurable — include band/generation/security in the WiFi connect notice.
-#define HWG_WIFI_EXTRA_INFO_KEY @"HWGWifiShowExtraInfo"
+// F33: individually configurable fields shown in Network Monitor notifications, grouped
+// into 3 sections (Wi-Fi / Ethernet / Other-IP) in Preferences → Modules → Network Monitor.
+// All default to YES (matching prior always-on behavior) except HWG_ETH_SHOW_ALL_KEY,
+// which defaults to NO (matches the F35 hardcoded "real Ethernet only" filter).
+#define HWG_WIFI_SHOW_SSID_KEY       @"HWGWifiShowSSID"
+#define HWG_WIFI_SHOW_BSSID_KEY      @"HWGWifiShowBSSID"
+#define HWG_WIFI_SHOW_BAND_KEY       @"HWGWifiShowBand"
+#define HWG_WIFI_SHOW_GENERATION_KEY @"HWGWifiShowGeneration"
+#define HWG_WIFI_SHOW_SECURITY_KEY   @"HWGWifiShowSecurity"
+
+#define HWG_ETH_SHOW_INTERFACE_KEY   @"HWGEthernetShowInterface"
+#define HWG_ETH_SHOW_SPEED_KEY       @"HWGEthernetShowSpeed"
+#define HWG_ETH_SHOW_MODE_KEY        @"HWGEthernetShowMode"
+#define HWG_ETH_SHOW_ALL_KEY         @"HWGEthernetShowAllInterfaces"
+
+#define HWG_IP_SHOW_IPV4_KEY         @"HWGIPShowIPv4"
+#define HWG_IP_SHOW_IPV6_KEY         @"HWGIPShowIPv6"
+#define HWG_IP_SHOW_GATEWAY_KEY      @"HWGIPShowGateway"
+#define HWG_IP_SHOW_NONROUTABLE_KEY  @"HWGIPShowNonRoutableTag"
+#define HWG_IP_USE_FRIENDLY_KEY      @"HWGIPUseFriendlyNames"
 
 static struct ifmedia_description ifm_subtype_ethernet_descriptions[] = IFM_SUBTYPE_ETHERNET_DESCRIPTIONS;
 static struct ifmedia_description ifm_shared_option_descriptions[] = IFM_SHARED_OPTION_DESCRIPTIONS;
@@ -85,6 +103,10 @@ typedef enum {
 
 @property (nonatomic, strong) NSMutableDictionary *networkInterfaceStates;
 @property (nonatomic, strong) NSString *previousIPCombined;
+// F33: whether any IPv4/IPv6 address was present on the last check — tracked separately
+// from previousIPCombined (the DISPLAYED text) because F33's per-field toggles can make
+// the displayed text empty even while addresses are genuinely still present.
+@property (nonatomic, assign) BOOL previousHasIPAddresses;
 
 // P10 (reverted 16-jul-2026): Ethernet (wired) link up/down was briefly detected via
 // NWPathMonitor, but that only reports an interface once it has a USABLE network path
@@ -127,6 +149,7 @@ typedef enum {
 @synthesize dynStore;
 @synthesize networkInterfaceStates;
 @synthesize previousIPCombined;
+@synthesize previousHasIPAddresses;
 @synthesize interfaceIsEthernet;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
@@ -477,10 +500,10 @@ typedef enum {
 // Ethernet — this is the same registry System Settings' Network pane reads, so it correctly
 // includes USB/Thunderbolt-Ethernet adapters (which register as Ethernet-type) without
 // hardcoding interface-name prefixes.
-// PENDING (F35, not yet implemented): make this filter itself configurable from
-// Preferences → Modules → Network Monitor (e.g. a toggle to also show WiFi's own/AWDL link
-// events for advanced users) — for now it's hardcoded to "real Ethernet only".
+// F33: configurable from Preferences → Modules → Network Monitor ("Also report Wi-Fi's own
+// link and AWDL/AirDrop events") — off by default, matching the original hardcoded filter.
 -(BOOL)isWiredEthernetInterface:(NSString *)bsdName {
+	if ([self boolForKey:HWG_ETH_SHOW_ALL_KEY default:NO]) return YES;
 	BOOL isEthernet = NO;
 	CFArrayRef ifaces = SCNetworkInterfaceCopyAll();
 	if (ifaces) {
@@ -617,11 +640,10 @@ typedef enum {
 	return [NSString stringWithFormat:@"Network-Wifi-%ld", (long)[self wifiBarsForRSSI:rssi]];
 }
 
-// F32: whether to include band/generation/security in the WiFi connect notice.
-// Configurable in Preferences → Modules → Network Monitor; default ON.
--(BOOL)wifiShowExtraInfo {
-	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_WIFI_EXTRA_INFO_KEY];
-	return stored ? [stored boolValue] : YES;
+// F33: generic reader for a per-field visibility toggle, defaulting to `def` when unset.
+-(BOOL)boolForKey:(NSString *)key default:(BOOL)def {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
 }
 
 // "2.4 GHz" / "5 GHz" / "6 GHz". None of channelBand/activePHYMode/security require
@@ -675,10 +697,17 @@ typedef enum {
 	}
 }
 
-// Builds the extra "Band:/Wi-Fi:/Security:" lines for the current connection, or nil if
-// the feature is disabled or the interface isn't associated.
+// F33: builds the "Band:"/"Wi-Fi:"/"Security:" lines for the current connection —
+// EACH individually toggleable from Preferences → Modules → Network Monitor. Band and
+// generation combine onto one line ("Band: 5 GHz (Wi-Fi 6)") when both are enabled;
+// otherwise each gets its own line. Returns nil if nothing is enabled or the interface
+// isn't associated.
 -(NSString*)wifiExtraInfoLines {
-	if (![self wifiShowExtraInfo]) return nil;
+	BOOL showBand = [self boolForKey:HWG_WIFI_SHOW_BAND_KEY default:YES];
+	BOOL showGen  = [self boolForKey:HWG_WIFI_SHOW_GENERATION_KEY default:YES];
+	BOOL showSec  = [self boolForKey:HWG_WIFI_SHOW_SECURITY_KEY default:YES];
+	if (!showBand && !showGen && !showSec) return nil;
+
 	CWInterface *iface = [self.wifiClient interface];
 	if (!iface) return nil;
 	CWChannel *channel = [iface wlanChannel];
@@ -688,25 +717,39 @@ typedef enum {
 	NSString *gen  = [self wifiGenerationStringForPHYMode:[iface activePHYMode] band:[channel channelBand]];
 	NSString *sec  = [self wifiSecurityStringForSecurity:[iface security]];
 
-	return [NSString stringWithFormat:
-		NSLocalizedString(@"Band:\t%@ (%@)\nSecurity:\t%@", "First %@ = band e.g. '5 GHz', second %@ = generation e.g. 'Wi-Fi 6', third %@ = security e.g. 'WPA2 Personal'"),
-		band, gen, sec];
+	NSMutableArray *lines = [NSMutableArray array];
+	if (showBand && showGen) {
+		[lines addObject:[NSString stringWithFormat:
+			NSLocalizedString(@"Band:\t%@ (%@)", "First %@ = band e.g. '5 GHz', second %@ = generation e.g. 'Wi-Fi 6'"), band, gen]];
+	} else if (showBand) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Band:\t%@", ""), band]];
+	} else if (showGen) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Wi-Fi Generation:\t%@", ""), gen]];
+	}
+	if (showSec) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Security:\t%@", ""), sec]];
+	}
+	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
 -(void)airportConnected:(NSString*)name bssid:(NSData*)data {
+	BOOL showSSID  = [self boolForKey:HWG_WIFI_SHOW_SSID_KEY default:YES];
+	BOOL showBSSID = [self boolForKey:HWG_WIFI_SHOW_BSSID_KEY default:YES];
+
 	// BSSID is nil when Location permission is denied (macOS 10.14+). Build a
 	// description with whatever info we have, never deref a NULL buffer.
-	NSString *description = nil;
-	if (data && [data length] >= 6) {
+	NSMutableArray *lines = [NSMutableArray arrayWithObject:NSLocalizedString(@"Joined network.", @"")];
+	if (showSSID) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"SSID:\t%@", ""), name]];
+	}
+	if (showBSSID && data && [data length] >= 6) {
 		const unsigned char *bssidBytes = [data bytes];
 		NSString *bssid = [NSString stringWithFormat:@"%02X:%02X:%02X:%02X:%02X:%02X",
 								 bssidBytes[0], bssidBytes[1], bssidBytes[2],
 								 bssidBytes[3], bssidBytes[4], bssidBytes[5]];
-		description = [NSString stringWithFormat:NSLocalizedString(@"Joined network.\nSSID:\t%@\nBSSID:\t%@", ""),
-						   name, bssid];
-	} else {
-		description = [NSString stringWithFormat:NSLocalizedString(@"Joined network %@.", @""), name];
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"BSSID:\t%@", ""), bssid]];
 	}
+	NSString *description = [lines componentsJoinedByString:@"\n"];
 
 	NSString *extra = [self wifiExtraInfoLines];
 	if (extra) description = [description stringByAppendingFormat:@"\n%@", extra];
@@ -733,6 +776,10 @@ typedef enum {
 	NSString *noteTitle = nil;
 	NSString *noteDescription = nil;
 	NSString *imageName = nil;
+	BOOL showInterface = [self boolForKey:HWG_ETH_SHOW_INTERFACE_KEY default:YES];
+	BOOL showSpeed     = [self boolForKey:HWG_ETH_SHOW_SPEED_KEY default:YES];
+	BOOL showMode      = [self boolForKey:HWG_ETH_SHOW_MODE_KEY default:YES];
+
 	if (newActive && !oldActive) {
 		// Use the Ethernet connector icon only for interfaces with a recognized Ethernet
 		// media (e.g. "1000baseT/full-duplex"); unidentified interfaces (media "Unknown"
@@ -743,18 +790,12 @@ typedef enum {
 		[interfaceIsEthernet setObject:@(isEthernet) forKey:interfaceString];
 		noteName = @"NetworkLinkUp";
 		noteTitle = NSLocalizedString(@"Network Link Up", @"");
-		if (mode) {
-			noteDescription = [NSString stringWithFormat:
-									 NSLocalizedString(@"Interface:\t%@\nSpeed:\t%@\nMode:\t%@", "First %@ = interface (en0, en1, etc), second %@ = link speed (e.g. '1000baseT'), third %@ = duplex/other shared options (e.g. 'full-duplex')"),
-									 interfaceString,
-									 speed ?: NSLocalizedString(@"Unknown", @""),
-									 mode];
-		} else {
-			noteDescription = [NSString stringWithFormat:
-									 NSLocalizedString(@"Interface:\t%@\nSpeed:\t%@", "First %@ = interface (en0, en1, etc), second %@ = link speed (e.g. '1000baseT')"),
-									 interfaceString,
-									 speed ?: NSLocalizedString(@"Unknown", @"")];
-		}
+
+		NSMutableArray *lines = [NSMutableArray array];
+		if (showInterface) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", ""), interfaceString]];
+		if (showSpeed)     [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Speed:\t%@", ""), speed ?: NSLocalizedString(@"Unknown", @"")]];
+		if (showMode && mode) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Mode:\t%@", ""), mode]];
+		noteDescription = [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 		imageName = isEthernet ? @"Network-Ethernet-On" : @"Network-Interface-On";
 	} else if (!newActive && oldActive) {
 		// Match the icon family chosen when the interface came up (media is often
@@ -763,7 +804,9 @@ typedef enum {
 		[interfaceIsEthernet removeObjectForKey:interfaceString];
 		noteName = @"NetworkLinkDown";
 		noteTitle = NSLocalizedString(@"Network Link Down", @"");
-		noteDescription = [NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", nil), interfaceString];
+		noteDescription = showInterface
+			? [NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", nil), interfaceString]
+			: nil;
 		imageName = isEthernet ? @"Network-Ethernet-Off" : @"Network-Interface-Off";
 	}
 	
@@ -966,6 +1009,14 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
 	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
 
+	// F33: each field individually toggleable from Preferences → Modules → Network Monitor.
+	// Routability still drives icon choice below regardless of what's actually displayed.
+	BOOL showIPv4        = [self boolForKey:HWG_IP_SHOW_IPV4_KEY default:YES];
+	BOOL showIPv6        = [self boolForKey:HWG_IP_SHOW_IPV6_KEY default:YES];
+	BOOL showGateway     = [self boolForKey:HWG_IP_SHOW_GATEWAY_KEY default:YES];
+	BOOL showNonRoutable = [self boolForKey:HWG_IP_SHOW_NONROUTABLE_KEY default:YES];
+	BOOL useFriendly     = [self boolForKey:HWG_IP_USE_FRIENDLY_KEY default:YES];
+
 	NSString *nonRoutableTag = NSLocalizedString(@"(non-routable)", @"");
 	BOOL anyRoutable = NO;
 
@@ -973,48 +1024,53 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	for (NSDictionary *info in ipv4Info) {
 		BOOL r = [info[@"routable"] boolValue];
 		if (r) anyRoutable = YES;
+		if (!showIPv4) continue;
 		NSString *bsdName = info[@"if"];
-		NSString *ifname = friendly[bsdName] ?: bsdName;
+		NSString *ifname = useFriendly ? (friendly[bsdName] ?: bsdName) : bsdName;
 		[lines addObject:[NSString stringWithFormat:@"%@ — IPv4:\t%@/%@",
 		                  ifname, info[@"ip"], info[@"cidr"]]];
-		if (!r) [lines addObject:nonRoutableTag];   // tag on its own line
+		if (!r && showNonRoutable) [lines addObject:nonRoutableTag];   // tag on its own line
 		// Each interface's own gateway (not just the system's single primary route) —
 		// so a secondary interface (e.g. a USB-Ethernet dock on a different subnet)
 		// still gets its gateway reported.
 		NSString *gw = ipv4Gateways[bsdName];
-		if (gw) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
+		if (gw && showGateway) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
 	}
 	for (NSDictionary *info in ipv6Info) {
 		BOOL r = [info[@"routable"] boolValue];
 		if (r) anyRoutable = YES;
+		if (!showIPv6) continue;
 		NSString *bsdName = info[@"if"];
-		NSString *ifname = friendly[bsdName] ?: bsdName;
+		NSString *ifname = useFriendly ? (friendly[bsdName] ?: bsdName) : bsdName;
 		[lines addObject:[NSString stringWithFormat:@"%@ — IPv6:\t%@", ifname, info[@"ip"]]];
-		if (!r) [lines addObject:nonRoutableTag];   // tag on its own line
+		if (!r && showNonRoutable) [lines addObject:nonRoutableTag];   // tag on its own line
 		NSString *gw = ipv6Gateways[bsdName];
-		if (gw) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
+		if (gw && showGateway) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
 	}
 
 	NSString *combined = [lines componentsJoinedByString:@"\n"];
-	if([combined isEqualTo:previousIPCombined])
-		return;
+	BOOL hasAddressesNow = ([ipv4Info count] + [ipv6Info count]) > 0;
 
-	BOOL hadAddressesBefore = ([previousIPCombined length] > 0);
+	// The "released" transition is decided from actual address PRESENCE (independent of
+	// the F33 display toggles, which can make `combined` empty even with real addresses
+	// still up); the displayed-text dedup below is separate and only skips a re-fire when
+	// what would actually be SHOWN hasn't changed.
+	if (!hasAddressesNow && !previousHasIPAddresses)
+		return;   // fresh launch with no connection, or already reported "released"
+	if (hasAddressesNow && [combined isEqualTo:previousIPCombined])
+		return;   // addresses present but nothing in the visible text changed
+
+	self.previousHasIPAddresses = hasAddressesNow;
 	self.previousIPCombined = combined;
 
 	NSString *description = nil;
 	NSString *imageName   = nil;
 
-	if ([combined length] == 0) {
-		// All addresses gone. Only notify if we previously HAD addresses — this
-		// is a real "IP released" transition (disconnect). On a fresh launch
-		// with no connection, previousIPCombined is also empty, so we stay quiet.
-		if (!hadAddressesBefore)
-			return;
+	if (!hasAddressesNow) {
 		description = NSLocalizedString(@"IP address released", @"");
 		imageName   = @"Network-Generic-Off";
 	} else {
-		description = combined;
+		description = [combined length] ? combined : NSLocalizedString(@"IP address updated", @"");
 		// Icon reflects whether we have real connectivity (a routable address)
 		// or only self-assigned addresses.
 		imageName   = anyRoutable ? @"Network-Generic-On" : @"Network-Generic-Off";
@@ -1072,56 +1128,173 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[self restartSignalPollTimer];   // apply the new interval immediately
 }
 
-// F32: toggle for including band/generation/security in the WiFi connect notice.
--(IBAction)wifiExtraInfoChanged:(NSButton*)sender {
-	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn)
-											 forKey:HWG_WIFI_EXTRA_INFO_KEY];
+// F33: single generic handler for every per-field visibility checkbox. Each checkbox's
+// `identifier` carries the NSUserDefaults key it controls (set when the checkbox is built).
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = [self boolForKey:key default:defaultOn] ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = NO;
+	return box;
+}
+
+// Wraps a fixed-height content view in a scroll view sized to fill whatever the tab
+// control actually gives it — the container forces the top-level preferencePane to a
+// fixed size that's shorter than 3 sections' worth of checkboxes, so content that doesn't
+// fit scrolls instead of overflowing the tab's visible box.
+-(NSScrollView *)scrollWrapping:(NSView *)content height:(CGFloat)height {
+	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:content.frame];
+	scroll.hasVerticalScroller = YES;
+	scroll.autohidesScrollers = YES;
+	scroll.drawsBackground = NO;
+	scroll.documentView = content;
+	content.translatesAutoresizingMaskIntoConstraints = NO;
+	[NSLayoutConstraint activateConstraints:@[
+		[content.topAnchor      constraintEqualToAnchor:scroll.contentView.topAnchor],
+		[content.leadingAnchor  constraintEqualToAnchor:scroll.contentView.leadingAnchor],
+		[content.widthAnchor    constraintEqualToAnchor:scroll.contentView.widthAnchor],
+		[content.heightAnchor   constraintEqualToConstant:height],
+	]];
+	return scroll;
+}
+
+-(NSTextField *)sectionHeaderWithTitle:(NSString *)title {
+	NSTextField *h = [NSTextField labelWithString:title];
+	h.font = [NSFont boldSystemFontOfSize:12];
+	h.textColor = [NSColor secondaryLabelColor];
+	h.translatesAutoresizingMaskIntoConstraints = NO;
+	return h;
+}
+
+// Lays out a vertical stack of checkboxes (optionally preceded by other rows already
+// pinned by the caller) inside `tab`, top-anchored to `topView`/`topAnchor`.
+-(void)layoutRows:(NSArray<NSView*> *)rows inView:(NSView *)tab belowView:(NSView *)topView gap:(CGFloat)firstGap {
+	NSView *previous = topView;
+	CGFloat gap = firstGap;
+	for (NSView *row in rows) {
+		[tab addSubview:row];
+		[NSLayoutConstraint activateConstraints:@[
+			[row.topAnchor     constraintEqualToAnchor:previous == tab ? tab.topAnchor : previous.bottomAnchor constant:gap],
+			[row.leadingAnchor  constraintEqualToAnchor:tab.leadingAnchor constant:16],
+			[row.heightAnchor   constraintEqualToConstant:24],
+		]];
+		previous = row;
+		gap = 8;
+	}
 }
 
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 190)];
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 420, 260)];
+	// AppDelegate sizes this view once via -setFrameSize: to match the prefs window's
+	// container, then never again — without an autoresizing mask this view (and its
+	// visible tab box) stays whatever size it was created at even if the user later
+	// resizes the Preferences window. Track the container's size going forward.
+	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+	// --- Tab: Wi-Fi (also hosts the pre-existing signal-poll-interval slider) ---
+	NSView *wifiTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 340)];
 	NSTimeInterval cur = [self signalPollInterval];
 
 	NSTextField *title = [NSTextField labelWithString:NSLocalizedString(@"Wi-Fi signal check interval", @"")];
-	title.font = [NSFont boldSystemFontOfSize:13];
+	title.font = [NSFont boldSystemFontOfSize:12];
+	title.translatesAutoresizingMaskIntoConstraints = NO;
 
 	NSSlider *slider = [NSSlider sliderWithValue:cur minValue:HWG_WIFI_POLL_MIN maxValue:HWG_WIFI_POLL_MAX
 										  target:self action:@selector(signalIntervalChanged:)];
+	slider.translatesAutoresizingMaskIntoConstraints = NO;
 
 	NSTextField *value = [NSTextField labelWithString:[NSString stringWithFormat:@"%.0f s", cur]];
 	self.intervalValueLabel = value;
+	value.translatesAutoresizingMaskIntoConstraints = NO;
 
 	NSTextField *caption = [NSTextField labelWithString:
 		NSLocalizedString(@"How often the Wi-Fi signal strength is checked (5–60 s).", @"")];
 	caption.textColor = [NSColor secondaryLabelColor];
 	caption.font = [NSFont systemFontOfSize:11];
+	caption.translatesAutoresizingMaskIntoConstraints = NO;
 
-	NSButton *extraInfoCheck = [NSButton checkboxWithTitle:
-		NSLocalizedString(@"Show band, generation, and security in the Wi-Fi connect notice", @"")
-													 target:self action:@selector(wifiExtraInfoChanged:)];
-	extraInfoCheck.state = [self wifiShowExtraInfo] ? NSControlStateValueOn : NSControlStateValueOff;
+	NSTextField *wifiFieldsHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 
-	for (NSView *sv in @[title, slider, value, caption, extraInfoCheck]) {
-		sv.translatesAutoresizingMaskIntoConstraints = NO;
-		[v addSubview:sv];
-	}
+	[wifiTab addSubview:title]; [wifiTab addSubview:slider]; [wifiTab addSubview:value]; [wifiTab addSubview:caption];
 	[NSLayoutConstraint activateConstraints:@[
-		[title.topAnchor      constraintEqualToAnchor:v.topAnchor constant:16],
-		[title.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+		[title.topAnchor      constraintEqualToAnchor:wifiTab.topAnchor constant:16],
+		[title.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
 		[slider.topAnchor     constraintEqualToAnchor:title.bottomAnchor constant:12],
-		[slider.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[slider.widthAnchor   constraintEqualToConstant:240],
+		[slider.leadingAnchor constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
+		[slider.widthAnchor   constraintEqualToConstant:220],
 		[value.centerYAnchor  constraintEqualToAnchor:slider.centerYAnchor],
 		[value.leadingAnchor  constraintEqualToAnchor:slider.trailingAnchor constant:10],
-		[caption.topAnchor     constraintEqualToAnchor:slider.bottomAnchor constant:10],
-		[caption.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[extraInfoCheck.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:20],
-		[extraInfoCheck.leadingAnchor constraintEqualToAnchor:v.leadingAnchor constant:16],
+		[caption.topAnchor     constraintEqualToAnchor:slider.bottomAnchor constant:6],
+		[caption.leadingAnchor constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
 	]];
+	[wifiTab addSubview:wifiFieldsHeader];
+	[NSLayoutConstraint activateConstraints:@[
+		[wifiFieldsHeader.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:18],
+		[wifiFieldsHeader.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
+	]];
+	[self layoutRows:@[
+		[self checkboxWithKey:HWG_WIFI_SHOW_SSID_KEY        title:NSLocalizedString(@"SSID (network name)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_WIFI_SHOW_BSSID_KEY       title:NSLocalizedString(@"BSSID (access point address)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_WIFI_SHOW_BAND_KEY        title:NSLocalizedString(@"Band (2.4/5/6 GHz)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_WIFI_SHOW_GENERATION_KEY  title:NSLocalizedString(@"Generation (Wi-Fi 4–7)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_WIFI_SHOW_SECURITY_KEY    title:NSLocalizedString(@"Security type", @"") defaultOn:YES],
+	] inView:wifiTab belowView:wifiFieldsHeader gap:10];
 
-	prefsView = v;
+	NSTabViewItem *wifiItem = [[NSTabViewItem alloc] initWithIdentifier:@"wifi"];
+	wifiItem.label = NSLocalizedString(@"Wi-Fi", @"");
+	wifiItem.view = [self scrollWrapping:wifiTab height:340];
+	[tabs addTabViewItem:wifiItem];
+
+	// --- Tab: Ethernet ---
+	NSView *ethTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 200)];
+	NSTextField *ethHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
+	[ethTab addSubview:ethHeader];
+	[NSLayoutConstraint activateConstraints:@[
+		[ethHeader.topAnchor     constraintEqualToAnchor:ethTab.topAnchor constant:16],
+		[ethHeader.leadingAnchor  constraintEqualToAnchor:ethTab.leadingAnchor constant:16],
+	]];
+	[self layoutRows:@[
+		[self checkboxWithKey:HWG_ETH_SHOW_INTERFACE_KEY title:NSLocalizedString(@"Interface name (en0, en5…)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_ETH_SHOW_SPEED_KEY     title:NSLocalizedString(@"Speed", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_ETH_SHOW_MODE_KEY      title:NSLocalizedString(@"Mode / duplex", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_ETH_SHOW_ALL_KEY       title:NSLocalizedString(@"Also report Wi-Fi's own link and AWDL/AirDrop events", @"") defaultOn:NO],
+	] inView:ethTab belowView:ethHeader gap:10];
+
+	NSTabViewItem *ethItem = [[NSTabViewItem alloc] initWithIdentifier:@"ethernet"];
+	ethItem.label = NSLocalizedString(@"Ethernet", @"");
+	ethItem.view = [self scrollWrapping:ethTab height:200];
+	[tabs addTabViewItem:ethItem];
+
+	// --- Tab: IP ---
+	NSView *ipTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 230)];
+	NSTextField *ipHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
+	[ipTab addSubview:ipHeader];
+	[NSLayoutConstraint activateConstraints:@[
+		[ipHeader.topAnchor     constraintEqualToAnchor:ipTab.topAnchor constant:16],
+		[ipHeader.leadingAnchor  constraintEqualToAnchor:ipTab.leadingAnchor constant:16],
+	]];
+	[self layoutRows:@[
+		[self checkboxWithKey:HWG_IP_SHOW_IPV4_KEY        title:NSLocalizedString(@"IPv4 address", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_IP_SHOW_IPV6_KEY        title:NSLocalizedString(@"IPv6 address", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_IP_SHOW_GATEWAY_KEY     title:NSLocalizedString(@"Gateway (per interface)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_IP_SHOW_NONROUTABLE_KEY title:NSLocalizedString(@"\"(non-routable)\" tag on self-assigned addresses", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_IP_USE_FRIENDLY_KEY     title:NSLocalizedString(@"Use friendly interface names (vs. en0/en5…)", @"") defaultOn:YES],
+	] inView:ipTab belowView:ipHeader gap:10];
+
+	NSTabViewItem *ipItem = [[NSTabViewItem alloc] initWithIdentifier:@"ip"];
+	ipItem.label = NSLocalizedString(@"IP", @"");
+	ipItem.view = [self scrollWrapping:ipTab height:230];
+	[tabs addTabViewItem:ipItem];
+
+	prefsView = tabs;
 	return prefsView;
 }
 
