@@ -658,7 +658,7 @@
                 <rect key="frame" x="0.0" y="0.0" width="500" height="231"/>
                 <autoresizingMask key="autoresizingMask"/>
                 <subviews>
-                    <tabView autoresizesSubviews="NO" type="noTabsNoBorder" id="672">
+                    <tabView autoresizesSubviews="YES" type="noTabsNoBorder" id="672">
                         <rect key="frame" x="0.0" y="0.0" width="500" height="231"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <font key="font" metaFont="system"/>
@@ -847,7 +847,7 @@
                                                 <autoresizingMask key="autoresizingMask"/>
                                             </scroller>
                                         </scrollView>
-                                        <box autoresizesSubviews="NO" borderType="line" title="Box" titlePosition="noTitle" id="741">
+                                        <box autoresizesSubviews="YES" borderType="line" title="Box" titlePosition="noTitle" id="741">
                                             <rect key="frame" x="243" y="16" width="240" height="197"/>
                                             <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                                             <view key="contentView" id="yoh-cw-OLV">
