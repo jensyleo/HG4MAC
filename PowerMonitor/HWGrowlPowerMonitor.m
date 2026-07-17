@@ -12,6 +12,19 @@
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/ps/IOPowerSources.h>
 
+// F33: individually configurable fields in the power/battery notification body — same
+// pattern as NetworkMonitor's per-field settings. All default to YES (matches prior
+// always-on behavior).
+#define HWG_POWER_SHOW_TYPE_KEY       @"HWGPowerShowSourceType"
+#define HWG_POWER_SHOW_STATE_KEY      @"HWGPowerShowChargeState"
+#define HWG_POWER_SHOW_PERCENTAGE_KEY @"HWGPowerShowPercentage"
+#define HWG_POWER_SHOW_TIME_KEY       @"HWGPowerShowTimeRemaining"
+
+static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
+}
+
 @interface HWGrowlPowerMonitor ()
 
 +(NSInteger)batteryPercentageForPowerSourceDescription:(CFDictionaryRef)description;
@@ -110,11 +123,17 @@
 
 -(NSString*)notificationDescriptionForCurrentSource:(HGPowerSource)currentSource {
 	NSMutableString *description = nil;
-	
+
+	// F33: each field independently toggleable from Preferences → Modules → Power Monitor.
+	BOOL showType       = HWGPowerBoolForKey(HWG_POWER_SHOW_TYPE_KEY, YES);
+	BOOL showState      = HWGPowerBoolForKey(HWG_POWER_SHOW_STATE_KEY, YES);
+	BOOL showPercentage = HWGPowerBoolForKey(HWG_POWER_SHOW_PERCENTAGE_KEY, YES);
+	BOOL showTime       = HWGPowerBoolForKey(HWG_POWER_SHOW_TIME_KEY, YES);
+
 	NSString *state = nil;
 	NSString *time = nil;
 	NSString *percentage = nil;
-	
+
 	// At 100% the battery is full even if IOKit still reports isCharging/finishing
 	// (macOS keeps "finishing charge" briefly at 100%). Never say "Charging at 100%".
 	if(_percentage >= 100)
@@ -125,33 +144,38 @@
 		state = NSLocalizedString(@"Finishing", @"");
 	else if (_charged)
 		state = NSLocalizedString(@"Charged", @"");
-	
+	if (!showState) state = nil;
+
 	if(_percentage >= 0.0)
 		percentage = [NSString stringWithFormat:@"%ld%%", _percentage];
-	
+	if (!showPercentage) percentage = nil;
+
 	if(_remainingTime > 0.0){
 		NSString *format = (currentSource == HGACPower) ? NSLocalizedString(@"Time to charge: %ld minutes", @"") : NSLocalizedString(@"Time remaining: %ld minutes", @"");
 		time = [NSString stringWithFormat:format, _remainingTime];
 	}
-	
+	if (!showTime) time = nil;
+
 	if(state || time || percentage){
+		NSMutableArray *line1Parts = [NSMutableArray array];
+		if (state) [line1Parts addObject:state];
+		if (percentage) {
+			[line1Parts addObject:[NSString stringWithFormat:
+				NSLocalizedString(@"at %@", @"at battery percentage"), percentage]];
+		}
+		NSString *line1Body = [line1Parts componentsJoinedByString:@" "];
+
 		description = [NSMutableString string];
-		
-		[description appendFormat:@"%@: ", [self typeString]];
-		if(state){
-			[description appendFormat:@"%@", state];
-			if(percentage)
-				[description appendString:@" "];
-			else if(time)
-				[description appendString:@"\n"];
+		if (showType && [line1Body length]) {
+			[description appendFormat:@"%@: %@", [self typeString], line1Body];
+		} else if (showType) {
+			[description appendString:[self typeString]];
+		} else if ([line1Body length]) {
+			[description appendString:line1Body];
 		}
-		if(percentage){
-			[description appendFormat:NSLocalizedString(@"at %@", @"at battery percentage"), percentage];
-			if(time)
-				[description appendString:@"\n"];
-		}
-		if(time){
-			[description appendFormat:@"%@", time];
+		if (time) {
+			if ([description length]) [description appendString:@"\n"];
+			[description appendString:time];
 		}
 	}
 	return description;
@@ -585,12 +609,93 @@ static void powerSourceChanged(void *context) {
 	});
 	return _icon;
 }
+// F33: single generic handler for every per-field visibility checkbox — mirrors
+// NetworkMonitor's `fieldToggleChanged:`. Each checkbox's `identifier` carries the
+// NSUserDefaults key it controls.
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = HWGPowerBoolForKey(key, defaultOn) ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = YES;   // frame-based layout, see preferencePane
+	return box;
+}
+
 -(NSView*)preferencePane {
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		// The nib lives in THIS plugin's bundle, not the main app bundle.
-		[[NSBundle bundleForClass:[self class]] loadNibNamed:@"PowerMonitorPrefs" owner:self topLevelObjects:nil];
-	});
+	if (prefsView) return prefsView;
+
+	// The nib lives in THIS plugin's bundle, not the main app bundle.
+	[[NSBundle bundleForClass:[self class]] loadNibNamed:@"PowerMonitorPrefs" owner:self topLevelObjects:nil];
+	NSView *xibView = prefsView;   // the refire-settings view the nib wired up
+
+	// F33: append a "Notification fields" section below the existing XIB content, rather
+	// than editing the XIB itself (its fixed-size layout is fragile to hand-edit). Positions
+	// everything with plain old-style FRAME math (matching xibView's own legacy
+	// springs-and-struts layout) instead of Auto Layout — two different Auto Layout-based
+	// attempts (manual anchor chains, then NSStackView) both left a large, unexplained gap
+	// between xibView and this section, likely from mixing Auto Layout with xibView's
+	// non-Auto-Layout internal subviews. Deterministic frame arithmetic sidesteps that
+	// entirely: every view's exact position is computed by hand, top to bottom.
+	CGFloat width = 380;
+	CGFloat pad = 16;
+	CGFloat xibW = 225, xibH = 204;
+	CGFloat headerH = 18;
+	CGFloat rowH = 24;
+	NSArray<NSButton*> *rows = @[
+		[self checkboxWithKey:HWG_POWER_SHOW_TYPE_KEY       title:NSLocalizedString(@"Power source type (Battery/UPS/Unknown)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_POWER_SHOW_STATE_KEY      title:NSLocalizedString(@"Charge state (Charging/Finishing/Charged)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_POWER_SHOW_PERCENTAGE_KEY title:NSLocalizedString(@"Battery percentage", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_POWER_SHOW_TIME_KEY       title:NSLocalizedString(@"Time remaining / time to charge", @"") defaultOn:YES],
+	];
+	CGFloat totalHeight = xibH + 16 + headerH + 10 + ([rows count] * rowH) + (([rows count] - 1) * 10) + pad;
+
+	NSView *combined = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, totalHeight)];
+	CGFloat cursorTop = totalHeight;   // distance from the TOP where the next view's top edge goes
+
+	xibView.translatesAutoresizingMaskIntoConstraints = YES;   // keep its own old-style layout untouched
+	CGFloat xibY = cursorTop - xibH;
+	xibView.frame = NSMakeRect(0, xibY, xibW, xibH);
+	[combined addSubview:xibView];
+	// PowerMonitorPrefs.xib's own content (the refire checkboxes/labels) is authored inside
+	// the TOP ~half of its declared 204pt-tall frame — the lowest control ("Refire only on
+	// battery") has its own bottom edge at local y=107, leaving ~97pt of blank space already
+	// baked into the xib below it. Advancing the cursor from xibView's FULL frame bottom
+	// (as a naive stack would) left that blank space PLUS our own 16pt gap between the
+	// visible refire controls and "Notification fields" — this is what actually caused the
+	// large gap (confirmed by reading real on-screen element positions via Accessibility).
+	// Resume from the xib's real content bottom instead.
+	CGFloat xibContentBottomLocal = 107;
+	cursorTop = xibY + xibContentBottomLocal - 16;
+
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = YES;
+	CGFloat headerY = cursorTop - headerH;
+	header.frame = NSMakeRect(pad, headerY, width - 2 * pad, headerH);
+	[combined addSubview:header];
+	cursorTop = headerY - 10;
+
+	for (NSButton *row in rows) {
+		CGFloat rowY = cursorTop - rowH;
+		row.frame = NSMakeRect(pad, rowY, width - 2 * pad, rowH);
+		[combined addSubview:row];
+		cursorTop = rowY - 10;
+	}
+
+	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, 260)];
+	scroll.hasVerticalScroller = YES;
+	scroll.autohidesScrollers = YES;
+	scroll.drawsBackground = NO;
+	scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+	scroll.documentView = combined;
+
+	prefsView = scroll;
 	return prefsView;
 }
 
