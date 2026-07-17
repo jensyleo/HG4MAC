@@ -23,6 +23,8 @@ Apple Silicon**, starting from the upstream linked above.
 
 > Built and tested on macOS 26 (Tahoe), Apple Silicon (M-series). Minimum deployment target: macOS 13.
 
+![Preferences — Modules](Screenshots/preferences-modules.png)
+
 ---
 
 ## Features
