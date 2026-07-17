@@ -79,6 +79,11 @@ See **[`CHANGELOG.md`](CHANGELOG.md)** for the full, itemized list of modernizat
 - macOS 13.0+ (developed/tested on macOS 26 Tahoe).
 - Xcode (recent), Apple Silicon or Intel.
 
+## Download
+
+Prebuilt app: see [Releases](https://github.com/jensyleo/HG4MAC/releases/latest) for a
+ready-to-run `.zip`. Or build it yourself:
+
 ## Build & install
 
 ```sh
