@@ -53,6 +53,17 @@
 #define HWG_IP_SHOW_NONROUTABLE_KEY  @"HWGIPShowNonRoutableTag"
 #define HWG_IP_USE_FRIENDLY_KEY      @"HWGIPUseFriendlyNames"
 
+// A plain NSView is NOT flipped by default, so inside an NSScrollView whose clip area
+// ends up TALLER than the document (e.g. after the Preferences-window resize fix let the
+// box grow), the document sits at the BOTTOM of the visible area — leaving an empty gap
+// above content that's pinned via top-anchor constraints, instead of at the top where the
+// constraints visually intend it. Flipped views don't have this ambiguity.
+@interface HWGFlippedContentView : NSView
+@end
+@implementation HWGFlippedContentView
+- (BOOL)isFlipped { return YES; }
+@end
+
 static struct ifmedia_description ifm_subtype_ethernet_descriptions[] = IFM_SUBTYPE_ETHERNET_DESCRIPTIONS;
 static struct ifmedia_description ifm_shared_option_descriptions[] = IFM_SHARED_OPTION_DESCRIPTIONS;
 
@@ -1200,7 +1211,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// --- Tab: Wi-Fi (also hosts the pre-existing signal-poll-interval slider) ---
-	NSView *wifiTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 340)];
+	NSView *wifiTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 340)];
 	NSTimeInterval cur = [self signalPollInterval];
 
 	NSTextField *title = [NSTextField labelWithString:NSLocalizedString(@"Wi-Fi signal check interval", @"")];
@@ -1254,7 +1265,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[tabs addTabViewItem:wifiItem];
 
 	// --- Tab: Ethernet ---
-	NSView *ethTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 200)];
+	NSView *ethTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 200)];
 	NSTextField *ethHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ethTab addSubview:ethHeader];
 	[NSLayoutConstraint activateConstraints:@[
@@ -1274,7 +1285,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[tabs addTabViewItem:ethItem];
 
 	// --- Tab: IP ---
-	NSView *ipTab = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 230)];
+	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 230)];
 	NSTextField *ipHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ipTab addSubview:ipHeader];
 	[NSLayoutConstraint activateConstraints:@[
@@ -1293,6 +1304,24 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	ipItem.label = NSLocalizedString(@"IP", @"");
 	ipItem.view = [self scrollWrapping:ipTab height:230];
 	[tabs addTabViewItem:ipItem];
+
+	// --- Tab: Other (catch-all reserved for future fields that don't fit Wi-Fi/Ethernet/IP) ---
+	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
+	NSTextField *otherPlaceholder = [NSTextField labelWithString:
+		NSLocalizedString(@"No additional fields yet.", @"")];
+	otherPlaceholder.textColor = [NSColor secondaryLabelColor];
+	otherPlaceholder.font = [NSFont systemFontOfSize:12];
+	otherPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+	[otherTab addSubview:otherPlaceholder];
+	[NSLayoutConstraint activateConstraints:@[
+		[otherPlaceholder.topAnchor     constraintEqualToAnchor:otherTab.topAnchor constant:16],
+		[otherPlaceholder.leadingAnchor  constraintEqualToAnchor:otherTab.leadingAnchor constant:16],
+	]];
+
+	NSTabViewItem *otherItem = [[NSTabViewItem alloc] initWithIdentifier:@"other"];
+	otherItem.label = NSLocalizedString(@"Other", @"");
+	otherItem.view = [self scrollWrapping:otherTab height:120];
+	[tabs addTabViewItem:otherItem];
 
 	prefsView = tabs;
 	return prefsView;
