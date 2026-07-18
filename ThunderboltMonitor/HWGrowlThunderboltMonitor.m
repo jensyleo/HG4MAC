@@ -13,10 +13,21 @@
 // (Note: it's a const, not a macro, so a #ifndef fallback would wrongly
 // redefine it to the deprecated kIOMasterPortDefault — don't do that.)
 
+// F33: individually configurable fields in the Thunderbolt connect notification's extra
+// info — same pattern as Network/Power/USB/Bluetooth Monitor. All default to YES.
+#define HWG_TB_SHOW_VIDPID_KEY @"HWGThunderboltShowVIDPID"
+#define HWG_TB_SHOW_TYPE_KEY   @"HWGThunderboltShowType"
+
+static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
+}
+
 @interface HWGrowlThunderboltMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL notificationsArePrimed;
+@property (nonatomic, strong) NSView *prefsView;
 
 // C / Core Foundation pointers — ARC does NOT manage these; keep assign.
 @property (nonatomic, assign) IONotificationPortRef ioKitNotificationPort;
@@ -35,6 +46,7 @@
 @synthesize notificationRunLoopSource;
 @synthesize addedIterator;
 @synthesize removedIterator;
+@synthesize prefsView;
 
 -(id)init {
 	if((self = [super init])){
@@ -126,49 +138,53 @@
 -(NSString *)tbExtraInfoForDevice:(io_object_t)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
-	int vendorID = -1, deviceID = -1;
-	CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
-	if (vidRef) {
-		if (CFGetTypeID(vidRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)vidRef) >= 2) {
-			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)vidRef);
-			vendorID = bytes[0] | (bytes[1] << 8);
-		} else if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) {
-			CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vendorID);
+	if (HWGTBBoolForKey(HWG_TB_SHOW_VIDPID_KEY, YES)) {
+		int vendorID = -1, deviceID = -1;
+		CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
+		if (vidRef) {
+			if (CFGetTypeID(vidRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)vidRef) >= 2) {
+				const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)vidRef);
+				vendorID = bytes[0] | (bytes[1] << 8);
+			} else if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) {
+				CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vendorID);
+			}
+			CFRelease(vidRef);
 		}
-		CFRelease(vidRef);
-	}
-	CFTypeRef didRef = IORegistryEntryCreateCFProperty(device, CFSTR("device-id"), kCFAllocatorDefault, 0);
-	if (didRef) {
-		if (CFGetTypeID(didRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)didRef) >= 2) {
-			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)didRef);
-			deviceID = bytes[0] | (bytes[1] << 8);
-		} else if (CFGetTypeID(didRef) == CFNumberGetTypeID()) {
-			CFNumberGetValue((CFNumberRef)didRef, kCFNumberIntType, &deviceID);
+		CFTypeRef didRef = IORegistryEntryCreateCFProperty(device, CFSTR("device-id"), kCFAllocatorDefault, 0);
+		if (didRef) {
+			if (CFGetTypeID(didRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)didRef) >= 2) {
+				const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)didRef);
+				deviceID = bytes[0] | (bytes[1] << 8);
+			} else if (CFGetTypeID(didRef) == CFNumberGetTypeID()) {
+				CFNumberGetValue((CFNumberRef)didRef, kCFNumberIntType, &deviceID);
+			}
+			CFRelease(didRef);
 		}
-		CFRelease(didRef);
-	}
-	if (vendorID >= 0 && deviceID >= 0) {
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vendorID, deviceID]];
+		if (vendorID >= 0 && deviceID >= 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vendorID, deviceID]];
+		}
 	}
 
-	CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("class-code"), kCFAllocatorDefault, 0);
-	if (classRef) {
-		uint32_t classCode = 0;
-		BOOL got = NO;
-		if (CFGetTypeID(classRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)classRef) >= 3) {
-			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)classRef);
-			classCode = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
-			got = YES;
-		} else if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
-			CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt32Type, (int32_t *)&classCode);
-			got = YES;
+	if (HWGTBBoolForKey(HWG_TB_SHOW_TYPE_KEY, YES)) {
+		CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("class-code"), kCFAllocatorDefault, 0);
+		if (classRef) {
+			uint32_t classCode = 0;
+			BOOL got = NO;
+			if (CFGetTypeID(classRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)classRef) >= 3) {
+				const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)classRef);
+				classCode = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
+				got = YES;
+			} else if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
+				CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt32Type, (int32_t *)&classCode);
+				got = YES;
+			}
+			if (got) {
+				uint8_t baseClass = (classCode >> 16) & 0xFF;
+				NSString *className = [self tbClassNameForBaseClass:baseClass];
+				if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
+			}
+			CFRelease(classRef);
 		}
-		if (got) {
-			uint8_t baseClass = (classCode >> 16) & 0xFF;
-			NSString *className = [self tbClassNameForBaseClass:baseClass];
-			if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
-		}
-		CFRelease(classRef);
 	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
@@ -276,8 +292,55 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	});
 	return _icon;
 }
+// F33: single generic handler for every per-field visibility checkbox. Each checkbox's
+// `identifier` carries the NSUserDefaults key it controls.
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = HWGTBBoolForKey(key, defaultOn) ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = NO;
+	return box;
+}
+
 -(NSView*)preferencePane {
-	return nil;
+	if (prefsView) return prefsView;
+
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 140)];
+
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSArray<NSButton*> *rows = @[
+		[self checkboxWithKey:HWG_TB_SHOW_VIDPID_KEY title:NSLocalizedString(@"Vendor/device ID (VID:PID)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_TB_SHOW_TYPE_KEY    title:NSLocalizedString(@"Device type (Storage, Display, Bridge/Dock…)", @"") defaultOn:YES],
+	];
+
+	[v addSubview:header];
+	[NSLayoutConstraint activateConstraints:@[
+		[header.topAnchor     constraintEqualToAnchor:v.topAnchor constant:16],
+		[header.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+	]];
+	NSView *previous = header;
+	for (NSButton *row in rows) {
+		[v addSubview:row];
+		[NSLayoutConstraint activateConstraints:@[
+			[row.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:10],
+			[row.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+			[row.heightAnchor   constraintEqualToConstant:24],
+		]];
+		previous = row;
+	}
+
+	prefsView = v;
+	return prefsView;
 }
 
 #pragma mark HWGrowlPluginNotifierProtocol

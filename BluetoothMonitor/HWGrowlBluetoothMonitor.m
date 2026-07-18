@@ -11,10 +11,22 @@
 #import <stdlib.h>
 #import <IOBluetooth/IOBluetooth.h>
 
+// F33: individually configurable fields in the Bluetooth connect notification's extra
+// info — same pattern as Network/Power/USB Monitor. All default to YES.
+#define HWG_BT_SHOW_TYPE_KEY    @"HWGBluetoothShowType"
+#define HWG_BT_SHOW_PAIRED_KEY  @"HWGBluetoothShowPaired"
+#define HWG_BT_SHOW_ADDRESS_KEY @"HWGBluetoothShowAddress"
+
+static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
+}
+
 @interface HWGrowlBluetoothMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL starting;
+@property (nonatomic, strong) NSView *prefsView;
 
 // strong: we keep this object to call -unregister on it later, so the monitor
 // must own it.
@@ -27,6 +39,7 @@
 @synthesize delegate;
 @synthesize starting;
 @synthesize connectionNotification;
+@synthesize prefsView;
 
 -(void)dealloc {
 	[connectionNotification unregister];
@@ -107,14 +120,20 @@
 -(NSString *)bluetoothExtraInfoForDevice:(IOBluetoothDevice *)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
-	NSString *typeLabel = [self bluetoothTypeLabelForDevice:device];
-	if (typeLabel) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), typeLabel]];
+	if (HWGBTBoolForKey(HWG_BT_SHOW_TYPE_KEY, YES)) {
+		NSString *typeLabel = [self bluetoothTypeLabelForDevice:device];
+		if (typeLabel) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), typeLabel]];
+	}
 
-	[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Paired:\t%@", @""),
-		[device isPaired] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+	if (HWGBTBoolForKey(HWG_BT_SHOW_PAIRED_KEY, YES)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Paired:\t%@", @""),
+			[device isPaired] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+	}
 
-	NSString *address = [device addressString];
-	if (address) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Address:\t%@", @""), address]];
+	if (HWGBTBoolForKey(HWG_BT_SHOW_ADDRESS_KEY, YES)) {
+		NSString *address = [device addressString];
+		if (address) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Address:\t%@", @""), address]];
+	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
@@ -154,8 +173,56 @@
 	});
 	return _icon;
 }
+// F33: single generic handler for every per-field visibility checkbox. Each checkbox's
+// `identifier` carries the NSUserDefaults key it controls.
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = HWGBTBoolForKey(key, defaultOn) ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = NO;
+	return box;
+}
+
 -(NSView*)preferencePane {
-	return nil;
+	if (prefsView) return prefsView;
+
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 160)];
+
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSArray<NSButton*> *rows = @[
+		[self checkboxWithKey:HWG_BT_SHOW_TYPE_KEY    title:NSLocalizedString(@"Device type (Keyboard, Mouse, Headphones…)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_BT_SHOW_PAIRED_KEY  title:NSLocalizedString(@"Paired state", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_BT_SHOW_ADDRESS_KEY title:NSLocalizedString(@"MAC address", @"") defaultOn:YES],
+	];
+
+	[v addSubview:header];
+	[NSLayoutConstraint activateConstraints:@[
+		[header.topAnchor     constraintEqualToAnchor:v.topAnchor constant:16],
+		[header.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+	]];
+	NSView *previous = header;
+	for (NSButton *row in rows) {
+		[v addSubview:row];
+		[NSLayoutConstraint activateConstraints:@[
+			[row.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:10],
+			[row.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+			[row.heightAnchor   constraintEqualToConstant:24],
+		]];
+		previous = row;
+	}
+
+	prefsView = v;
+	return prefsView;
 }
 
 #pragma mark HWGrowlPluginNotifierProtocol

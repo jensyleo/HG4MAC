@@ -111,7 +111,22 @@
 	}];
 
 	self.pluginController = [[HWGrowlPluginController alloc] init];
-	
+
+	// The currently-selected monitor's prefs pane is sized to match containerView's frame
+	// at the moment it's inserted (see -tableViewSelectionDidChange:). But containerView
+	// itself is resized AFTER that — confirmed via Accessibility inspection: right after
+	// the window is first shown, containerView.frame is a small nib-authored placeholder
+	// size, and only grows to its real on-screen size once the split between the sidebar
+	// and detail area is actually resolved. That happens exactly once, for whichever
+	// monitor is selected first (every other monitor is only ever built after the
+	// container already has its real size, from the user clicking its row). Rather than
+	// guessing when that resize completes, react to it directly.
+	[containerView setPostsFrameChangedNotifications:YES];
+	[[NSNotificationCenter defaultCenter] addObserver:self
+											  selector:@selector(containerViewFrameDidChange:)
+												  name:NSViewFrameDidChangeNotification
+												object:containerView];
+
 	
 	NSDictionary *attrDict = [NSDictionary dictionaryWithObjectsAndKeys:
 		[NSFont systemFontOfSize:13.0f], NSFontAttributeName,
@@ -537,7 +552,18 @@
 		[currentView removeFromSuperview];
 	[containerView addSubview:newView];
 	self.currentView = newView;
+	[containerView layoutSubtreeIfNeeded];
 	[_window recalculateKeyViewLoop];
+}
+
+// containerView can still resize AFTER a pane has been sized/inserted above (see the
+// -awakeFromNib comment where this is observed) — keep the currently-displayed pane's
+// frame in sync whenever that happens, instead of assuming containerView's frame at
+// insertion time is final.
+-(void)containerViewFrameDidChange:(NSNotification *)notification {
+	if (!currentView) return;
+	[currentView setFrameSize:[containerView frame].size];
+	[containerView layoutSubtreeIfNeeded];
 }
 
 - (id) tableView:(NSTableView *)aTableView objectValueForTableColumn:(NSTableColumn *)aTableColumn row:(NSInteger)rowIndex {

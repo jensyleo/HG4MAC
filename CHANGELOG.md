@@ -6,6 +6,27 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## 2026-07-17
 
+### New: per-field notification settings for USB, Bluetooth, and Thunderbolt
+- Extends the per-field toggle pattern already used by Network/Power Monitor to the three
+  monitors below. Every field is independently switchable from Preferences → Modules → the
+  relevant monitor, all on by default:
+  - **USB**: manufacturer/product name, vendor/product ID, speed, device class.
+  - **Bluetooth**: device type, paired state, MAC address.
+  - **Thunderbolt**: vendor/product ID, device class.
+- Fixed a layout bug hit while building this: the first-ever time the Preferences window is
+  opened in a session, the pane for whichever monitor is selected by default (Bluetooth,
+  alphabetically first) showed its "Notification fields" controls displaced far below where
+  they belonged, with a large empty gap above them. Root cause, found via Accessibility
+  introspection of the live app (comparing real on-screen element positions in the broken
+  vs. self-corrected state): the pane is sized to match its container's frame at the moment
+  it's first inserted, but the container itself is *not* at its final on-screen size yet at
+  that point — it grows once the window's sidebar/detail split actually resolves. Every
+  other monitor's pane only ever gets built after the user manually clicks its row, by which
+  time the container is already at its real size, so they never hit this. Fixed by observing
+  `NSViewFrameDidChangeNotification` on the container and re-syncing the currently-displayed
+  pane's frame whenever it actually changes, instead of assuming the frame at insertion time
+  is final.
+
 ### New: richer notification detail for USB, Bluetooth, and Thunderbolt
 - These three monitors previously showed only the device name. Added, using public/
   documented APIs only:

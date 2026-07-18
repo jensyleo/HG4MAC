@@ -20,10 +20,23 @@
 static void usbDeviceAdded(void *refCon, io_iterator_t iterator);
 static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 
+// F33: individually configurable fields in the USB connect notification's extra info —
+// same pattern as Network/Power Monitor. All default to YES.
+#define HWG_USB_SHOW_MANUFACTURER_KEY @"HWGUSBShowManufacturer"
+#define HWG_USB_SHOW_VIDPID_KEY       @"HWGUSBShowVIDPID"
+#define HWG_USB_SHOW_SPEED_KEY        @"HWGUSBShowSpeed"
+#define HWG_USB_SHOW_CLASS_KEY        @"HWGUSBShowDeviceClass"
+
+static BOOL HWGUSBBoolForKey(NSString *key, BOOL def) {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
+}
+
 @interface HWGrowlUSBMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL notificationsArePrimed;
+@property (nonatomic, strong) NSView *prefsView;
 
 // C / Core Foundation pointers — ARC does NOT manage these; keep assign.
 @property (nonatomic, assign) IONotificationPortRef ioKitNotificationPort;
@@ -42,6 +55,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 @synthesize notificationRunLoopSource;
 @synthesize addedIterator;
 @synthesize removedIterator;
+@synthesize prefsView;
 
 -(void)dealloc {
 	// Keep the CF/IOKit teardown; ARC handles ObjC memory. No [super dealloc].
@@ -222,52 +236,60 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 -(NSString *)usbExtraInfoForDevice:(io_object_t)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
-	NSString *vendorName = nil, *productName = nil;
-	CFTypeRef vn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Vendor Name"), kCFAllocatorDefault, 0);
-	if (vn) {
-		if (CFGetTypeID(vn) == CFStringGetTypeID()) vendorName = (__bridge_transfer NSString *)vn;
-		else CFRelease(vn);
-	}
-	CFTypeRef pn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
-	if (pn) {
-		if (CFGetTypeID(pn) == CFStringGetTypeID()) productName = (__bridge_transfer NSString *)pn;
-		else CFRelease(pn);
-	}
-	if (vendorName || productName) {
-		NSString *combined = (vendorName && productName) ? [NSString stringWithFormat:@"%@ %@", vendorName, productName]
-			: (vendorName ?: productName);
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), combined]];
-	}
-
-	int vid = -1, pid = -1;
-	CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idVendor"), kCFAllocatorDefault, 0);
-	if (vidRef) { if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vid); CFRelease(vidRef); }
-	CFTypeRef pidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idProduct"), kCFAllocatorDefault, 0);
-	if (pidRef) { if (CFGetTypeID(pidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)pidRef, kCFNumberIntType, &pid); CFRelease(pidRef); }
-	if (vid >= 0 && pid >= 0) {
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vid, pid]];
-	}
-
-	CFTypeRef speedRef = IORegistryEntryCreateCFProperty(device, CFSTR("Device Speed"), kCFAllocatorDefault, 0);
-	if (speedRef) {
-		if (CFGetTypeID(speedRef) == CFNumberGetTypeID()) {
-			uint8_t speed = 0;
-			CFNumberGetValue((CFNumberRef)speedRef, kCFNumberSInt8Type, &speed);
-			NSString *speedName = [self usbSpeedNameForSpeedCode:speed];
-			if (speedName) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Speed:\t%@", @""), speedName]];
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_MANUFACTURER_KEY, YES)) {
+		NSString *vendorName = nil, *productName = nil;
+		CFTypeRef vn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Vendor Name"), kCFAllocatorDefault, 0);
+		if (vn) {
+			if (CFGetTypeID(vn) == CFStringGetTypeID()) vendorName = (__bridge_transfer NSString *)vn;
+			else CFRelease(vn);
 		}
-		CFRelease(speedRef);
+		CFTypeRef pn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
+		if (pn) {
+			if (CFGetTypeID(pn) == CFStringGetTypeID()) productName = (__bridge_transfer NSString *)pn;
+			else CFRelease(pn);
+		}
+		if (vendorName || productName) {
+			NSString *combined = (vendorName && productName) ? [NSString stringWithFormat:@"%@ %@", vendorName, productName]
+				: (vendorName ?: productName);
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), combined]];
+		}
 	}
 
-	CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("bDeviceClass"), kCFAllocatorDefault, 0);
-	if (classRef) {
-		if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
-			uint8_t deviceClass = 0;
-			CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt8Type, &deviceClass);
-			NSString *className = [self usbClassNameForClassCode:deviceClass];
-			if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_VIDPID_KEY, YES)) {
+		int vid = -1, pid = -1;
+		CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idVendor"), kCFAllocatorDefault, 0);
+		if (vidRef) { if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vid); CFRelease(vidRef); }
+		CFTypeRef pidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idProduct"), kCFAllocatorDefault, 0);
+		if (pidRef) { if (CFGetTypeID(pidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)pidRef, kCFNumberIntType, &pid); CFRelease(pidRef); }
+		if (vid >= 0 && pid >= 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vid, pid]];
 		}
-		CFRelease(classRef);
+	}
+
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_SPEED_KEY, YES)) {
+		CFTypeRef speedRef = IORegistryEntryCreateCFProperty(device, CFSTR("Device Speed"), kCFAllocatorDefault, 0);
+		if (speedRef) {
+			if (CFGetTypeID(speedRef) == CFNumberGetTypeID()) {
+				uint8_t speed = 0;
+				CFNumberGetValue((CFNumberRef)speedRef, kCFNumberSInt8Type, &speed);
+				NSString *speedName = [self usbSpeedNameForSpeedCode:speed];
+				if (speedName) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Speed:\t%@", @""), speedName]];
+			}
+			CFRelease(speedRef);
+		}
+	}
+
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_CLASS_KEY, YES)) {
+		CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("bDeviceClass"), kCFAllocatorDefault, 0);
+		if (classRef) {
+			if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
+				uint8_t deviceClass = 0;
+				CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt8Type, &deviceClass);
+				NSString *className = [self usbClassNameForClassCode:deviceClass];
+				if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
+			}
+			CFRelease(classRef);
+		}
 	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
@@ -384,8 +406,57 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	});
 	return _icon;
 }
+// F33: single generic handler for every per-field visibility checkbox. Each checkbox's
+// `identifier` carries the NSUserDefaults key it controls.
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = HWGUSBBoolForKey(key, defaultOn) ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = NO;
+	return box;
+}
+
 -(NSView*)preferencePane {
-	return nil;
+	if (prefsView) return prefsView;
+
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 200)];
+
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSArray<NSButton*> *rows = @[
+		[self checkboxWithKey:HWG_USB_SHOW_MANUFACTURER_KEY title:NSLocalizedString(@"Manufacturer / product name", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_USB_SHOW_VIDPID_KEY       title:NSLocalizedString(@"Vendor/product ID (VID:PID)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_USB_SHOW_SPEED_KEY        title:NSLocalizedString(@"USB speed / generation", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_USB_SHOW_CLASS_KEY        title:NSLocalizedString(@"Device class (Mass Storage, HID, Hub…)", @"") defaultOn:YES],
+	];
+
+	[v addSubview:header];
+	[NSLayoutConstraint activateConstraints:@[
+		[header.topAnchor     constraintEqualToAnchor:v.topAnchor constant:16],
+		[header.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+	]];
+	NSView *previous = header;
+	for (NSButton *row in rows) {
+		[v addSubview:row];
+		[NSLayoutConstraint activateConstraints:@[
+			[row.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:10],
+			[row.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+			[row.heightAnchor   constraintEqualToConstant:24],
+		]];
+		previous = row;
+	}
+
+	prefsView = v;
+	return prefsView;
 }
 
 #pragma mark HWGrowlPluginNotifierProtocol
