@@ -6,6 +6,31 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## 2026-07-17
 
+### New: richer notification detail for USB, Bluetooth, and Thunderbolt
+- These three monitors previously showed only the device name. Added, using public/
+  documented APIs only:
+  - **USB**: manufacturer and product name, vendor/product ID, USB generation/speed
+    (1.0/1.1/2.0/3.x), and a human-readable device class (Mass Storage, HID, Hub, Audio,
+    etc. — from the USB-IF's published base class table), all read via
+    `IORegistryEntryCreateCFProperty` the same way the existing hub detection already
+    reads `bDeviceClass`.
+  - **Bluetooth**: a device type label (Keyboard, Mouse/Trackpad, Headphones, Hands-Free,
+    etc. — from `IOBluetoothDevice`'s public `deviceClassMajor`/`deviceClassMinor`), paired
+    state, and MAC address. Battery level remains intentionally excluded — no public,
+    documented API exposes it for an arbitrary paired accessory.
+  - **Thunderbolt**: vendor/device ID and a device type label (Storage Controller, Display
+    Controller, Bridge/Dock, etc. — from the PCI-SIG's published class-code table), read
+    from the same `IOPCIDevice` registry entry as the existing device name. True
+    Thunderbolt-generation/link-speed info (TB3/TB4/USB4) has no public API and was
+    deliberately left out.
+  - None of this extra detail is shown on disconnect — registry properties are frequently
+    unreadable from an already-terminating device by the time that callback fires.
+- Confirmed working: USB flash drive and a multi-chip USB-C hub/dock (each internal chip —
+  LAN, card reader, USB 2.0/3.0 hub controllers — correctly reported separately with its
+  own manufacturer/VID:PID/speed/type, which is expected since each enumerates as its own
+  USB device), and a Bluetooth keyboard (showed "Keyboard" type correctly). Thunderbolt
+  untested — no genuine Thunderbolt hardware available.
+
 ### New: per-field notification settings for Power Monitor
 - Every field in the power/battery notification body is now independently toggleable from
   Preferences → Modules → Power Monitor: power source type (Battery/UPS/Unknown), charge
