@@ -12,6 +12,8 @@
 		932173DB163A43F200D5790F /* USBMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = BC523C221555686000548427 /* USBMonitor.hwgrowlmonitor */; };
 		932173DC163A43F200D5790F /* BluetoothMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = BCA26B5D155585C0009C5ABC /* BluetoothMonitor.hwgrowlmonitor */; };
 		C0FE0010C0FE0010C0FE0010 /* ThunderboltMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = BC75524E156528AA00CB0542 /* ThunderboltMonitor.hwgrowlmonitor */; };
+		C0FE0031C0FE0031C0FE0031 /* ThermalMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = C0FE0030C0FE0030C0FE0030 /* ThermalMonitor.hwgrowlmonitor */; };
+		D1590001D1590001D1590001 /* DisplayMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = D1590002D1590002D1590002 /* DisplayMonitor.hwgrowlmonitor */; };
 		932173DE163A43F200D5790F /* PowerMonitor.hwgrowlmonitor in Copy Plugins */ = {isa = PBXBuildFile; fileRef = BCA26BB31555BB1A009C5ABC /* PowerMonitor.hwgrowlmonitor */; };
 		C0FE0020C0FE0020C0FE0020 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C0FE0021C0FE0021C0FE0021 /* Assets.xcassets */; };
 		BC4FC623155C04B700EE65EC /* MainMenu.xib in Resources */ = {isa = PBXBuildFile; fileRef = BC4FC622155C04B700EE65EC /* MainMenu.xib */; };
@@ -25,6 +27,13 @@
 		BC75524F156528AA00CB0542 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCB805EB155153330088C69A /* Cocoa.framework */; };
 		BC755255156528AA00CB0542 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = BC755253156528AA00CB0542 /* InfoPlist.strings */; };
 		BC75526C1565291400CB0542 /* HWGrowlThunderboltMonitor.m in Sources */ = {isa = PBXBuildFile; fileRef = BC75526B1565291400CB0542 /* HWGrowlThunderboltMonitor.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		C0FE0039C0FE0039C0FE0039 /* HWGrowlThermalMonitor.m in Sources */ = {isa = PBXBuildFile; fileRef = C0FE0038C0FE0038C0FE0038 /* HWGrowlThermalMonitor.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		C0FE003AC0FE003AC0FE003A /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCB805EB155153330088C69A /* Cocoa.framework */; };
+		C0FE0035C0FE0035C0FE0035 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = C0FE0034C0FE0034C0FE0034 /* InfoPlist.strings */; };
+		D1590009D1590009D1590009 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = D1590008D1590008D1590008 /* InfoPlist.strings */; };
+		D1590003D1590003D1590003 /* HWGrowlDisplayMonitor.m in Sources */ = {isa = PBXBuildFile; fileRef = D1590004D1590004D1590004 /* HWGrowlDisplayMonitor.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		D1590011D1590011D1590011 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCB805EB155153330088C69A /* Cocoa.framework */; };
+		D159001BD159001BD159001B /* OSLog.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D159001AD159001AD159001A /* OSLog.framework */; };
 		BC75527015652BB100CB0542 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC523C3515556BE500548427 /* IOKit.framework */; };
 		BCA26B5E155585C0009C5ABC /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BCB805EB155153330088C69A /* Cocoa.framework */; };
 		BCA26B64155585C0009C5ABC /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = BCA26B62155585C0009C5ABC /* InfoPlist.strings */; };
@@ -104,6 +113,20 @@
 			proxyType = 1;
 			remoteGlobalIDString = BC75524D156528AA00CB0542;
 			remoteInfo = ThunderboltMonitor;
+		};
+		C0FE0041C0FE0041C0FE0041 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCB805DE155153330088C69A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C0FE003DC0FE003DC0FE003D;
+			remoteInfo = ThermalMonitor;
+		};
+		D1590012D1590012D1590012 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCB805DE155153330088C69A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D159000DD159000DD159000D;
+			remoteInfo = DisplayMonitor;
 		};
 		BCAA17651557857C00D9E4ED /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -288,6 +311,8 @@
 				932173DC163A43F200D5790F /* BluetoothMonitor.hwgrowlmonitor in Copy Plugins */,
 				C0FE0010C0FE0010C0FE0010 /* ThunderboltMonitor.hwgrowlmonitor in Copy Plugins */,
 				932173DE163A43F200D5790F /* PowerMonitor.hwgrowlmonitor in Copy Plugins */,
+				C0FE0031C0FE0031C0FE0031 /* ThermalMonitor.hwgrowlmonitor in Copy Plugins */,
+				D1590001D1590001D1590001 /* DisplayMonitor.hwgrowlmonitor in Copy Plugins */,
 			);
 			name = "Copy Plugins";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -319,6 +344,18 @@
 		BC755256156528AA00CB0542 /* ThunderboltMonitor-Prefix.pch */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ThunderboltMonitor-Prefix.pch"; sourceTree = "<group>"; };
 		BC75526A1565291400CB0542 /* HWGrowlThunderboltMonitor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HWGrowlThunderboltMonitor.h; sourceTree = "<group>"; };
 		BC75526B1565291400CB0542 /* HWGrowlThunderboltMonitor.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HWGrowlThunderboltMonitor.m; sourceTree = "<group>"; };
+		C0FE0030C0FE0030C0FE0030 /* ThermalMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ThermalMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0FE0032C0FE0032C0FE0032 /* ThermalMonitor-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "ThermalMonitor-Info.plist"; sourceTree = "<group>"; };
+		C0FE0033C0FE0033C0FE0033 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		C0FE0036C0FE0036C0FE0036 /* ThermalMonitor-Prefix.pch */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ThermalMonitor-Prefix.pch"; sourceTree = "<group>"; };
+		C0FE0037C0FE0037C0FE0037 /* HWGrowlThermalMonitor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HWGrowlThermalMonitor.h; sourceTree = "<group>"; };
+		C0FE0038C0FE0038C0FE0038 /* HWGrowlThermalMonitor.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HWGrowlThermalMonitor.m; sourceTree = "<group>"; };
+		D1590002D1590002D1590002 /* DisplayMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DisplayMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1590006D1590006D1590006 /* DisplayMonitor-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "DisplayMonitor-Info.plist"; sourceTree = "<group>"; };
+		D1590007D1590007D1590007 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		D159000AD159000AD159000A /* DisplayMonitor-Prefix.pch */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "DisplayMonitor-Prefix.pch"; sourceTree = "<group>"; };
+		D1590005D1590005D1590005 /* HWGrowlDisplayMonitor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HWGrowlDisplayMonitor.h; sourceTree = "<group>"; };
+		D1590004D1590004D1590004 /* HWGrowlDisplayMonitor.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HWGrowlDisplayMonitor.m; sourceTree = "<group>"; };
 		BCA26B5D155585C0009C5ABC /* BluetoothMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BluetoothMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
 		BCA26B61155585C0009C5ABC /* BluetoothMonitor-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "BluetoothMonitor-Info.plist"; sourceTree = "<group>"; };
 		BCA26B63155585C0009C5ABC /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -326,6 +363,7 @@
 		BCA26B6A155585FA009C5ABC /* HWGrowlBluetoothMonitor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HWGrowlBluetoothMonitor.h; sourceTree = "<group>"; };
 		BCA26B6B155585FA009C5ABC /* HWGrowlBluetoothMonitor.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HWGrowlBluetoothMonitor.m; sourceTree = "<group>"; };
 		BCA26B7015558837009C5ABC /* IOBluetooth.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOBluetooth.framework; path = System/Library/Frameworks/IOBluetooth.framework; sourceTree = SDKROOT; };
+		D159001AD159001AD159001A /* OSLog.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OSLog.framework; path = System/Library/Frameworks/OSLog.framework; sourceTree = SDKROOT; };
 		BCA26BB31555BB1A009C5ABC /* PowerMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PowerMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
 		BCA26BB71555BB1B009C5ABC /* PowerMonitor-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "PowerMonitor-Info.plist"; sourceTree = "<group>"; };
 		BCA26BB91555BB1B009C5ABC /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -417,6 +455,23 @@
 			files = (
 				BC75524F156528AA00CB0542 /* Cocoa.framework in Frameworks */,
 				BC75527015652BB100CB0542 /* IOKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0FE003FC0FE003FC0FE003F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0FE003AC0FE003AC0FE003A /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D159000FD159000FD159000F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1590011D1590011D1590011 /* Cocoa.framework in Frameworks */,
+				D159001BD159001BD159001B /* OSLog.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,6 +578,48 @@
 			name = "Supporting Files";
 			sourceTree = "<group>";
 		};
+		C0FE003BC0FE003BC0FE003B /* ThermalMonitor */ = {
+			isa = PBXGroup;
+			children = (
+				C0FE0037C0FE0037C0FE0037 /* HWGrowlThermalMonitor.h */,
+				C0FE0038C0FE0038C0FE0038 /* HWGrowlThermalMonitor.m */,
+				C0FE003CC0FE003CC0FE003C /* Supporting Files */,
+			);
+			name = ThermalMonitor;
+			path = ../ThermalMonitor;
+			sourceTree = "<group>";
+		};
+		C0FE003CC0FE003CC0FE003C /* Supporting Files */ = {
+			isa = PBXGroup;
+			children = (
+				C0FE0032C0FE0032C0FE0032 /* ThermalMonitor-Info.plist */,
+				C0FE0034C0FE0034C0FE0034 /* InfoPlist.strings */,
+				C0FE0036C0FE0036C0FE0036 /* ThermalMonitor-Prefix.pch */,
+			);
+			name = "Supporting Files";
+			sourceTree = "<group>";
+		};
+		D159000BD159000BD159000B /* DisplayMonitor */ = {
+			isa = PBXGroup;
+			children = (
+				D1590005D1590005D1590005 /* HWGrowlDisplayMonitor.h */,
+				D1590004D1590004D1590004 /* HWGrowlDisplayMonitor.m */,
+				D159000CD159000CD159000C /* Supporting Files */,
+			);
+			name = DisplayMonitor;
+			path = ../DisplayMonitor;
+			sourceTree = "<group>";
+		};
+		D159000CD159000CD159000C /* Supporting Files */ = {
+			isa = PBXGroup;
+			children = (
+				D1590006D1590006D1590006 /* DisplayMonitor-Info.plist */,
+				D1590008D1590008D1590008 /* InfoPlist.strings */,
+				D159000AD159000AD159000A /* DisplayMonitor-Prefix.pch */,
+			);
+			name = "Supporting Files";
+			sourceTree = "<group>";
+		};
 		BC9757A9156C2D2B0080CF24 /* BundleIcons */ = {
 			isa = PBXGroup;
 			children = (
@@ -596,6 +693,8 @@
 				BCA26B5D155585C0009C5ABC /* BluetoothMonitor.hwgrowlmonitor */,
 				BCA26BB31555BB1A009C5ABC /* PowerMonitor.hwgrowlmonitor */,
 				BC75524E156528AA00CB0542 /* ThunderboltMonitor.hwgrowlmonitor */,
+				C0FE0030C0FE0030C0FE0030 /* ThermalMonitor.hwgrowlmonitor */,
+				D1590002D1590002D1590002 /* DisplayMonitor.hwgrowlmonitor */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -760,6 +859,8 @@
 				BCA26B5F155585C0009C5ABC /* BluetoothMonitor */,
 				BCA26BB51555BB1B009C5ABC /* PowerMonitor */,
 				BC755250156528AA00CB0542 /* ThunderboltMonitor */,
+				C0FE003BC0FE003BC0FE003B /* ThermalMonitor */,
+				D159000BD159000BD159000B /* DisplayMonitor */,
 			);
 			name = Plugins;
 			path = NetworkMonitor;
@@ -864,6 +965,40 @@
 			productReference = BC75524E156528AA00CB0542 /* ThunderboltMonitor.hwgrowlmonitor */;
 			productType = "com.apple.product-type.bundle";
 		};
+		C0FE003DC0FE003DC0FE003D /* ThermalMonitor */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0FE0046C0FE0046C0FE0046 /* Build configuration list for PBXNativeTarget "ThermalMonitor" */;
+			buildPhases = (
+				C0FE003EC0FE003EC0FE003E /* Sources */,
+				C0FE003FC0FE003FC0FE003F /* Frameworks */,
+				C0FE0040C0FE0040C0FE0040 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ThermalMonitor;
+			productName = ThermalMonitor;
+			productReference = C0FE0030C0FE0030C0FE0030 /* ThermalMonitor.hwgrowlmonitor */;
+			productType = "com.apple.product-type.bundle";
+		};
+		D159000DD159000DD159000D /* DisplayMonitor */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D1590017D1590017D1590017 /* Build configuration list for PBXNativeTarget "DisplayMonitor" */;
+			buildPhases = (
+				D159000ED159000ED159000E /* Sources */,
+				D159000FD159000FD159000F /* Frameworks */,
+				D1590010D1590010D1590010 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DisplayMonitor;
+			productName = DisplayMonitor;
+			productReference = D1590002D1590002D1590002 /* DisplayMonitor.hwgrowlmonitor */;
+			productType = "com.apple.product-type.bundle";
+		};
 		BCA26B5C155585C0009C5ABC /* BluetoothMonitor */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = BCA26B66155585C0009C5ABC /* Build configuration list for PBXNativeTarget "BluetoothMonitor" */;
@@ -920,6 +1055,8 @@
 				BC523C3315556B4500548427 /* PBXTargetDependency */,
 				BCECA3AD155325CC00F49280 /* PBXTargetDependency */,
 				BCB807651551A6F10088C69A /* PBXTargetDependency */,
+				C0FE0042C0FE0042C0FE0042 /* PBXTargetDependency */,
+				D1590013D1590013D1590013 /* PBXTargetDependency */,
 			);
 			name = HardwareGrowler;
 			productName = HardwareGrowler;
@@ -1050,6 +1187,8 @@
 				BCA26B5C155585C0009C5ABC /* BluetoothMonitor */,
 				BCA26BB21555BB1A009C5ABC /* PowerMonitor */,
 				BC75524D156528AA00CB0542 /* ThunderboltMonitor */,
+				C0FE003DC0FE003DC0FE003D /* ThermalMonitor */,
+				D159000DD159000DD159000D /* DisplayMonitor */,
 			);
 		};
 /* End PBXProject section */
@@ -1179,6 +1318,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C0FE0040C0FE0040C0FE0040 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0FE0035C0FE0035C0FE0035 /* InfoPlist.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1590010D1590010D1590010 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1590009D1590009D1590009 /* InfoPlist.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BCA26B5B155585C0009C5ABC /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1292,6 +1447,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C0FE003EC0FE003EC0FE003E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0FE0039C0FE0039C0FE0039 /* HWGrowlThermalMonitor.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D159000ED159000ED159000E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1590003D1590003D1590003 /* HWGrowlDisplayMonitor.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BCA26B59155585C0009C5ABC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1368,6 +1539,16 @@
 			target = BC75524D156528AA00CB0542 /* ThunderboltMonitor */;
 			targetProxy = C0FE0012C0FE0012C0FE0012 /* PBXContainerItemProxy */;
 		};
+		C0FE0042C0FE0042C0FE0042 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C0FE003DC0FE003DC0FE003D /* ThermalMonitor */;
+			targetProxy = C0FE0041C0FE0041C0FE0041 /* PBXContainerItemProxy */;
+		};
+		D1590013D1590013D1590013 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D159000DD159000DD159000D /* DisplayMonitor */;
+			targetProxy = D1590012D1590012D1590012 /* PBXContainerItemProxy */;
+		};
 		BCAA17661557857C00D9E4ED /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = BCA26BB21555BB1A009C5ABC /* PowerMonitor */;
@@ -1421,6 +1602,22 @@
 			isa = PBXVariantGroup;
 			children = (
 				BC755254156528AA00CB0542 /* en */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+		C0FE0034C0FE0034C0FE0034 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				C0FE0033C0FE0033C0FE0033 /* en */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+		D1590008D1590008D1590008 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				D1590007D1590007D1590007 /* en */,
 			);
 			name = InfoPlist.strings;
 			sourceTree = "<group>";
@@ -1610,6 +1807,108 @@
 				GCC_PREFIX_HEADER = "ThunderboltMonitor/ThunderboltMonitor-Prefix.pch";
 				INFOPLIST_FILE = "ThunderboltMonitor/ThunderboltMonitor-Info.plist";
 				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.ThunderboltMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Release;
+		};
+		C0FE0043C0FE0043C0FE0043 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530AF155C1402005D2EA2 /* Debug.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "ThermalMonitor/ThermalMonitor-Prefix.pch";
+				INFOPLIST_FILE = "ThermalMonitor/ThermalMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.ThermalMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Debug;
+		};
+		C0FE0044C0FE0044C0FE0044 /* Localization */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530B0155C1402005D2EA2 /* Localization.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "ThermalMonitor/ThermalMonitor-Prefix.pch";
+				INFOPLIST_FILE = "ThermalMonitor/ThermalMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.ThermalMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Localization;
+		};
+		C0FE0045C0FE0045C0FE0045 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530B1155C1402005D2EA2 /* Release.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "ThermalMonitor/ThermalMonitor-Prefix.pch";
+				INFOPLIST_FILE = "ThermalMonitor/ThermalMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.ThermalMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Release;
+		};
+		D1590014D1590014D1590014 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530AF155C1402005D2EA2 /* Debug.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "DisplayMonitor/DisplayMonitor-Prefix.pch";
+				INFOPLIST_FILE = "DisplayMonitor/DisplayMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.DisplayMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Debug;
+		};
+		D1590015D1590015D1590015 /* Localization */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530B0155C1402005D2EA2 /* Localization.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "DisplayMonitor/DisplayMonitor-Prefix.pch";
+				INFOPLIST_FILE = "DisplayMonitor/DisplayMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.DisplayMonitor";
+				INFOPLIST_PREFIX_HEADER = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WRAPPER_EXTENSION = hwgrowlmonitor;
+			};
+			name = Localization;
+		};
+		D1590016D1590016D1590016 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = BC3530B1155C1402005D2EA2 /* Release.xcconfig */;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "DisplayMonitor/DisplayMonitor-Prefix.pch";
+				INFOPLIST_FILE = "DisplayMonitor/DisplayMonitor-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.jensyleo.hg4mac.DisplayMonitor";
 				INFOPLIST_PREFIX_HEADER = "";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Bundles";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
@@ -2088,6 +2387,26 @@
 				BC755257156528AA00CB0542 /* Debug */,
 				BC755258156528AA00CB0542 /* Localization */,
 				BC755259156528AA00CB0542 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		C0FE0046C0FE0046C0FE0046 /* Build configuration list for PBXNativeTarget "ThermalMonitor" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0FE0043C0FE0043C0FE0043 /* Debug */,
+				C0FE0044C0FE0044C0FE0044 /* Localization */,
+				C0FE0045C0FE0045C0FE0045 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D1590017D1590017D1590017 /* Build configuration list for PBXNativeTarget "DisplayMonitor" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1590014D1590014D1590014 /* Debug */,
+				D1590015D1590015D1590015 /* Localization */,
+				D1590016D1590016D1590016 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

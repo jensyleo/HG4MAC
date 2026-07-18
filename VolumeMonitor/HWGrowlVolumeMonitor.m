@@ -15,6 +15,40 @@
 #define VolumeEjectCacheInfoIndex			0
 #define VolumeEjectCacheTimerIndex			1
 
+// A plain (non-flipped) NSScrollView document view, when shorter than the visible clip
+// area, gets anchored to the BOTTOM of the clip by default — leaving the slack as a gap
+// ABOVE the content instead of below it. A flipped content view (y=0 at the TOP, growing
+// downward) is anchored to the top instead, which is what a top-down settings pane wants.
+// Same pattern already used by NetworkMonitor's `HWGFlippedContentView`.
+@interface HWGVolumeFlippedContentView : NSView
+@end
+@implementation HWGVolumeFlippedContentView
+- (BOOL)isFlipped { return YES; }
+@end
+
+// F33: individually configurable extra fields in the "Volume Mounted" notification body —
+// same pattern as the other monitors' per-field settings. Mount-only (an unmounted path has
+// no live filesystem left to stat), all default YES.
+#define HWG_VOLUME_SHOW_PATH_KEY    @"HWGVolumeShowMountPath"
+#define HWG_VOLUME_SHOW_FSTYPE_KEY  @"HWGVolumeShowFileSystemType"
+#define HWG_VOLUME_SHOW_SIZE_KEY    @"HWGVolumeShowVolumeSize"
+
+static BOOL HWGVolumeBoolForKey(NSString *key, BOOL def) {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+	return stored ? [stored boolValue] : def;
+}
+
+// Plain statfs() syscall — same mechanism already used by noteReadableSiblingForMountedPath:
+// below, not NSFileManager/NSWorkspace, so this never touches TCC-gated file access.
+static BOOL HWGCopyVolumeFileSystemInfo(NSString *path, NSString **outFSType, unsigned long long *outTotalBytes) {
+	if (![path length]) return NO;
+	struct statfs sfs;
+	if (statfs([path fileSystemRepresentation], &sfs) != 0) return NO;
+	if (outFSType) *outFSType = [NSString stringWithUTF8String:sfs.f_fstypename];
+	if (outTotalBytes) *outTotalBytes = (unsigned long long)sfs.f_blocks * (unsigned long long)sfs.f_bsize;
+	return YES;
+}
+
 @implementation VolumeInfo
 
 @synthesize iconData;
@@ -460,9 +494,41 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	NSString *context = mounted ? [volume path] : nil;
 	NSString *type = mounted ? @"VolumeMounted" : @"VolumeUnmounted";
 	NSString *title = [NSString stringWithFormat:@"%@ %@", [volume name], mounted ? NSLocalizedString(@"Mounted", @"") : NSLocalizedString(@"Unmounted", @"")];
+
+	// F33: extra fields, mount-only — an unmounted path has no live filesystem left to stat.
+	NSString *description = mounted ? NSLocalizedString(@"Click to open", @"Message body on a volume mount notification, clicking it opens the drive in finder") : nil;
+	if (mounted) {
+		BOOL showPath   = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_PATH_KEY, YES);
+		BOOL showFSType = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FSTYPE_KEY, YES);
+		BOOL showSize   = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SIZE_KEY, YES);
+
+		NSMutableArray<NSString*> *extraLines = [NSMutableArray array];
+		if (showPath && [volume path]) [extraLines addObject:[volume path]];
+
+		if (showFSType || showSize) {
+			NSString *fsType = nil;
+			unsigned long long totalBytes = 0;
+			if (HWGCopyVolumeFileSystemInfo([volume path], &fsType, &totalBytes)) {
+				if (showFSType && [fsType length]) {
+					[extraLines addObject:[NSString stringWithFormat:NSLocalizedString(@"File system: %@", @""), fsType]];
+				}
+				if (showSize && totalBytes > 0) {
+					NSString *sizeStr = [NSByteCountFormatter stringFromByteCount:(long long)totalBytes
+																	   countStyle:NSByteCountFormatterCountStyleFile];
+					[extraLines addObject:[NSString stringWithFormat:NSLocalizedString(@"Size: %@", @""), sizeStr]];
+				}
+			}
+		}
+
+		if ([extraLines count]) {
+			NSString *extra = [extraLines componentsJoinedByString:@"\n"];
+			description = description ? [description stringByAppendingFormat:@"\n%@", extra] : extra;
+		}
+	}
+
 	[delegate notifyWithName:type
 							 title:title
-					 description:mounted ? NSLocalizedString(@"Click to open", @"Message body on a volume mount notification, clicking it opens the drive in finder") : nil
+					 description:description
 							  icon:[volume iconData]
 			  identifierString:[volume path]
 				  contextString:context 
@@ -597,12 +663,105 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	});
 	return _icon;
 }
+// F33: single generic handler for every per-field visibility checkbox — mirrors the other
+// monitors' `fieldToggleChanged:`. Each checkbox's `identifier` carries the NSUserDefaults
+// key it controls.
+-(IBAction)fieldToggleChanged:(NSButton*)sender {
+	NSString *key = sender.identifier;
+	if (!key) return;
+	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+-(NSButton *)checkboxWithKey:(NSString *)key title:(NSString *)title defaultOn:(BOOL)defaultOn {
+	NSButton *box = [NSButton checkboxWithTitle:title target:self action:@selector(fieldToggleChanged:)];
+	box.identifier = key;
+	box.state = HWGVolumeBoolForKey(key, defaultOn) ? NSControlStateValueOn : NSControlStateValueOff;
+	box.translatesAutoresizingMaskIntoConstraints = YES;   // frame-based layout, see preferencePane
+	return box;
+}
+
 -(NSView*)preferencePane {
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		// The nib lives in THIS plugin's bundle, not the main app bundle.
-		[[NSBundle bundleForClass:[self class]] loadNibNamed:@"VolumeMonitorPrefs" owner:self topLevelObjects:nil];
-	});
+	if (prefsView) return prefsView;
+
+	// The nib lives in THIS plugin's bundle, not the main app bundle. Its top-level view
+	// (the ignore-list picker: a table + add/remove buttons) is assigned to `prefsView` via
+	// the IBOutlet, which this method then wraps with the appended section below.
+	[[NSBundle bundleForClass:[self class]] loadNibNamed:@"VolumeMonitorPrefs" owner:self topLevelObjects:nil];
+	NSView *xibView = prefsView;
+
+	// Unlike PowerMonitorPrefs.xib, this xib's declared frame (202x195) has NO baked-in
+	// blank space — its scrollView + add/remove buttons genuinely occupy the full height
+	// (confirmed in VolumeMonitorPrefs.xib: scrollView spans y=18..195, buttons at y=-1..20)
+	// — so no "recover slack" trick is needed here; xibH can be reserved directly.
+	CGFloat width = 380;
+	CGFloat pad = 16;
+	CGFloat xibW = 202, xibH = 195;
+	CGFloat headerH = 18;
+	CGFloat rowH = 24;
+	NSArray<NSButton*> *rows = @[
+		[self checkboxWithKey:HWG_VOLUME_SHOW_PATH_KEY   title:NSLocalizedString(@"Mount path", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_FSTYPE_KEY title:NSLocalizedString(@"File system type", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_SIZE_KEY   title:NSLocalizedString(@"Volume size", @"") defaultOn:YES],
+	];
+	// Build top-down (cursor starts at 0, grows downward) in a FLIPPED content view — see
+	// HWGVolumeFlippedContentView above. This fixes two related problems at once:
+	// (1) a plain non-flipped document view, when shorter than the visible clip area
+	// (AppDelegate stretches the outer scroll view to match the container — see
+	// `containerViewFrameDidChange:`), gets anchored to the BOTTOM of the clip by default,
+	// leaving the slack as a gap ABOVE the content instead of below it (reported by the
+	// user: "Notification fields" appeared floating with a gap above it, not flush at the
+	// top like every other monitor's pane). A flipped view anchors to the TOP instead.
+	// (2) it also sidesteps the historical "pre-computed totalHeight drifts from the real
+	// content extent" class of bug (already hit once in Power Monitor's pane) — height is
+	// simply wherever the cursor ends up, never a separately hand-computed guess.
+	NSView *combined = [[HWGVolumeFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, width, 1)];
+	CGFloat cursor = 0;
+
+	// Notification fields first, "Ignored Drives" list last (user's requested order).
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = YES;
+	header.frame = NSMakeRect(pad, cursor, width - 2 * pad, headerH);
+	[combined addSubview:header];
+	cursor += headerH + 10;
+
+	for (NSButton *row in rows) {
+		row.frame = NSMakeRect(pad, cursor, width - 2 * pad, rowH);
+		[combined addSubview:row];
+		cursor += rowH + 10;
+	}
+	cursor += 6;
+
+	// The xib's internal Auto Layout (scrollView/tableView pinned to xibView's edges) can
+	// grow xibView taller than its declared 195pt — a fixed-size, hard-clipping wrapper
+	// decouples the checkbox layout math from whatever xibView's internal content wants to
+	// do (found when "Ignored Drives" was moved below the checkboxes: without this, the
+	// list's overflow grew upward and silently covered them).
+	NSView *xibWrapper = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, xibW, xibH)];
+	xibWrapper.wantsLayer = YES;
+	xibWrapper.layer.masksToBounds = YES;
+	xibView.translatesAutoresizingMaskIntoConstraints = YES;
+	xibView.frame = NSMakeRect(0, 0, xibW, xibH);
+	[xibWrapper addSubview:xibView];
+
+	xibWrapper.frame = NSMakeRect(0, cursor, xibW, xibH);
+	[combined addSubview:xibWrapper];
+	cursor += xibH + pad;
+
+	combined.frame = NSMakeRect(0, 0, width, cursor);
+
+	// AppDelegate force-resizes whatever `preferencePane` returns to match the container's
+	// real frame — wrap `combined` in a scroll view whose OUTER frame is free to stretch,
+	// while `combined` itself keeps its own fixed (flipped, top-anchored) content.
+	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, cursor)];
+	scroll.hasVerticalScroller = YES;
+	scroll.autohidesScrollers = YES;
+	scroll.drawsBackground = NO;
+	scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+	scroll.documentView = combined;
+
+	prefsView = scroll;
 	return prefsView;
 }
 

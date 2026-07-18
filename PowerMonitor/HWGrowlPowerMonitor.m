@@ -20,9 +20,79 @@
 #define HWG_POWER_SHOW_PERCENTAGE_KEY @"HWGPowerShowPercentage"
 #define HWG_POWER_SHOW_TIME_KEY       @"HWGPowerShowTimeRemaining"
 
+// #8 (F34 candidate): battery health/cycle count, reported as a SEPARATE periodic
+// notification (not tied to the minutes-based status refire above) since it changes on
+// a days/weeks/months timescale, not a minutes one. Each metric is independently
+// toggleable; if both are off there's nothing to say, so the check is skipped entirely.
+#define HWG_POWER_SHOW_CYCLES_KEY        @"HWGPowerShowCycleCount"
+#define HWG_POWER_SHOW_HEALTH_KEY        @"HWGPowerShowBatteryHealth"
+#define HWG_POWER_HEALTH_VALUE_KEY       @"HWGPowerHealthCheckIntervalValue"
+#define HWG_POWER_HEALTH_UNIT_KEY        @"HWGPowerHealthCheckIntervalUnit"   // 0=days, 1=weeks, 2=months
+#define HWG_POWER_LAST_HEALTH_CHECK_KEY  @"HWGPowerLastHealthCheckDate"
+#define HWG_POWER_HEALTH_VALUE_DEFAULT   1
+#define HWG_POWER_HEALTH_UNIT_DEFAULT    2
+
+// Child of "Check every" above: an optional, more frequent REMINDER of the same (cached)
+// health/cycle numbers, in hours — e.g. "remind me 3x/day" while waiting for the next full
+// days/weeks/months check. Off by default; the main check above already covers the feature.
+#define HWG_POWER_HEALTH_NOTIFY_ENABLED_KEY @"HWGPowerHealthNotifyEnabled"
+#define HWG_POWER_HEALTH_NOTIFY_HOURS_KEY   @"HWGPowerHealthNotifyHours"
+#define HWG_POWER_LAST_HEALTH_NOTIFY_KEY    @"HWGPowerLastHealthNotifyDate"
+#define HWG_POWER_HEALTH_NOTIFY_HOURS_DEFAULT 8
+
 static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
+}
+
+// Reads CycleCount / battery health (AppleRawMaxCapacity ÷ DesignCapacity) straight from
+// the IOKit registry — IOPowerSources (used elsewhere in this file) does not expose either.
+// Verified against real `ioreg -c AppleSmartBattery -r` output: top-level "MaxCapacity" is a
+// self-calibrating 0–100 value that resets near 100 after recalibration events (not useful
+// for long-term health), so health% is computed from the raw mAh figures instead.
+// "DesignCycleCount9C" (the manufacturer-rated cycle budget for this specific battery) is
+// included when present, purely as extra context in the description.
+static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthPercent, NSInteger *outRatedCycles) {
+	io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"));
+	if (!service) return NO;
+
+	CFTypeRef cycleRef  = IORegistryEntryCreateCFProperty(service, CFSTR("CycleCount"), kCFAllocatorDefault, 0);
+	CFTypeRef maxRef    = IORegistryEntryCreateCFProperty(service, CFSTR("AppleRawMaxCapacity"), kCFAllocatorDefault, 0);
+	CFTypeRef designRef = IORegistryEntryCreateCFProperty(service, CFSTR("DesignCapacity"), kCFAllocatorDefault, 0);
+	CFTypeRef ratedRef  = IORegistryEntryCreateCFProperty(service, CFSTR("DesignCycleCount9C"), kCFAllocatorDefault, 0);
+	IOObjectRelease(service);
+
+	BOOL gotAny = NO;
+
+	if (cycleRef && CFGetTypeID(cycleRef) == CFNumberGetTypeID()) {
+		NSInteger v = 0;
+		if (CFNumberGetValue((CFNumberRef)cycleRef, kCFNumberNSIntegerType, &v)) {
+			if (outCycleCount) *outCycleCount = v;
+			gotAny = YES;
+		}
+	}
+	if (maxRef && designRef &&
+		CFGetTypeID(maxRef) == CFNumberGetTypeID() && CFGetTypeID(designRef) == CFNumberGetTypeID()) {
+		NSInteger maxCap = 0, designCap = 0;
+		if (CFNumberGetValue((CFNumberRef)maxRef, kCFNumberNSIntegerType, &maxCap) &&
+			CFNumberGetValue((CFNumberRef)designRef, kCFNumberNSIntegerType, &designCap) &&
+			designCap > 0) {
+			float healthPct = roundf((maxCap / (float)designCap) * 100.0f);
+			if (outHealthPercent) *outHealthPercent = (NSInteger)healthPct;
+			gotAny = YES;
+		}
+	}
+	if (ratedRef && CFGetTypeID(ratedRef) == CFNumberGetTypeID()) {
+		NSInteger v = 0;
+		if (CFNumberGetValue((CFNumberRef)ratedRef, kCFNumberNSIntegerType, &v) && outRatedCycles)
+			*outRatedCycles = v;
+	}
+
+	if (cycleRef) CFRelease(cycleRef);
+	if (maxRef) CFRelease(maxRef);
+	if (designRef) CFRelease(designRef);
+	if (ratedRef) CFRelease(ratedRef);
+	return gotAny;
 }
 
 @interface HWGrowlPowerMonitor ()
@@ -201,6 +271,13 @@ static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, strong) NSString *minutesLabel;
 @property (nonatomic, strong) NSString *refireOnlyOnBatteryLabel;
 
+// #8: battery health/cycle count periodic check — independent of refireTimer above
+// (that one only runs on battery, in minutes; this one runs always, in days/weeks/months).
+@property (nonatomic, strong) NSTimer *healthCheckTimer;
+@property (nonatomic, strong) NSTextField *healthIntervalValueLabel;
+@property (nonatomic, strong) NSSlider *healthNotifySlider;
+@property (nonatomic, strong) NSTextField *healthNotifyHoursLabel;
+
 @end
 
 @implementation HWGrowlPowerMonitor
@@ -217,17 +294,21 @@ static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 -(id)init {
 	if((self = [super init])){
 		self.notificationRunLoopSource = IOPSNotificationCreateRunLoopSource(powerSourceChanged, (__bridge void *)self);
-		
+
 		if (notificationRunLoopSource)
 			CFRunLoopAddSource(CFRunLoopGetMain(), notificationRunLoopSource, kCFRunLoopDefaultMode);
 		lastPowerSource = HGUnknownPower;
 		lastKnownTime = kIOPSTimeRemainingUnknown;
 		lastWarnState = NO;
-		
+
 		self.refireBatteryStatusLabel = NSLocalizedString(@"Refire battery status", @"Label for checkbox that sets battery status to redisplay every so often");
 		self.refireEveryLabel = NSLocalizedString(@"Refire every:", @"Label for box for putting in the amount of time between refire");
 		self.minutesLabel = NSLocalizedString(@"minutes", @"Unit label for how often to refire the battery status");
 		self.refireOnlyOnBatteryLabel = NSLocalizedString(@"Refire only on battery", @"Label for checkbox that sets whether to only show battery status every x minutes when on battery pwoer");
+
+		// Runs regardless of AC/battery state (health doesn't change based on that) — unlike
+		// refireTimer, which checkTimer starts/stops depending on power source.
+		[self startHealthCheckTimer];
 	}
 	return self;
 }
@@ -239,11 +320,14 @@ static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 		CFRelease(notificationRunLoopSource);
 	}
 	[refireTimer invalidate];
+	[_healthCheckTimer invalidate];
 }
 
 -(void)fireOnLaunchNotes {
 	[self powerSourceChanged:YES];
 	[self checkTimer];
+	// Covers the case where the configured interval already elapsed while the app was quit.
+	[self checkBatteryHealthDue];
 }
 
 -(BOOL)refireOnBattery {
@@ -595,6 +679,123 @@ static void powerSourceChanged(void *context) {
 	[monitor checkTimer];
 }
 
+#pragma mark Battery health check (#8)
+
+-(NSInteger)healthIntervalValue {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_POWER_HEALTH_VALUE_KEY];
+	NSInteger v = stored ? [stored integerValue] : HWG_POWER_HEALTH_VALUE_DEFAULT;
+	return (v < 1) ? 1 : v;
+}
+-(void)setHealthIntervalValue:(NSInteger)value {
+	[[NSUserDefaults standardUserDefaults] setInteger:(value < 1 ? 1 : value) forKey:HWG_POWER_HEALTH_VALUE_KEY];
+}
+
+-(NSInteger)healthIntervalUnit {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_POWER_HEALTH_UNIT_KEY];
+	return stored ? [stored integerValue] : HWG_POWER_HEALTH_UNIT_DEFAULT;
+}
+-(void)setHealthIntervalUnit:(NSInteger)unit {
+	[[NSUserDefaults standardUserDefaults] setInteger:unit forKey:HWG_POWER_HEALTH_UNIT_KEY];
+}
+
+-(NSString *)healthIntervalUnitLabel:(NSInteger)unit {
+	switch (unit) {
+		case 0:  return NSLocalizedString(@"day(s)", @"");
+		case 1:  return NSLocalizedString(@"week(s)", @"");
+		default: return NSLocalizedString(@"month(s)", @"");
+	}
+}
+
+-(NSTimeInterval)healthCheckIntervalSeconds {
+	NSTimeInterval unitSeconds;
+	switch ([self healthIntervalUnit]) {
+		case 0:  unitSeconds = 86400.0; break;              // days
+		case 1:  unitSeconds = 7 * 86400.0; break;          // weeks
+		default: unitSeconds = 30 * 86400.0; break;         // months (approx, matches "refire every N minutes" style — not calendar-exact)
+	}
+	return [self healthIntervalValue] * unitSeconds;
+}
+
+-(BOOL)healthNotifyEnabled {
+	return HWGPowerBoolForKey(HWG_POWER_HEALTH_NOTIFY_ENABLED_KEY, NO);
+}
+-(void)setHealthNotifyEnabled:(BOOL)enabled {
+	[[NSUserDefaults standardUserDefaults] setBool:enabled forKey:HWG_POWER_HEALTH_NOTIFY_ENABLED_KEY];
+}
+
+-(NSInteger)healthNotifyHours {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_POWER_HEALTH_NOTIFY_HOURS_KEY];
+	NSInteger v = stored ? [stored integerValue] : HWG_POWER_HEALTH_NOTIFY_HOURS_DEFAULT;
+	return (v < 1) ? 1 : v;
+}
+-(void)setHealthNotifyHours:(NSInteger)hours {
+	[[NSUserDefaults standardUserDefaults] setInteger:(hours < 1 ? 1 : hours) forKey:HWG_POWER_HEALTH_NOTIFY_HOURS_KEY];
+}
+
+-(void)startHealthCheckTimer {
+	if (_healthCheckTimer) return;
+	// Hourly tick is cheap and just compares elapsed-vs-configured-interval; the actual
+	// notification only fires once a real interval (the main check, or the "Notify every"
+	// reminder) has actually elapsed.
+	self.healthCheckTimer = [NSTimer scheduledTimerWithTimeInterval:3600.0
+															   target:self
+															 selector:@selector(checkBatteryHealthDue)
+															 userInfo:nil
+															  repeats:YES];
+}
+
+-(void)checkBatteryHealthDue {
+	BOOL showCycles = HWGPowerBoolForKey(HWG_POWER_SHOW_CYCLES_KEY, YES);
+	BOOL showHealth = HWGPowerBoolForKey(HWG_POWER_SHOW_HEALTH_KEY, YES);
+	if (!showCycles && !showHealth) return;   // both fields off — nothing to report, skip entirely
+
+	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+	NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+
+	NSTimeInterval lastCheck = [defaults doubleForKey:HWG_POWER_LAST_HEALTH_CHECK_KEY];
+	BOOL checkDue = (lastCheck == 0) || (now - lastCheck) >= [self healthCheckIntervalSeconds];
+
+	// "Notify every" (child of "Check every"): an optional, more frequent reminder of the
+	// SAME health/cycle numbers, in hours — independent cadence from the main check above.
+	BOOL notifyEnabled = [self healthNotifyEnabled];
+	NSTimeInterval lastNotify = [defaults doubleForKey:HWG_POWER_LAST_HEALTH_NOTIFY_KEY];
+	BOOL notifyDue = notifyEnabled && ((lastNotify == 0) || (now - lastNotify) >= ([self healthNotifyHours] * 3600.0));
+
+	if (!checkDue && !notifyDue) return;
+
+	// Mark as checked/notified regardless of outcome — a Mac with no battery (desktop)
+	// would otherwise retry every hour forever with nothing to report. A full check also
+	// resets the reminder clock (we just showed the same info either way).
+	if (checkDue) [defaults setDouble:now forKey:HWG_POWER_LAST_HEALTH_CHECK_KEY];
+	[defaults setDouble:now forKey:HWG_POWER_LAST_HEALTH_NOTIFY_KEY];
+
+	NSInteger cycleCount = -1, healthPercent = -1, ratedCycles = -1;
+	if (!HWGCopyBatteryHealth(&cycleCount, &healthPercent, &ratedCycles))
+		return;   // no AppleSmartBattery service (desktop Mac) — nothing to report
+
+	NSMutableArray<NSString*> *parts = [NSMutableArray array];
+	if (showCycles && cycleCount >= 0) {
+		[parts addObject:(ratedCycles > 0)
+			? [NSString stringWithFormat:NSLocalizedString(@"Cycle count: %ld (rated for ~%ld)", @""), (long)cycleCount, (long)ratedCycles]
+			: [NSString stringWithFormat:NSLocalizedString(@"Cycle count: %ld", @""), (long)cycleCount]];
+	}
+	if (showHealth && healthPercent >= 0) {
+		[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery health: %ld%%", @""), (long)healthPercent]];
+	}
+	if (![parts count]) return;
+
+	@autoreleasepool {
+		NSData *iconData = [[NSImage imageNamed:@"Power-Plugged"] TIFFRepresentation];
+		[delegate notifyWithName:@"PowerBatteryHealth"
+							title:NSLocalizedString(@"Battery Health Check", @"")
+					  description:[parts componentsJoinedByString:@"\n"]
+							 icon:iconData
+				 identifierString:@"PowerBatteryHealthCheck"
+					contextString:nil
+						   plugin:self];
+	}
+}
+
 #pragma mark HWGrowlPluginProtocol
 
 // delegate accessors are auto-synthesized from the @property (weak).
@@ -626,6 +827,32 @@ static void powerSourceChanged(void *context) {
 	return box;
 }
 
+-(IBAction)healthIntervalSliderChanged:(NSSlider*)sender {
+	[self setHealthIntervalValue:[sender integerValue]];
+	[self updateHealthIntervalLabel];
+}
+-(IBAction)healthUnitChanged:(NSPopUpButton*)sender {
+	[self setHealthIntervalUnit:[sender indexOfSelectedItem]];
+	[self updateHealthIntervalLabel];
+}
+-(void)updateHealthIntervalLabel {
+	NSInteger value = [self healthIntervalValue];
+	self.healthIntervalValueLabel.stringValue = [NSString stringWithFormat:@"%ld %@", (long)value, [self healthIntervalUnitLabel:[self healthIntervalUnit]]];
+}
+
+-(IBAction)healthNotifyToggled:(NSButton*)sender {
+	BOOL on = (sender.state == NSControlStateValueOn);
+	[self setHealthNotifyEnabled:on];
+	self.healthNotifySlider.enabled = on;
+}
+-(IBAction)healthNotifyHoursChanged:(NSSlider*)sender {
+	[self setHealthNotifyHours:[sender integerValue]];
+	[self updateHealthNotifyHoursLabel];
+}
+-(void)updateHealthNotifyHoursLabel {
+	self.healthNotifyHoursLabel.stringValue = [NSString stringWithFormat:@"%ld hour(s)", (long)[self healthNotifyHours]];
+}
+
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
@@ -641,7 +868,13 @@ static void powerSourceChanged(void *context) {
 	// between xibView and this section, likely from mixing Auto Layout with xibView's
 	// non-Auto-Layout internal subviews. Deterministic frame arithmetic sidesteps that
 	// entirely: every view's exact position is computed by hand, top to bottom.
-	CGFloat width = 380;
+	// Widened from the original 380 to fit the "Check every"/"Notify every" controls
+	// (slider + label + unit popup) without any subview extending past combined's own
+	// bounds — a subview whose frame exceeds its superview's bounds is only clickable in
+	// the portion that still falls within the superview's bounds, which is exactly what
+	// caused the unit popup's arrow/chevron (at its far right edge) to not respond to
+	// clicks while its text (further left, still in-bounds) did.
+	CGFloat width = 460;
 	CGFloat pad = 16;
 	CGFloat xibW = 225, xibH = 204;
 	CGFloat headerH = 18;
@@ -652,7 +885,30 @@ static void powerSourceChanged(void *context) {
 		[self checkboxWithKey:HWG_POWER_SHOW_PERCENTAGE_KEY title:NSLocalizedString(@"Battery percentage", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_TIME_KEY       title:NSLocalizedString(@"Time remaining / time to charge", @"") defaultOn:YES],
 	];
-	CGFloat totalHeight = xibH + 16 + headerH + 10 + ([rows count] * rowH) + (([rows count] - 1) * 10) + pad;
+	// #8: battery health/cycle count — own header/section since it's a SEPARATE periodic
+	// notification (see checkBatteryHealthDue), not part of the regular status notice above.
+	NSArray<NSButton*> *healthRows = @[
+		[self checkboxWithKey:HWG_POWER_SHOW_CYCLES_KEY title:NSLocalizedString(@"Cycle count", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_POWER_SHOW_HEALTH_KEY title:NSLocalizedString(@"Battery health %", @"") defaultOn:YES],
+	];
+	CGFloat healthControlRowH = 30;
+	CGFloat healthSectionHeight = 10 + headerH + 10
+		+ ([healthRows count] * rowH) + (([healthRows count] - 1) * 10)
+		+ 10 + healthControlRowH      // "Check every" row
+		+ 6 + healthControlRowH;      // "Notify every" row (child, tighter gap)
+	// PowerMonitorPrefs.xib's own content occupies only its TOP ~half — its lowest control
+	// ("Refire only on battery") has its own bottom edge at local y=107 (of the xib's
+	// declared 204pt-tall frame), and the cursor logic below jumps straight to that real
+	// content bottom (skipping the ~97pt of blank space baked into the xib) instead of the
+	// xib's full declared height. `totalHeight` MUST reserve space to match — reserving the
+	// full `xibH` here (as an earlier version of this method did) left that same ~97pt as
+	// unused dead space at the very BOTTOM of the pane instead (content is anchored top-down,
+	// so any over-reservation at the top surfaces as slack at the bottom) — which in turn
+	// made the scroll view show a scrollbar with nothing under it. Keep this constant in sync
+	// with the identical one used for the cursor jump right after xibView is placed.
+	CGFloat xibContentBottomLocal = 107;
+	CGFloat totalHeight = (xibContentBottomLocal + 16) + headerH + 10 + ([rows count] * rowH) + (([rows count] - 1) * 10)
+		+ healthSectionHeight + pad;
 
 	NSView *combined = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, totalHeight)];
 	CGFloat cursorTop = totalHeight;   // distance from the TOP where the next view's top edge goes
@@ -668,8 +924,8 @@ static void powerSourceChanged(void *context) {
 	// (as a naive stack would) left that blank space PLUS our own 16pt gap between the
 	// visible refire controls and "Notification fields" — this is what actually caused the
 	// large gap (confirmed by reading real on-screen element positions via Accessibility).
-	// Resume from the xib's real content bottom instead.
-	CGFloat xibContentBottomLocal = 107;
+	// Resume from the xib's real content bottom instead (xibContentBottomLocal declared
+	// above, alongside totalHeight, which must reserve the matching amount of space).
 	cursorTop = xibY + xibContentBottomLocal - 16;
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
@@ -687,6 +943,84 @@ static void powerSourceChanged(void *context) {
 		[combined addSubview:row];
 		cursorTop = rowY - 10;
 	}
+
+	// #8: "Battery health check" section — own header, own checkboxes, own interval control.
+	cursorTop -= 10;
+	NSTextField *healthHeader = [NSTextField labelWithString:NSLocalizedString(@"Battery health check", @"")];
+	healthHeader.font = [NSFont boldSystemFontOfSize:12];
+	healthHeader.textColor = [NSColor secondaryLabelColor];
+	healthHeader.translatesAutoresizingMaskIntoConstraints = YES;
+	CGFloat healthHeaderY = cursorTop - headerH;
+	healthHeader.frame = NSMakeRect(pad, healthHeaderY, width - 2 * pad, headerH);
+	[combined addSubview:healthHeader];
+	cursorTop = healthHeaderY - 10;
+
+	for (NSButton *row in healthRows) {
+		CGFloat rowY = cursorTop - rowH;
+		row.frame = NSMakeRect(pad, rowY, width - 2 * pad, rowH);
+		[combined addSubview:row];
+		cursorTop = rowY - 10;
+	}
+
+	// Interval control: "Check every: [==slider==] N unit(s) [Days/Weeks/Months ▾]"
+	// Column x-positions all fit within `width` (see the comment on `width` above) so no
+	// subview's clickable area gets clipped by combined's own bounds.
+	CGFloat controlY = cursorTop - healthControlRowH;
+	NSTextField *everyLabel = [NSTextField labelWithString:NSLocalizedString(@"Check every:", @"")];
+	everyLabel.translatesAutoresizingMaskIntoConstraints = YES;
+	everyLabel.frame = NSMakeRect(pad, controlY + 6, 88, 18);
+	[combined addSubview:everyLabel];
+
+	NSSlider *intervalSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(pad + 92, controlY, 110, healthControlRowH)];
+	intervalSlider.minValue = 1;
+	intervalSlider.maxValue = 12;
+	intervalSlider.integerValue = [self healthIntervalValue];
+	intervalSlider.target = self;
+	intervalSlider.action = @selector(healthIntervalSliderChanged:);
+	intervalSlider.translatesAutoresizingMaskIntoConstraints = YES;
+	[combined addSubview:intervalSlider];
+
+	self.healthIntervalValueLabel = [NSTextField labelWithString:@""];
+	self.healthIntervalValueLabel.translatesAutoresizingMaskIntoConstraints = YES;
+	self.healthIntervalValueLabel.frame = NSMakeRect(pad + 92 + 118, controlY + 6, 84, 18);
+	[combined addSubview:self.healthIntervalValueLabel];
+	[self updateHealthIntervalLabel];
+
+	NSPopUpButton *unitPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(pad + 92 + 118 + 88, controlY, 110, healthControlRowH) pullsDown:NO];
+	[unitPopup addItemsWithTitles:@[NSLocalizedString(@"Days", @""), NSLocalizedString(@"Weeks", @""), NSLocalizedString(@"Months", @"")]];
+	[unitPopup selectItemAtIndex:[self healthIntervalUnit]];
+	unitPopup.target = self;
+	unitPopup.action = @selector(healthUnitChanged:);
+	unitPopup.translatesAutoresizingMaskIntoConstraints = YES;
+	[combined addSubview:unitPopup];
+
+	cursorTop = controlY - 6;
+
+	// "Notify every" — CHILD of "Check every": an optional, more frequent reminder of the
+	// same numbers, in hours. Indented (+20pt) to read as nested under the row above.
+	CGFloat notifyY = cursorTop - healthControlRowH;
+	CGFloat notifyIndent = pad + 20;
+	NSButton *notifyCheckbox = [NSButton checkboxWithTitle:NSLocalizedString(@"Notify every:", @"") target:self action:@selector(healthNotifyToggled:)];
+	notifyCheckbox.state = [self healthNotifyEnabled] ? NSControlStateValueOn : NSControlStateValueOff;
+	notifyCheckbox.translatesAutoresizingMaskIntoConstraints = YES;
+	notifyCheckbox.frame = NSMakeRect(notifyIndent, notifyY + 6, 130, 18);
+	[combined addSubview:notifyCheckbox];
+
+	self.healthNotifySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(notifyIndent + 134, notifyY, 110, healthControlRowH)];
+	self.healthNotifySlider.minValue = 1;
+	self.healthNotifySlider.maxValue = 24;
+	self.healthNotifySlider.integerValue = [self healthNotifyHours];
+	self.healthNotifySlider.enabled = [self healthNotifyEnabled];
+	self.healthNotifySlider.target = self;
+	self.healthNotifySlider.action = @selector(healthNotifyHoursChanged:);
+	self.healthNotifySlider.translatesAutoresizingMaskIntoConstraints = YES;
+	[combined addSubview:self.healthNotifySlider];
+
+	self.healthNotifyHoursLabel = [NSTextField labelWithString:@""];
+	self.healthNotifyHoursLabel.translatesAutoresizingMaskIntoConstraints = YES;
+	self.healthNotifyHoursLabel.frame = NSMakeRect(notifyIndent + 134 + 118, notifyY + 6, 84, 18);
+	[combined addSubview:self.healthNotifyHoursLabel];
+	[self updateHealthNotifyHoursLabel];
 
 	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, 260)];
 	scroll.hasVerticalScroller = YES;

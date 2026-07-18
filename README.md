@@ -15,8 +15,8 @@
 
 A macOS menu-bar app that shows native-style notifications when hardware changes —
 volumes mount/unmount, USB and Thunderbolt devices connect, Wi-Fi/Ethernet links and
-IP addresses change, Bluetooth devices pair, and the power source / battery state
-changes.
+IP addresses change, Bluetooth devices pair, the power source / battery state changes,
+and the Mac's thermal state shifts (throttling).
 
 This **modernized fork** brings HardwareGrowler up to date for **macOS Tahoe (26) and
 Apple Silicon**, starting from the upstream linked above.
@@ -35,7 +35,7 @@ Apple Silicon**, starting from the upstream linked above.
   - **grows dynamically** to fit long titles/bodies (e.g. long volume names, multi-line IP info),
   - **stacks** multiple notifications vertically,
   - has a **close (×)** button and is **click-to-open** (e.g. reveal a mounted volume in Finder).
-- **Six hardware monitors** (loadable plugins):
+- **Seven hardware/system monitors** (loadable plugins):
   | Monitor | Reports |
   |---------|---------|
   | **Volume** | mount / unmount (with a Finder "click to open"), ignore-list picker |
@@ -44,6 +44,7 @@ Apple Silicon**, starting from the upstream linked above.
   | **Network** | Wi-Fi connect/disconnect (SSID + BSSID via CoreWLAN, signal-strength icon, reported at launch too), Ethernet/interface link up/down + media speed/duplex, IPv4/IPv6 + CIDR + gateway |
   | **Bluetooth** | device connect / disconnect |
   | **Power** | AC/battery transitions, a battery-level icon ramp (0–100), a charging-level ramp, time remaining / time-to-charge, periodic status refire, low-battery warning (announces "fully charged" once, no repeats) |
+  | **Thermal** | system thermal state changes (Nominal/Fair/Serious/Critical throttling), per-level notification toggles. A separate module from **Power** by design (battery state and thermal/throttling state are shown independently), but reads from the same system power/process-info APIs (`NSProcessInfo`) as Power Monitor — noted here for traceability. |
 - **Duplicate suppression** and **"unstable device"** detection (flags a device that
   rapidly connects/disconnects).
 - **Modern macOS integration**: "Start at Login" via `SMAppService`, a custom-drawn
@@ -116,6 +117,61 @@ open /Applications/HG4MAC.app
   tell whether it's specific to one driver/chipset or more general; treat reported duplex
   as informational, not authoritative, until then.
 
+- **Display Monitor cannot report the physical connection type (HDMI/DisplayPort/USB-C/
+  Thunderbolt) or the display's vendor/model via EDID.** Both live below any public API:
+  connector type is only known to the GPU's display driver (`AGX`/`DCP` on Apple Silicon),
+  which Apple does not expose to third-party apps at all. Vendor/model via EDID used to be
+  reachable through `CGDisplayIOServicePort`, but that call has been deprecated since OS X
+  10.9 and no longer resolves usefully on Apple Silicon's display pipeline. `NSScreen.localizedName`
+  (used for the display's name in notifications) covers most of the same practical need,
+  since macOS resolves it from EDID internally regardless.
+
+- **Display Monitor detects a connection only once macOS assigns the display an
+  arrangement (Extended or Mirror) — not at the instant the cable/HDMI link is raised**, by
+  design (see "Experimental: early physical-link detection" below for the optional,
+  off-by-default alternative and why it isn't the default path).
+
+### Experimental: early physical-link detection (Display Monitor, off by default)
+
+Display Monitor's normal detection (`CGGetOnlineDisplayList`) only sees a display once macOS
+assigns it an arrangement (Extended or Mirror) — if the user dismisses macOS's own "how do
+you want to use this display" prompt without choosing, nothing is detectable yet, because no
+`CGDirectDisplayID` exists for that display until an arrangement is picked.
+
+Investigated (2026-07-18) whether the earlier, physical-link-level event is reachable at
+all: the **kernel itself logs it**, under the `DCPAVFamilyProxy`/`IOAVFamily` subsystems
+(Apple Silicon's Display Co-Processor driver) — a real HDMI/DisplayPort hotplug produces an
+`AppleDCPDPTXRemoteHDCPAuthSessionProxy` message sequence (`AuthOpen` → **`ReceiverConnected`**
+→ `CPDesired` → `HPrimeAvailable`) the moment the physical link/HDCP handshake completes,
+well before any CoreGraphics display object exists. This is reachable via the **public**
+unified-logging read API (`OSLogStore`, available since macOS 10.15) with no special
+entitlement — confirmed working from an unprivileged, ad-hoc-signed test binary, the same
+signing model this app uses.
+
+This is implemented as an **opt-in, off-by-default** feature in Display Monitor's
+preferences ("Early physical-link detection (Experimental)"), with a 1–10 second polling
+interval slider. **Read all of this before turning it on:**
+
+- **Not a documented API.** What's being read is free-form kernel debug log text
+  (`"ReceiverConnected"`, `IOAVFamily`, `DCPAVFamilyProxy`) with no stability contract of any
+  kind. Apple can change the wording, rename the subsystem, or remove the logging entirely
+  in any macOS update — silently, with no deprecation warning — and this feature would just
+  stop firing (or start firing on the wrong thing) with no notice.
+- **Continuous CPU/battery cost while enabled.** `OSLogStore` has no public push/streaming
+  callback — only a historical enumerator — so catching this event requires **polling on a
+  timer** for as long as the feature is on. Each poll scans every kernel log line since the
+  last poll (which can be thousands of lines over a normal usage window) just to find the
+  rare one that matches. This is genuine, ongoing overhead, not a one-time cost.
+- **Apple Silicon only.** `DCPAVFamilyProxy` is the M-series Display Co-Processor proxy; an
+  Intel Mac's kernel wouldn't log this at all, so the feature would simply never fire there.
+- **Separate, clearly-labeled notification.** When it fires, it's its own "Video Link
+  Detected (Experimental)" notification (off by default even if the plugin's default
+  notification set is otherwise enabled) — never merged into or confused with the normal
+  "Display Connected" notification, which remains the authoritative, non-experimental signal.
+
+Recommended for testing/curiosity only. Given the cost/fragility trade-off above, it's
+disabled by default and not expected to become the primary detection path.
+
 ## Permissions
 
 On first launch macOS will ask for:
@@ -156,8 +212,9 @@ This repository is the Growl source tree; the modernized app lives in:
 ```
 HardwareGrowler/            app delegate, main menu, status item, prefs window
 GrowlStub/                  custom notification banner (GrowlApplicationBridge)
-BluetoothMonitor/ NetworkMonitor/ PowerMonitor/ ThunderboltMonitor/ USBMonitor/ VolumeMonitor/
-                            the six monitor plugins (.hwgrowlmonitor bundles)
+BluetoothMonitor/ NetworkMonitor/ PowerMonitor/ ThermalMonitor/ ThunderboltMonitor/
+USBMonitor/ VolumeMonitor/
+                            the seven monitor plugins (.hwgrowlmonitor bundles)
 Resources/Assets.xcassets/  notification & preference icons
 HardwareGrowler.xcodeproj/  the Xcode project
 ```
@@ -196,4 +253,3 @@ trademark of **Bluetooth SIG, Inc.**; **USB** is a trademark of the **USB Implem
 Forum, Inc.**; **Thunderbolt** is a trademark of **Intel Corporation**; **Wi-Fi®** is a
 registered trademark of the **Wi-Fi Alliance**. These marks are used **only nominatively**,
 to identify the technology being reported — no affiliation or endorsement is implied.
-See [`NOTICE.md`](NOTICE.md).

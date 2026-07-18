@@ -32,6 +32,13 @@
 #define HWG_WIFI_POLL_MIN     5.0
 #define HWG_WIFI_POLL_MAX     60.0
 
+// F20: user-configurable rate-limit between two "Wi-Fi Signal Changed" notifications, so a
+// value hovering at a bar threshold doesn't spam. Default 10s, clamped 0–60 (0 = disabled).
+#define HWG_WIFI_COOLDOWN_KEY     @"HWGWifiSignalCooldown"
+#define HWG_WIFI_COOLDOWN_DEFAULT 10.0
+#define HWG_WIFI_COOLDOWN_MIN     0.0
+#define HWG_WIFI_COOLDOWN_MAX     60.0
+
 // F33: individually configurable fields shown in Network Monitor notifications, grouped
 // into 3 sections (Wi-Fi / Ethernet / Other-IP) in Preferences → Modules → Network Monitor.
 // All default to YES (matching prior always-on behavior) except HWG_ETH_SHOW_ALL_KEY,
@@ -147,6 +154,7 @@ typedef enum {
 // Preferences pane (built programmatically — no nib) for the WiFi signal poll interval.
 @property (nonatomic, strong) NSView *prefsView;
 @property (nonatomic, weak) NSTextField *intervalValueLabel;
+@property (nonatomic, weak) NSTextField *cooldownValueLabel;
 
 // CoreLocation: required since macOS 10.14 to read the Wi-Fi SSID
 @property (nonatomic, strong) CLLocationManager *locationManager;
@@ -169,6 +177,7 @@ typedef enum {
 @synthesize signalPollTimer;
 @synthesize prefsView;
 @synthesize intervalValueLabel;
+@synthesize cooldownValueLabel;
 @synthesize locationManager;
 
 -(id)init {
@@ -300,6 +309,12 @@ typedef enum {
 		if (lastReportedSSID && [lastReportedSSID isEqualToString:displayName])
 			return; // already reported this state
 		self.lastReportedSSID = displayName;
+		// F20: baseline the signal bar level right away instead of waiting for
+		// pollWifiSignal:'s first scheduled tick to do it — otherwise detecting any
+		// real change takes two full poll intervals (one just to baseline, one to
+		// compare) instead of one.
+		NSInteger rssiNow = [iface rssiValue];
+		self.lastReportedWifiBars = (rssiNow != 0) ? [self wifiBarsForRSSI:rssiNow] : -1;
 		NSData *bssidData = nil;
 		if (bssidStr) {
 			unsigned int b[6] = {0};
@@ -357,6 +372,15 @@ typedef enum {
 	return v;
 }
 
+// Configured rate-limit between two signal-change notifications, clamped to [MIN, MAX].
+-(NSTimeInterval)signalCooldownInterval {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_WIFI_COOLDOWN_KEY];
+	NSTimeInterval v = stored ? [[NSUserDefaults standardUserDefaults] doubleForKey:HWG_WIFI_COOLDOWN_KEY] : HWG_WIFI_COOLDOWN_DEFAULT;
+	if (v < HWG_WIFI_COOLDOWN_MIN) v = HWG_WIFI_COOLDOWN_MIN;
+	if (v > HWG_WIFI_COOLDOWN_MAX) v = HWG_WIFI_COOLDOWN_MAX;
+	return v;
+}
+
 -(void)restartSignalPollTimer {
 	[signalPollTimer invalidate];
 	self.signalPollTimer = [NSTimer scheduledTimerWithTimeInterval:[self signalPollInterval]
@@ -386,8 +410,8 @@ typedef enum {
 	// Rate-limit so a value hovering at a threshold doesn't spam. Don't update the baseline
 	// while in cooldown, so a later poll still catches the net change (and flapping back to
 	// the old level self-cancels since then bars == lastReportedWifiBars).
-	const NSTimeInterval cooldown = 20.0;
-	if (lastSignalNoteTime && [[NSDate date] timeIntervalSinceDate:lastSignalNoteTime] < cooldown)
+	NSTimeInterval cooldown = [self signalCooldownInterval];
+	if (cooldown > 0 && lastSignalNoteTime && [[NSDate date] timeIntervalSinceDate:lastSignalNoteTime] < cooldown)
 		return;
 
 	BOOL improved = (bars > lastReportedWifiBars);
@@ -1139,6 +1163,14 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[self restartSignalPollTimer];   // apply the new interval immediately
 }
 
+-(IBAction)signalCooldownChanged:(NSSlider*)sender {
+	NSInteger secs = lround([sender doubleValue]);
+	[[NSUserDefaults standardUserDefaults] setInteger:secs forKey:HWG_WIFI_COOLDOWN_KEY];
+	self.cooldownValueLabel.stringValue = (secs == 0)
+		? NSLocalizedString(@"off", @"cooldown disabled")
+		: [NSString stringWithFormat:@"%ld s", (long)secs];
+}
+
 // F33: single generic handler for every per-field visibility checkbox. Each checkbox's
 // `identifier` carries the NSUserDefaults key it controls (set when the checkbox is built).
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -1211,7 +1243,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// --- Tab: Wi-Fi (also hosts the pre-existing signal-poll-interval slider) ---
-	NSView *wifiTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 340)];
+	NSView *wifiTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 420)];
 	NSTimeInterval cur = [self signalPollInterval];
 
 	NSTextField *title = [NSTextField labelWithString:NSLocalizedString(@"Wi-Fi signal check interval", @"")];
@@ -1232,9 +1264,34 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	caption.font = [NSFont systemFontOfSize:11];
 	caption.translatesAutoresizingMaskIntoConstraints = NO;
 
+	// F20: rate-limit between two signal-change notifications, so a value hovering at a bar
+	// threshold doesn't spam. Configurable — a 20s cooldown fixed regardless of poll interval
+	// otherwise blocks a legitimate second signal change that follows shortly after the first.
+	NSTimeInterval curCooldown = [self signalCooldownInterval];
+	NSTextField *cooldownTitle = [NSTextField labelWithString:NSLocalizedString(@"Minimum time between signal-change notices", @"")];
+	cooldownTitle.font = [NSFont boldSystemFontOfSize:12];
+	cooldownTitle.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSSlider *cooldownSlider = [NSSlider sliderWithValue:curCooldown minValue:HWG_WIFI_COOLDOWN_MIN maxValue:HWG_WIFI_COOLDOWN_MAX
+												   target:self action:@selector(signalCooldownChanged:)];
+	cooldownSlider.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSTextField *cooldownValue = [NSTextField labelWithString:(curCooldown < 0.5)
+		? NSLocalizedString(@"off", @"cooldown disabled")
+		: [NSString stringWithFormat:@"%.0f s", curCooldown]];
+	self.cooldownValueLabel = cooldownValue;
+	cooldownValue.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSTextField *cooldownCaption = [NSTextField labelWithString:
+		NSLocalizedString(@"Prevents repeat notices if the signal hovers at a threshold (0–60 s, 0 = off).", @"")];
+	cooldownCaption.textColor = [NSColor secondaryLabelColor];
+	cooldownCaption.font = [NSFont systemFontOfSize:11];
+	cooldownCaption.translatesAutoresizingMaskIntoConstraints = NO;
+
 	NSTextField *wifiFieldsHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 
 	[wifiTab addSubview:title]; [wifiTab addSubview:slider]; [wifiTab addSubview:value]; [wifiTab addSubview:caption];
+	[wifiTab addSubview:cooldownTitle]; [wifiTab addSubview:cooldownSlider]; [wifiTab addSubview:cooldownValue]; [wifiTab addSubview:cooldownCaption];
 	[NSLayoutConstraint activateConstraints:@[
 		[title.topAnchor      constraintEqualToAnchor:wifiTab.topAnchor constant:16],
 		[title.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
@@ -1245,10 +1302,20 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[value.leadingAnchor  constraintEqualToAnchor:slider.trailingAnchor constant:10],
 		[caption.topAnchor     constraintEqualToAnchor:slider.bottomAnchor constant:6],
 		[caption.leadingAnchor constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
+
+		[cooldownTitle.topAnchor      constraintEqualToAnchor:caption.bottomAnchor constant:18],
+		[cooldownTitle.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
+		[cooldownSlider.topAnchor     constraintEqualToAnchor:cooldownTitle.bottomAnchor constant:12],
+		[cooldownSlider.leadingAnchor constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
+		[cooldownSlider.widthAnchor   constraintEqualToConstant:220],
+		[cooldownValue.centerYAnchor  constraintEqualToAnchor:cooldownSlider.centerYAnchor],
+		[cooldownValue.leadingAnchor  constraintEqualToAnchor:cooldownSlider.trailingAnchor constant:10],
+		[cooldownCaption.topAnchor     constraintEqualToAnchor:cooldownSlider.bottomAnchor constant:6],
+		[cooldownCaption.leadingAnchor constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
 	]];
 	[wifiTab addSubview:wifiFieldsHeader];
 	[NSLayoutConstraint activateConstraints:@[
-		[wifiFieldsHeader.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:18],
+		[wifiFieldsHeader.topAnchor     constraintEqualToAnchor:cooldownCaption.bottomAnchor constant:18],
 		[wifiFieldsHeader.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
 	]];
 	[self layoutRows:@[
@@ -1261,7 +1328,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 
 	NSTabViewItem *wifiItem = [[NSTabViewItem alloc] initWithIdentifier:@"wifi"];
 	wifiItem.label = NSLocalizedString(@"Wi-Fi", @"");
-	wifiItem.view = [self scrollWrapping:wifiTab height:340];
+	wifiItem.view = [self scrollWrapping:wifiTab height:420];
 	[tabs addTabViewItem:wifiItem];
 
 	// --- Tab: Ethernet ---
