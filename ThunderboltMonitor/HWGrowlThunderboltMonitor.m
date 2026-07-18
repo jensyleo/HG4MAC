@@ -88,19 +88,90 @@
 
 #pragma mark Callbacks
 
--(void)tbDeviceName:(NSString*)deviceName added:(BOOL)added {
+-(void)tbDeviceName:(NSString*)deviceName added:(BOOL)added extraInfo:(NSString *)extraInfo {
 	NSString *title = added ? NSLocalizedString(@"Thunderbolt Connection", @"") : NSLocalizedString(@"Thunderbolt Disconnection", @"");
 
 	NSString *imageName = added ? @"Thunderbolt-On" : @"Thunderbolt-Off";
 	NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
+	NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", deviceName, extraInfo] : deviceName;
 
 	[delegate notifyWithName:added ? @"ThunderboltConnected" : @"ThunderboltDisconnected"
 							 title:title
-					 description:deviceName
+					 description:description
 							  icon:iconData
 			  identifierString:deviceName
 				  contextString:nil
 							plugin:self];
+}
+
+// PCI-SIG published base class codes (top byte of the "class-code" registry property) —
+// public, standard PCI Local Bus spec values, read the same way as the device name via
+// IORegistryEntryCreateCFProperty. 0x06 (Bridge) is what a Thunderbolt dock/hub's own PCI
+// function typically enumerates as, mirroring the bDeviceClass==9 hub check in USBMonitor.
+-(NSString *)tbClassNameForBaseClass:(uint8_t)baseClass {
+	switch (baseClass) {
+		case 0x01: return NSLocalizedString(@"Storage Controller", @"");
+		case 0x02: return NSLocalizedString(@"Network Controller", @"");
+		case 0x03: return NSLocalizedString(@"Display Controller", @"");
+		case 0x04: return NSLocalizedString(@"Multimedia Controller", @"");
+		case 0x06: return NSLocalizedString(@"Bridge / Dock", @"");
+		case 0x07: return NSLocalizedString(@"Communication Controller", @"");
+		case 0x09: return NSLocalizedString(@"Input Device", @"");
+		case 0x0C: return NSLocalizedString(@"Serial Bus Controller", @"");
+		case 0x0D: return NSLocalizedString(@"Wireless Controller", @"");
+		default:   return nil;
+	}
+}
+
+-(NSString *)tbExtraInfoForDevice:(io_object_t)device {
+	NSMutableArray<NSString*> *lines = [NSMutableArray array];
+
+	int vendorID = -1, deviceID = -1;
+	CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("vendor-id"), kCFAllocatorDefault, 0);
+	if (vidRef) {
+		if (CFGetTypeID(vidRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)vidRef) >= 2) {
+			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)vidRef);
+			vendorID = bytes[0] | (bytes[1] << 8);
+		} else if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) {
+			CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vendorID);
+		}
+		CFRelease(vidRef);
+	}
+	CFTypeRef didRef = IORegistryEntryCreateCFProperty(device, CFSTR("device-id"), kCFAllocatorDefault, 0);
+	if (didRef) {
+		if (CFGetTypeID(didRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)didRef) >= 2) {
+			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)didRef);
+			deviceID = bytes[0] | (bytes[1] << 8);
+		} else if (CFGetTypeID(didRef) == CFNumberGetTypeID()) {
+			CFNumberGetValue((CFNumberRef)didRef, kCFNumberIntType, &deviceID);
+		}
+		CFRelease(didRef);
+	}
+	if (vendorID >= 0 && deviceID >= 0) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vendorID, deviceID]];
+	}
+
+	CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("class-code"), kCFAllocatorDefault, 0);
+	if (classRef) {
+		uint32_t classCode = 0;
+		BOOL got = NO;
+		if (CFGetTypeID(classRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)classRef) >= 3) {
+			const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)classRef);
+			classCode = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
+			got = YES;
+		} else if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
+			CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt32Type, (int32_t *)&classCode);
+			got = YES;
+		}
+		if (got) {
+			uint8_t baseClass = (classCode >> 16) & 0xFF;
+			NSString *className = [self tbClassNameForBaseClass:baseClass];
+			if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
+		}
+		CFRelease(classRef);
+	}
+
+	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
 -(void)tbDeviceAdded:(io_iterator_t)iterator {
@@ -111,7 +182,7 @@
 		// internal devices, so we deliberately ignore the launch enumeration.
 		if (notificationsArePrimed) {
 			NSString *deviceName = [self nameForThunderboltObject:thisObject];
-			if (deviceName) [self tbDeviceName:deviceName added:YES];
+			if (deviceName) [self tbDeviceName:deviceName added:YES extraInfo:[self tbExtraInfoForDevice:thisObject]];
 		}
 		IOObjectRelease(thisObject);
 	}
@@ -127,7 +198,9 @@ static void tbDeviceAdded(void *refCon, io_iterator_t iterator) {
 	while ((thisObject = IOIteratorNext(iterator))) {
 		if (notificationsArePrimed) {
 			NSString *deviceName = [self nameForThunderboltObject:thisObject];
-			if (deviceName) [self tbDeviceName:deviceName added:NO];
+			// No extraInfo on removal: registry properties are frequently unreadable
+			// from a terminating entry by the time this callback fires.
+			if (deviceName) [self tbDeviceName:deviceName added:NO extraInfo:nil];
 		}
 		IOObjectRelease(thisObject);
 	}

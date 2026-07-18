@@ -125,7 +125,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 	self.notificationsArePrimed = YES;
 }
 
--(void)usbDeviceID:(uint64_t)deviceID name:(NSString*)deviceName added:(BOOL)added isHub:(BOOL)isHub {
+-(void)usbDeviceID:(uint64_t)deviceID name:(NSString*)deviceName added:(BOOL)added isHub:(BOOL)isHub extraInfo:(NSString *)extraInfo {
 	(void)deviceID; // no longer used for identity — see identifierString below.
 	NSString *title;
 	if (isHub) {
@@ -137,6 +137,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 
     NSString *imageName = added ? @"USB-On" : @"USB-Off";
     NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
+	NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", deviceName, extraInfo] : deviceName;
 	// Use the device NAME as the bounce/dedup identifier (matches Bluetooth/Volume/
 	// Thunderbolt), not the IOKit registry entry ID: that ID is a fresh, ephemeral
 	// kernel object ID assigned on every single enumeration, so it's NEVER the same
@@ -145,7 +146,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 	// bouncing USB device/hub never triggered "Unstable device".
 	[delegate notifyWithName:added ? @"USBConnected" : @"USBDisconnected"
 							 title:title
-					 description:deviceName
+					 description:description
 							  icon:iconData
 			  identifierString:deviceName
 				  contextString:nil
@@ -168,6 +169,108 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 	}
 	CFRelease(classNum);
 	return deviceClass == kHWGUSBHubDeviceClass;
+}
+
+// Human-readable label for the USB-IF's published base class codes
+// (usb.org "Defined Class Codes"). Public, permanent spec values — same
+// mechanism already used for hub detection above.
+-(NSString *)usbClassNameForClassCode:(uint8_t)classCode {
+	switch (classCode) {
+		case 0x01: return NSLocalizedString(@"Audio", @"");
+		case 0x02: return NSLocalizedString(@"Communications", @"");
+		case 0x03: return NSLocalizedString(@"HID (Keyboard/Mouse)", @"");
+		case 0x05: return NSLocalizedString(@"Physical", @"");
+		case 0x06: return NSLocalizedString(@"Still Imaging", @"");
+		case 0x07: return NSLocalizedString(@"Printer", @"");
+		case 0x08: return NSLocalizedString(@"Mass Storage", @"");
+		case 0x09: return NSLocalizedString(@"Hub", @"");
+		case 0x0A: return NSLocalizedString(@"CDC Data", @"");
+		case 0x0B: return NSLocalizedString(@"Smart Card", @"");
+		case 0x0D: return NSLocalizedString(@"Content Security", @"");
+		case 0x0E: return NSLocalizedString(@"Video", @"");
+		case 0x0F: return NSLocalizedString(@"Personal Healthcare", @"");
+		case 0x10: return NSLocalizedString(@"Audio/Video", @"");
+		case 0x11: return NSLocalizedString(@"Billboard", @"");
+		case 0x12: return NSLocalizedString(@"USB Type-C Bridge", @"");
+		case 0xDC: return NSLocalizedString(@"Diagnostic", @"");
+		case 0xE0: return NSLocalizedString(@"Wireless Controller", @"");
+		case 0xEF: return NSLocalizedString(@"Miscellaneous", @"");
+		case 0xFE: return NSLocalizedString(@"Application Specific", @"");
+		case 0xFF: return NSLocalizedString(@"Vendor Specific", @"");
+		default:   return nil;   // 0x00 = defined per-interface, not device — nothing useful to say
+	}
+}
+
+// "Device Speed" registry values, per IOKit/usb/USB.h (kUSBDeviceSpeedLow..SuperPlus) —
+// public, standard IOUSBHostFamily property already reachable the same way as bDeviceClass.
+-(NSString *)usbSpeedNameForSpeedCode:(uint8_t)speedCode {
+	switch (speedCode) {
+		case 0: return NSLocalizedString(@"USB 1.0 (Low Speed)", @"");
+		case 1: return NSLocalizedString(@"USB 1.1 (Full Speed)", @"");
+		case 2: return NSLocalizedString(@"USB 2.0 (High Speed)", @"");
+		case 3: return NSLocalizedString(@"USB 3.0/3.1 (SuperSpeed)", @"");
+		case 4: return NSLocalizedString(@"USB 3.2 (SuperSpeed+)", @"");
+		default: return nil;
+	}
+}
+
+// Builds the extra info lines (manufacturer/product, vendor:product ID, speed, class) for
+// a just-connected device, all via public/documented IORegistry properties (same mechanism
+// as the existing bDeviceClass-based hub detection) — nil if nothing usable was found. Only
+// called on connect: by the time a device is removed, these properties are frequently no
+// longer readable from the terminating registry entry.
+-(NSString *)usbExtraInfoForDevice:(io_object_t)device {
+	NSMutableArray<NSString*> *lines = [NSMutableArray array];
+
+	NSString *vendorName = nil, *productName = nil;
+	CFTypeRef vn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Vendor Name"), kCFAllocatorDefault, 0);
+	if (vn) {
+		if (CFGetTypeID(vn) == CFStringGetTypeID()) vendorName = (__bridge_transfer NSString *)vn;
+		else CFRelease(vn);
+	}
+	CFTypeRef pn = IORegistryEntryCreateCFProperty(device, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
+	if (pn) {
+		if (CFGetTypeID(pn) == CFStringGetTypeID()) productName = (__bridge_transfer NSString *)pn;
+		else CFRelease(pn);
+	}
+	if (vendorName || productName) {
+		NSString *combined = (vendorName && productName) ? [NSString stringWithFormat:@"%@ %@", vendorName, productName]
+			: (vendorName ?: productName);
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), combined]];
+	}
+
+	int vid = -1, pid = -1;
+	CFTypeRef vidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idVendor"), kCFAllocatorDefault, 0);
+	if (vidRef) { if (CFGetTypeID(vidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)vidRef, kCFNumberIntType, &vid); CFRelease(vidRef); }
+	CFTypeRef pidRef = IORegistryEntryCreateCFProperty(device, CFSTR("idProduct"), kCFAllocatorDefault, 0);
+	if (pidRef) { if (CFGetTypeID(pidRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)pidRef, kCFNumberIntType, &pid); CFRelease(pidRef); }
+	if (vid >= 0 && pid >= 0) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vid, pid]];
+	}
+
+	CFTypeRef speedRef = IORegistryEntryCreateCFProperty(device, CFSTR("Device Speed"), kCFAllocatorDefault, 0);
+	if (speedRef) {
+		if (CFGetTypeID(speedRef) == CFNumberGetTypeID()) {
+			uint8_t speed = 0;
+			CFNumberGetValue((CFNumberRef)speedRef, kCFNumberSInt8Type, &speed);
+			NSString *speedName = [self usbSpeedNameForSpeedCode:speed];
+			if (speedName) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Speed:\t%@", @""), speedName]];
+		}
+		CFRelease(speedRef);
+	}
+
+	CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("bDeviceClass"), kCFAllocatorDefault, 0);
+	if (classRef) {
+		if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
+			uint8_t deviceClass = 0;
+			CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt8Type, &deviceClass);
+			NSString *className = [self usbClassNameForClassCode:deviceClass];
+			if (className) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Type:\t%@", @""), className]];
+		}
+		CFRelease(classRef);
+	}
+
+	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
 -(void)usbDeviceAdded:(io_iterator_t)iterator {
@@ -196,9 +299,10 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 			if (deviceName) {
 				deviceName = [self deviceBusNameSwap:deviceName];
 				BOOL isHub = [self deviceIsHub:thisObject];
+				NSString *extraInfo = [self usbExtraInfoForDevice:thisObject];
 
 				// NSLog(@"USB Device Attached: %@" , deviceName);
-				[self usbDeviceID:deviceID name:deviceName added:YES isHub:isHub];
+				[self usbDeviceID:deviceID name:deviceName added:YES isHub:isHub extraInfo:extraInfo];
 			}
 		}
 
@@ -238,7 +342,9 @@ static void usbDeviceAdded(void *refCon, io_iterator_t iterator) {
 			BOOL isHub = [self deviceIsHub:thisObject];
 
 			// NSLog(@"USB Device Detached: %@" , deviceName);
-			[self usbDeviceID:deviceID name:deviceName added:NO isHub:isHub];
+			// No extraInfo on removal: registry properties are frequently unreadable
+			// from a terminating entry by the time this callback fires.
+			[self usbDeviceID:deviceID name:deviceName added:NO isHub:isHub extraInfo:nil];
 		}
 		
 		IOObjectRelease(thisObject);
