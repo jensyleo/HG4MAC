@@ -22,6 +22,19 @@
 #define HWG_DISPLAY_SHOW_RESOLUTION_KEY @"HWGDisplayShowResolution"
 #define HWG_DISPLAY_SHOW_REFRESH_KEY    @"HWGDisplayShowRefreshRate"
 #define HWG_DISPLAY_SHOW_ROLE_KEY       @"HWGDisplayShowRole"
+#define HWG_DISPLAY_SHOW_ROTATION_KEY   @"HWGDisplayShowRotation"
+
+// F34: notify when an already-connected display changes resolution or refresh rate (e.g.
+// user picks a different resolution in System Settings, or a TV renegotiates a different
+// refresh rate). Off the connect/disconnect path entirely — driven by comparing mode
+// signatures across reconfiguration callbacks for displays neither added nor removed.
+#define HWG_DISPLAY_NOTIFY_MODE_CHANGE_KEY @"HWGDisplayNotifyModeChange"
+
+// F34: notify when an already-connected display's role changes (becomes/stops being Main,
+// or Mirroring starts/stops between two displays that were both already online) — same
+// comparison approach as the mode-change detection above, applied to CGDisplayIsMain/
+// CGDisplayIsInMirrorSet instead of CGDisplayCopyDisplayMode.
+#define HWG_DISPLAY_NOTIFY_ROLE_CHANGE_KEY @"HWGDisplayNotifyRoleChange"
 
 // EXPERIMENTAL, off by default — see the long comment on -pollForPhysicalVideoLink and the
 // README "Known limitations" entry before touching this. Not a supported feature; a
@@ -51,6 +64,16 @@ static NSInteger HWGDisplayIntForKey(NSString *key, NSInteger def) {
 // id -> last-known human readable name, so a disconnect can still be reported with a
 // sensible label even after the display is gone.
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *displayNames;
+// id -> last-known "WxH@Hz" string for a display that's still online, so a later
+// reconfiguration callback can tell a genuine resolution/refresh-rate change (same
+// CGDirectDisplayID, different mode) apart from a no-op callback (e.g. Dock
+// resize/wallpaper change also triggers this same callback).
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *displayModeSignatures;
+// id -> last-known role string (Main/Extended/Mirrored) for a display that's still online,
+// so a role change (e.g. dragging the menu bar to a different display in System Settings, or
+// starting/stopping Mirroring between two already-connected displays) can be detected without
+// a connect/disconnect having happened.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *displayRoleSignatures;
 
 // Experimental early-detection polling state (see -pollForPhysicalVideoLink).
 @property (nonatomic, strong) NSTimer *earlyDetectionTimer;
@@ -73,6 +96,8 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 @synthesize prefsView;
 @synthesize knownDisplayIDs;
 @synthesize displayNames;
+@synthesize displayModeSignatures;
+@synthesize displayRoleSignatures;
 @synthesize earlyDetectionTimer;
 @synthesize earlyDetectionLastPollDate;
 @synthesize earlyDetectionIntervalLabel;
@@ -82,6 +107,8 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	if (self) {
 		knownDisplayIDs = [NSMutableSet set];
 		displayNames = [NSMutableDictionary dictionary];
+		displayModeSignatures = [NSMutableDictionary dictionary];
+		displayRoleSignatures = [NSMutableDictionary dictionary];
 
 		// Baseline silently at launch — like Thermal/USB/WiFi — so the first real
 		// connect/disconnect after this point is the first thing ever notified.
@@ -248,18 +275,85 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 
 	if (mode) CGDisplayModeRelease(mode);
 
-	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_ROLE_KEY, YES)) {
-		NSString *role;
-		if (CGDisplayIsMain(displayID)) {
-			role = NSLocalizedString(@"Main display", @"");
-		} else if (CGDisplayIsInMirrorSet(displayID)) {
-			role = NSLocalizedString(@"Mirrored", @"");
-		} else {
-			role = NSLocalizedString(@"Extended", @"");
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_ROTATION_KEY, YES)) {
+		double rotation = CGDisplayRotation(displayID);   // 0.0 if the display/GPU doesn't support rotation
+		if (rotation != 0.0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Rotation:\t%.0f°", @""), rotation]];
 		}
-		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Role:\t%@", @""), role]];
 	}
 
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_ROLE_KEY, YES)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Role:\t%@", @""), [self roleForDisplayID:displayID]]];
+	}
+
+	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
+}
+
+-(NSString *)roleForDisplayID:(CGDirectDisplayID)displayID {
+	if (CGDisplayIsMain(displayID)) return NSLocalizedString(@"Main display", @"");
+	if (CGDisplayIsInMirrorSet(displayID)) return NSLocalizedString(@"Mirrored", @"");
+	return NSLocalizedString(@"Extended", @"");
+}
+
+// "WxH@Hz" for the display's current mode — used only to detect a genuine mode change
+// across two reconfiguration callbacks for a display that stays online throughout (added
+// and removed sets both exclude it). nil if the mode can't be read (display just went
+// offline, etc.) so callers can treat "unknown" as "don't compare".
+-(NSString *)modeSignatureForDisplayID:(CGDirectDisplayID)displayID {
+	CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
+	if (!mode) return nil;
+	// Rotation is folded into the same signature/diff as resolution+refresh rate (rather than
+	// a third independent tracked signature like role) because on a physical rotation,
+	// CGDisplayCopyDisplayMode's pixel W/H already swap to match (portrait vs landscape) —
+	// it's really one mode-reconfiguration event, same as this class already treats
+	// resolution+Hz as one event instead of two.
+	NSString *signature = [NSString stringWithFormat:@"%zux%zu@%.2f@r%.0f",
+		CGDisplayModeGetPixelWidth(mode), CGDisplayModeGetPixelHeight(mode), CGDisplayModeGetRefreshRate(mode), CGDisplayRotation(displayID)];
+	CGDisplayModeRelease(mode);
+	return signature;
+}
+
+// Parses a "WxH@Hz" signature (see -modeSignatureForDisplayID:) back into its pieces, so
+// -describeModeChangeFromSignature:toSignature: can build "old → new" lines per field
+// instead of just showing the new mode. Returns NO if the string doesn't match the format
+// this class itself always produces (defensive only — should not happen in practice).
++(BOOL)parseModeSignature:(NSString *)signature width:(size_t *)width height:(size_t *)height hz:(double *)hz rotation:(double *)rotation {
+	if (!signature) return NO;
+	unsigned long w = 0, h = 0;
+	double r = 0, rot = 0;
+	if (sscanf([signature UTF8String], "%lux%lu@%lf@r%lf", &w, &h, &r, &rot) != 4) return NO;
+	if (width) *width = w;
+	if (height) *height = h;
+	if (hz) *hz = r;
+	if (rotation) *rotation = rot;
+	return YES;
+}
+
+// Builds "Resolution:\told → new" / "Refresh rate:\told → new" / "Rotation:\told → new" lines
+// (only the fields whose F33 checkbox is on and that actually changed), for the
+// DisplayModeChanged notification — mirrors what DisplayRoleChanged already does for role,
+// instead of only showing the new mode via -extraInfoForDisplayID: with no reference point
+// for what it used to be.
+-(NSString *)describeModeChangeFromSignature:(NSString *)oldSignature toSignature:(NSString *)newSignature {
+	size_t oldW, oldH, newW, newH; double oldHz, newHz, oldRot, newRot;
+	BOOL haveOld = [HWGrowlDisplayMonitor parseModeSignature:oldSignature width:&oldW height:&oldH hz:&oldHz rotation:&oldRot];
+	BOOL haveNew = [HWGrowlDisplayMonitor parseModeSignature:newSignature width:&newW height:&newH hz:&newHz rotation:&newRot];
+	if (!haveOld || !haveNew) return nil;
+
+	NSMutableArray<NSString *> *lines = [NSMutableArray array];
+	BOOL wantsResolution = HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_RESOLUTION_KEY, YES);
+	BOOL wantsRefresh    = HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_REFRESH_KEY, YES);
+	BOOL wantsRotation   = HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_ROTATION_KEY, YES);
+
+	if (wantsResolution && (oldW != newW || oldH != newH)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Resolution:\t%zu×%zu → %zu×%zu", @""), oldW, oldH, newW, newH]];
+	}
+	if (wantsRefresh && oldHz != newHz) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Refresh rate:\t%.0f Hz → %.0f Hz", @""), oldHz, newHz]];
+	}
+	if (wantsRotation && oldRot != newRot) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Rotation:\t%.0f° → %.0f°", @""), oldRot, newRot]];
+	}
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -285,8 +379,12 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	if (isBaselineOnly) {
 		knownDisplayIDs = newIDs;
 		for (NSNumber *displayID in newIDs) {
-			NSString *name = [self nameForOnlineDisplayID:[displayID unsignedIntValue]];
+			CGDirectDisplayID cgID = [displayID unsignedIntValue];
+			NSString *name = [self nameForOnlineDisplayID:cgID];
 			displayNames[displayID] = name ?: NSLocalizedString(@"External Display", @"");
+			NSString *signature = [self modeSignatureForDisplayID:cgID];
+			if (signature) displayModeSignatures[displayID] = signature;
+			displayRoleSignatures[displayID] = [self roleForDisplayID:cgID];
 		}
 		return;
 	}
@@ -301,6 +399,9 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		CGDirectDisplayID cgID = [displayID unsignedIntValue];
 		NSString *name = [self nameForOnlineDisplayID:cgID] ?: NSLocalizedString(@"External Display", @"");
 		displayNames[displayID] = name;
+		NSString *signature = [self modeSignatureForDisplayID:cgID];
+		if (signature) displayModeSignatures[displayID] = signature;
+		displayRoleSignatures[displayID] = [self roleForDisplayID:cgID];
 		NSString *extraInfo = [self extraInfoForDisplayID:cgID];
 		NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", name, extraInfo] : name;
 		[self notifyConnected:YES displayID:displayID description:description];
@@ -309,6 +410,76 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		NSString *lastKnownName = displayNames[displayID] ?: NSLocalizedString(@"External Display", @"");
 		[self notifyConnected:NO displayID:displayID description:lastKnownName];
 		[displayNames removeObjectForKey:displayID];
+		[displayModeSignatures removeObjectForKey:displayID];
+		[displayRoleSignatures removeObjectForKey:displayID];
+	}
+
+	// Neither added nor removed: still online, but its mode may have changed (user picked a
+	// different resolution/refresh rate in System Settings, a TV renegotiated a lower Hz,
+	// etc.). Compare against the last known signature; only fire if we had one to compare
+	// against (a nil old signature means we never captured it, e.g. a screen that just came
+	// out of a state where CGDisplayCopyDisplayMode returned NULL — don't report a "change"
+	// from unknown, only from a known prior mode). Deliberately a SEPARATE notification from
+	// the role-change one below, even though both can fire from the same user action
+	// (switching Extended→Mirror renegotiates a shared resolution AND changes role at once,
+	// confirmed live) — they're two distinct facts (what resolution/Hz vs. what role), each
+	// independently toggleable via its own F33 checkbox, and merging them would mean a user
+	// who wants one but not the other can no longer get just one.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_NOTIFY_MODE_CHANGE_KEY, YES)) {
+		NSMutableSet<NSNumber *> *unchanged = [newIDs mutableCopy];
+		[unchanged minusSet:added];
+		[unchanged minusSet:removed];
+		for (NSNumber *displayID in unchanged) {
+			CGDirectDisplayID cgID = [displayID unsignedIntValue];
+			NSString *newSignature = [self modeSignatureForDisplayID:cgID];
+			if (!newSignature) continue;
+			NSString *oldSignature = displayModeSignatures[displayID];
+			if (oldSignature && ![oldSignature isEqualToString:newSignature]) {
+				NSString *name = displayNames[displayID] ?: NSLocalizedString(@"External Display", @"");
+				// "old → new" per field (falls back to the old flat "just show the new mode"
+				// text if the signatures can't be parsed, which shouldn't happen in practice —
+				// see -parseModeSignature:).
+				NSString *extraInfo = [self describeModeChangeFromSignature:oldSignature toSignature:newSignature] ?: [self extraInfoForDisplayID:cgID];
+				NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", name, extraInfo] : name;
+				[delegate notifyWithName:@"DisplayModeChanged"
+									 title:NSLocalizedString(@"Display Mode Changed", @"")
+							   description:description
+									  icon:[self iconDataForConnected:YES]
+						  identifierString:[NSString stringWithFormat:@"HWGrowlDisplayMode-%@", displayID]
+							 contextString:nil
+									plugin:self];
+			}
+			displayModeSignatures[displayID] = newSignature;
+		}
+	}
+
+	// Same idea, for role instead of mode: catches the menu bar/Main display moving to a
+	// different online display, or Mirroring starting/stopping between two displays that
+	// were both already connected — none of which is a connect/disconnect event, but both
+	// are visible via CGDisplayIsMain/CGDisplayIsInMirrorSet without needing the display to
+	// have gone offline first.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_NOTIFY_ROLE_CHANGE_KEY, YES)) {
+		NSMutableSet<NSNumber *> *unchanged = [newIDs mutableCopy];
+		[unchanged minusSet:added];
+		[unchanged minusSet:removed];
+		for (NSNumber *displayID in unchanged) {
+			CGDirectDisplayID cgID = [displayID unsignedIntValue];
+			NSString *newRole = [self roleForDisplayID:cgID];
+			NSString *oldRole = displayRoleSignatures[displayID];
+			if (oldRole && ![oldRole isEqualToString:newRole]) {
+				NSString *name = displayNames[displayID] ?: NSLocalizedString(@"External Display", @"");
+				NSString *description = [NSString stringWithFormat:@"%@\n%@",
+					name, [NSString stringWithFormat:NSLocalizedString(@"Role:\t%@ → %@", @""), oldRole, newRole]];
+				[delegate notifyWithName:@"DisplayRoleChanged"
+									 title:NSLocalizedString(@"Display Role Changed", @"")
+							   description:description
+									  icon:[self iconDataForConnected:YES]
+						  identifierString:[NSString stringWithFormat:@"HWGrowlDisplayRole-%@", displayID]
+							 contextString:nil
+									plugin:self];
+			}
+			displayRoleSignatures[displayID] = newRole;
+		}
 	}
 
 	knownDisplayIDs = newIDs;
@@ -391,7 +562,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 380)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 485)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -402,6 +573,9 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_RESOLUTION_KEY title:NSLocalizedString(@"Resolution", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_REFRESH_KEY    title:NSLocalizedString(@"Refresh rate", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_ROLE_KEY       title:NSLocalizedString(@"Role (Main/Extended/Mirrored)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_ROTATION_KEY   title:NSLocalizedString(@"Rotation", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_MODE_CHANGE_KEY title:NSLocalizedString(@"Notify on resolution/refresh rate change", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_ROLE_CHANGE_KEY title:NSLocalizedString(@"Notify on role change (Main/Extended/Mirrored)", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];
@@ -500,16 +674,20 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"DisplayConnected", @"DisplayDisconnected", @"DisplayLinkDetected", nil];
+	return [NSArray arrayWithObjects:@"DisplayConnected", @"DisplayDisconnected", @"DisplayModeChanged", @"DisplayRoleChanged", @"DisplayLinkDetected", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Display Connected", @""), @"DisplayConnected",
 			  NSLocalizedString(@"Display Disconnected", @""), @"DisplayDisconnected",
+			  NSLocalizedString(@"Display Mode Changed", @""), @"DisplayModeChanged",
+			  NSLocalizedString(@"Display Role Changed", @""), @"DisplayRoleChanged",
 			  NSLocalizedString(@"Video Link Detected (Experimental)", @""), @"DisplayLinkDetected", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when an external display is connected", @""), @"DisplayConnected",
 			  NSLocalizedString(@"Sent when an external display is disconnected", @""), @"DisplayDisconnected",
+			  NSLocalizedString(@"Sent when an already-connected display's resolution or refresh rate changes", @""), @"DisplayModeChanged",
+			  NSLocalizedString(@"Sent when an already-connected display's role changes (becomes/stops being Main, or Mirroring starts/stops)", @""), @"DisplayRoleChanged",
 			  NSLocalizedString(@"Experimental: sent when a physical video link is detected before macOS assigns the display a role. Off by default — see Preferences.", @""), @"DisplayLinkDetected", nil];
 }
 -(NSArray*)defaultNotifications {

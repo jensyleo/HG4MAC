@@ -4,6 +4,62 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## 2026-07-19
+
+### New: colored "before → after" highlight in notification banners
+- The custom notification banner (`GrowlApplicationBridge.m`) now automatically highlights,
+  in an accent color (blue in light mode, teal in dark mode) and bold, the "new" half of any
+  description line written as `"Label:\told → new"` — the reader's eye lands on what actually
+  changed instead of having to re-read the whole line.
+- This is a single change in the shared banner-rendering code, so any current or future
+  notification that uses that line format benefits automatically, with no per-plugin banner
+  work needed.
+- Adopted by three monitors so far: Thermal (state transitions), Display (resolution/refresh
+  rate/rotation/role changes), and Power (AC/battery source changes). Not adopted by
+  Volume/USB/Thunderbolt/Bluetooth, whose connect/disconnect events are binary rather than
+  "a value that had a previous value."
+
+### New: Display Monitor — detects changes on an already-connected display
+- Two new notifications, both independently toggleable in Preferences and both firing
+  without requiring a disconnect/reconnect:
+  - **Resolution / refresh rate / rotation changed** — e.g. picking a different resolution
+    in System Settings, a TV renegotiating a lower refresh rate, or physically rotating a
+    monitor. Shown as separate "old → new" lines per field that actually changed.
+  - **Role changed** (Main / Extended / Mirrored) — e.g. switching a display from Extended to
+    Mirrored (or back), or moving the menu bar to a different display. Switching to Mirrored
+    commonly changes BOTH resolution and role in the same reconfiguration event (macOS
+    renegotiates a shared resolution across both displays) — the two are reported as two
+    separate, distinct notifications on purpose, each with its own toggle, rather than merged
+    into one.
+- Confirmed as expected behavior, not a bug: switching between "Entire Screen" / "Window or
+  App" / "Extended Display" on an *already-connected* display does not fire a notification,
+  because the physical link never actually drops across that transition (see "Known
+  limitations" below for the full explanation).
+
+### New: Power Monitor — "Check Now" and a minutes option for the Battery Health reminder
+- Added a "Check Now" button next to "Check every" that reports Battery Health (cycle
+  count / battery health %) immediately, without waiting for the configured interval (up to
+  a month by default).
+- The optional "Notify every" reminder can now be set in **minutes** as well as hours (a new
+  unit dropdown), for anyone who wants a tighter reminder cadence than the 1–24 hour range
+  allowed.
+- The Battery Health Check notification's icon now reflects the Mac's actual current power
+  status (charging level, battery level, or plugged-in) instead of a fixed "plugged in" icon.
+
+### Improved: Thermal Monitor transition wording + a way to preview any state
+- The "old → new" thermal-state line now uses short state names in the arrow (e.g.
+  "Critical → Nominal") and only attaches the descriptive phrase ("performance significantly
+  reduced", etc.) to the CURRENT state — previously the old state's description was shown
+  too, which could misleadingly read as if the old, worse condition still applied right
+  after the arrow said otherwise.
+- Added an explicit "↓ Cooling down (improving)" / "↑ Warming up (worsening)" tag so the
+  direction of a transition is unambiguous at a glance.
+- Added a "Simulate Test Notification" control (Preferences → Thermal Monitor): two dropdowns
+  (From/To) plus a button, letting any state-to-state transition be previewed on demand.
+  Useful because many Macs (this one included, under sustained CPU stress) rarely or never
+  reach Serious/Critical under normal/moderate load, so those notifications/icons would
+  otherwise be very hard to ever actually see and verify.
+
 ## 2026-07-18
 
 ### New: experimental early physical-link detection for Display Monitor (off by default)

@@ -37,8 +37,10 @@
 // days/weeks/months check. Off by default; the main check above already covers the feature.
 #define HWG_POWER_HEALTH_NOTIFY_ENABLED_KEY @"HWGPowerHealthNotifyEnabled"
 #define HWG_POWER_HEALTH_NOTIFY_HOURS_KEY   @"HWGPowerHealthNotifyHours"
+#define HWG_POWER_HEALTH_NOTIFY_UNIT_KEY    @"HWGPowerHealthNotifyUnit"   // 0=hours, 1=minutes
 #define HWG_POWER_LAST_HEALTH_NOTIFY_KEY    @"HWGPowerLastHealthNotifyDate"
 #define HWG_POWER_HEALTH_NOTIFY_HOURS_DEFAULT 8
+#define HWG_POWER_HEALTH_NOTIFY_UNIT_DEFAULT  0
 
 static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -543,6 +545,16 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 				name = @"PowerChange";
 				title = [NSString stringWithFormat:NSLocalizedString(@"On %@", @"Format string for On <power type>"), localizedSource];
 				description = hasBattery ? powerDescription : @"";
+
+				// "old → new" on an actual source-type change (Battery→AC etc.) — skip on the
+				// very first check (lastPowerSource is still Unknown then, so there's no real
+				// "old" to show) and on refires where the type didn't change (changedType
+				// false), which would otherwise repeat "AC Power → AC Power" every refire.
+				if (changedType && lastPowerSource != HGUnknownPower) {
+					NSString *sourceLine = [NSString stringWithFormat:NSLocalizedString(@"Source:\t%@ → %@", @""),
+						[self localizedNameForSource:lastPowerSource], localizedSource];
+					description = [description length] ? [NSString stringWithFormat:@"%@\n%@", sourceLine, description] : sourceLine;
+				}
 			} else {
 				name = @"PowerWarning";
 				title	= NSLocalizedString(@"Battery Low!", @"");
@@ -554,42 +566,8 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 			if(!description)
 				description = [NSMutableString string];
 						
-			NSString *imageName = nil;
-			switch (currentSource) {
-				case HGACPower:
-					// Plugged but NOT full → charging ramp by level (Power-Charging-0…100),
-					// even if IOKit momentarily reports isCharging=NO right after connecting.
-					// Only a full (or unknown) battery shows the plain "plugged" icon — this
-					// avoids showing a full-battery icon when you plug in at e.g. 10%.
-					if(percentage >= 0 && percentage < 100){
-						CGFloat adjusted = roundf((CGFloat)percentage / 10.0f);
-						imageName = [NSString stringWithFormat:@"Power-Charging-%ld0", (NSInteger)adjusted];
-						if(adjusted == 0)
-							imageName = @"Power-Charging-0";
-					} else {
-						imageName = @"Power-Plugged";   // full (100%) or unknown %
-					}
-					break;
-				case HGBatteryPower:
-				case HGUPSPower:
-					if(percentage >= 0){
-						CGFloat adjusted = roundf((CGFloat)percentage / 10.0f);
-						imageName = [NSString stringWithFormat:@"Power-%ld0", (NSInteger)adjusted];
-						if(adjusted == 0)
-							imageName = @"Power-0";
-					}
-					else
-					{
-						imageName = @"Power-NoBattery";
-					}
-					break;
-				case HGUnknownPower:
-				default:
-					//Shouldn't get to either of these
-					imageName = @"Power-BatteryFailure";
-					break;
-			}
-			
+			NSString *imageName = [self powerIconNameForSource:currentSource percentage:percentage];
+
 			@autoreleasepool
 			{
 	NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
@@ -608,6 +586,73 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 		
 		CFRelease(sourcesBlob);
 	}
+}
+
+// Icon-name selection extracted out of -powerSourceChanged: so it can also be reused by
+// the Battery Health Check notification (which has no notion of "the notification that
+// triggered this", just "what's the current status right now").
+-(NSString *)powerIconNameForSource:(HGPowerSource)source percentage:(NSInteger)percentage {
+	switch (source) {
+		case HGACPower:
+			// Plugged but NOT full → charging ramp by level (Power-Charging-0…100),
+			// even if IOKit momentarily reports isCharging=NO right after connecting.
+			// Only a full (or unknown) battery shows the plain "plugged" icon — this
+			// avoids showing a full-battery icon when you plug in at e.g. 10%.
+			if (percentage >= 0 && percentage < 100) {
+				CGFloat adjusted = roundf((CGFloat)percentage / 10.0f);
+				return (adjusted == 0) ? @"Power-Charging-0" : [NSString stringWithFormat:@"Power-Charging-%ld0", (NSInteger)adjusted];
+			}
+			return @"Power-Plugged";   // full (100%) or unknown %
+		case HGBatteryPower:
+		case HGUPSPower:
+			if (percentage >= 0) {
+				CGFloat adjusted = roundf((CGFloat)percentage / 10.0f);
+				return (adjusted == 0) ? @"Power-0" : [NSString stringWithFormat:@"Power-%ld0", (NSInteger)adjusted];
+			}
+			return @"Power-NoBattery";
+		case HGUnknownPower:
+		default:
+			return @"Power-BatteryFailure";
+	}
+}
+
+// Reads the CURRENT power source/percentage fresh from IOKit — used by Battery Health
+// Check, which fires on its own schedule (not from within -powerSourceChanged:) and so has
+// no already-computed currentSource/percentage lying around to reuse.
+-(NSData *)currentPowerStatusIconData {
+	NSString *imageName = @"Power-BatteryFailure";
+	CFTypeRef sourcesBlob = IOPSCopyPowerSourcesInfo();
+	if (sourcesBlob) {
+		NSString *source = (__bridge NSString*)IOPSGetProvidingPowerSourceType(sourcesBlob);
+		HGPowerSource currentSource;
+		if ([source compare:@"AC Power"] == NSOrderedSame) {
+			currentSource = HGACPower;
+		} else if ([source compare:@"Battery Power"] == NSOrderedSame) {
+			currentSource = HGBatteryPower;
+		} else if ([source compare:@"UPS Power"] == NSOrderedSame) {
+			currentSource = HGUPSPower;
+		} else {
+			currentSource = HGUnknownPower;
+		}
+
+		NSInteger percentage = -1;
+		CFArrayRef powerSourcesList = IOPSCopyPowerSourcesList(sourcesBlob);
+		if (powerSourcesList) {
+			CFIndex count = CFArrayGetCount(powerSourcesList);
+			for (CFIndex i = 0; i < count; ++i) {
+				CFTypeRef powerSource = CFArrayGetValueAtIndex(powerSourcesList, i);
+				CFDictionaryRef description = IOPSGetPowerSourceDescription(sourcesBlob, powerSource);
+				if (!description) continue;
+				NSInteger p = [HWGrowlPowerMonitor batteryPercentageForPowerSourceDescription:description];
+				if (p > percentage) percentage = p;
+			}
+			CFRelease(powerSourcesList);
+		}
+
+		imageName = [self powerIconNameForSource:currentSource percentage:percentage];
+		CFRelease(sourcesBlob);
+	}
+	return [[NSImage imageNamed:imageName] TIFFRepresentation];
 }
 
 -(NSMutableString*)chargingDescriptionForPowerSources:(NSArray*)sources currentSource:(HGPowerSource)currentSource {
@@ -732,12 +777,30 @@ static void powerSourceChanged(void *context) {
 	[[NSUserDefaults standardUserDefaults] setInteger:(hours < 1 ? 1 : hours) forKey:HWG_POWER_HEALTH_NOTIFY_HOURS_KEY];
 }
 
+// 0 = hours, 1 = minutes. Minutes exists mainly so this reminder can be tested end-to-end
+// in a few minutes instead of waiting up to a full day at the 1-24 hour range.
+-(NSInteger)healthNotifyUnit {
+	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_POWER_HEALTH_NOTIFY_UNIT_KEY];
+	return stored ? [stored integerValue] : HWG_POWER_HEALTH_NOTIFY_UNIT_DEFAULT;
+}
+-(void)setHealthNotifyUnit:(NSInteger)unit {
+	[[NSUserDefaults standardUserDefaults] setInteger:unit forKey:HWG_POWER_HEALTH_NOTIFY_UNIT_KEY];
+}
+-(NSString *)healthNotifyUnitLabel:(NSInteger)unit {
+	return (unit == 1) ? NSLocalizedString(@"minute(s)", @"") : NSLocalizedString(@"hour(s)", @"");
+}
+-(NSTimeInterval)healthNotifyIntervalSeconds {
+	NSTimeInterval unitSeconds = ([self healthNotifyUnit] == 1) ? 60.0 : 3600.0;
+	return [self healthNotifyHours] * unitSeconds;
+}
+
 -(void)startHealthCheckTimer {
 	if (_healthCheckTimer) return;
-	// Hourly tick is cheap and just compares elapsed-vs-configured-interval; the actual
-	// notification only fires once a real interval (the main check, or the "Notify every"
-	// reminder) has actually elapsed.
-	self.healthCheckTimer = [NSTimer scheduledTimerWithTimeInterval:3600.0
+	// A 1-minute tick is cheap (just compares elapsed-vs-configured-interval, no IOKit call
+	// unless something is actually due) and is what makes the minutes option on "Notify
+	// every" meaningful — an hourly tick would silently round every reminder up to the next
+	// full hour regardless of what the user configured.
+	self.healthCheckTimer = [NSTimer scheduledTimerWithTimeInterval:60.0
 															   target:self
 															 selector:@selector(checkBatteryHealthDue)
 															 userInfo:nil
@@ -759,15 +822,28 @@ static void powerSourceChanged(void *context) {
 	// SAME health/cycle numbers, in hours — independent cadence from the main check above.
 	BOOL notifyEnabled = [self healthNotifyEnabled];
 	NSTimeInterval lastNotify = [defaults doubleForKey:HWG_POWER_LAST_HEALTH_NOTIFY_KEY];
-	BOOL notifyDue = notifyEnabled && ((lastNotify == 0) || (now - lastNotify) >= ([self healthNotifyHours] * 3600.0));
+	BOOL notifyDue = notifyEnabled && ((lastNotify == 0) || (now - lastNotify) >= [self healthNotifyIntervalSeconds]);
 
+	[self performBatteryHealthCheckForcingCheckDue:checkDue notifyDue:notifyDue];
+}
+
+// Split out of -checkBatteryHealthDue so "Check Now" can force a report immediately
+// (forcingCheckDue:YES) without waiting for either interval to actually elapse, while the
+// normal timer-driven path still only reports when one of them is genuinely due.
+-(void)performBatteryHealthCheckForcingCheckDue:(BOOL)checkDue notifyDue:(BOOL)notifyDue {
 	if (!checkDue && !notifyDue) return;
+
+	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+	NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
 
 	// Mark as checked/notified regardless of outcome — a Mac with no battery (desktop)
 	// would otherwise retry every hour forever with nothing to report. A full check also
 	// resets the reminder clock (we just showed the same info either way).
 	if (checkDue) [defaults setDouble:now forKey:HWG_POWER_LAST_HEALTH_CHECK_KEY];
 	[defaults setDouble:now forKey:HWG_POWER_LAST_HEALTH_NOTIFY_KEY];
+
+	BOOL showCycles = HWGPowerBoolForKey(HWG_POWER_SHOW_CYCLES_KEY, YES);
+	BOOL showHealth = HWGPowerBoolForKey(HWG_POWER_SHOW_HEALTH_KEY, YES);
 
 	NSInteger cycleCount = -1, healthPercent = -1, ratedCycles = -1;
 	if (!HWGCopyBatteryHealth(&cycleCount, &healthPercent, &ratedCycles))
@@ -785,7 +861,7 @@ static void powerSourceChanged(void *context) {
 	if (![parts count]) return;
 
 	@autoreleasepool {
-		NSData *iconData = [[NSImage imageNamed:@"Power-Plugged"] TIFFRepresentation];
+		NSData *iconData = [self currentPowerStatusIconData];
 		[delegate notifyWithName:@"PowerBatteryHealth"
 							title:NSLocalizedString(@"Battery Health Check", @"")
 					  description:[parts componentsJoinedByString:@"\n"]
@@ -840,6 +916,14 @@ static void powerSourceChanged(void *context) {
 	self.healthIntervalValueLabel.stringValue = [NSString stringWithFormat:@"%ld %@", (long)value, [self healthIntervalUnitLabel:[self healthIntervalUnit]]];
 }
 
+// Manual override for "Check every" — forces an immediate report regardless of how much
+// time is left on either interval, so the user isn't stuck waiting up to a month (the
+// default "Check every" interval) to see a report, or to re-verify the feature after
+// changing settings.
+-(IBAction)healthCheckNowPressed:(NSButton*)sender {
+	[self performBatteryHealthCheckForcingCheckDue:YES notifyDue:NO];
+}
+
 -(IBAction)healthNotifyToggled:(NSButton*)sender {
 	BOOL on = (sender.state == NSControlStateValueOn);
 	[self setHealthNotifyEnabled:on];
@@ -849,8 +933,13 @@ static void powerSourceChanged(void *context) {
 	[self setHealthNotifyHours:[sender integerValue]];
 	[self updateHealthNotifyHoursLabel];
 }
+-(IBAction)healthNotifyUnitChanged:(NSPopUpButton*)sender {
+	[self setHealthNotifyUnit:[sender indexOfSelectedItem]];
+	[self updateHealthNotifyHoursLabel];
+}
 -(void)updateHealthNotifyHoursLabel {
-	self.healthNotifyHoursLabel.stringValue = [NSString stringWithFormat:@"%ld hour(s)", (long)[self healthNotifyHours]];
+	NSInteger value = [self healthNotifyHours];
+	self.healthNotifyHoursLabel.stringValue = [NSString stringWithFormat:@"%ld %@", (long)value, [self healthNotifyUnitLabel:[self healthNotifyUnit]]];
 }
 
 -(NSView*)preferencePane {
@@ -895,6 +984,7 @@ static void powerSourceChanged(void *context) {
 	CGFloat healthSectionHeight = 10 + headerH + 10
 		+ ([healthRows count] * rowH) + (([healthRows count] - 1) * 10)
 		+ 10 + healthControlRowH      // "Check every" row
+		+ 6 + rowH                    // "Check Now" button row
 		+ 6 + healthControlRowH;      // "Notify every" row (child, tighter gap)
 	// PowerMonitorPrefs.xib's own content occupies only its TOP ~half — its lowest control
 	// ("Refire only on battery") has its own bottom edge at local y=107 (of the xib's
@@ -996,6 +1086,16 @@ static void powerSourceChanged(void *context) {
 
 	cursorTop = controlY - 6;
 
+	// Manual override: forces an immediate report without waiting for "Check every"'s
+	// interval (up to a month at default settings) to elapse — also the only way to
+	// re-verify the feature after it has already fired once this interval.
+	CGFloat checkNowY = cursorTop - rowH;
+	NSButton *checkNowButton = [NSButton buttonWithTitle:NSLocalizedString(@"Check Now", @"") target:self action:@selector(healthCheckNowPressed:)];
+	checkNowButton.translatesAutoresizingMaskIntoConstraints = YES;
+	checkNowButton.frame = NSMakeRect(pad + 92, checkNowY, 100, rowH);
+	[combined addSubview:checkNowButton];
+	cursorTop = checkNowY - 6;
+
 	// "Notify every" — CHILD of "Check every": an optional, more frequent reminder of the
 	// same numbers, in hours. Indented (+20pt) to read as nested under the row above.
 	CGFloat notifyY = cursorTop - healthControlRowH;
@@ -1016,10 +1116,29 @@ static void powerSourceChanged(void *context) {
 	self.healthNotifySlider.translatesAutoresizingMaskIntoConstraints = YES;
 	[combined addSubview:self.healthNotifySlider];
 
+	// Room for the label+unit-popup pair added below is tight: this row is indented (+20pt,
+	// nested under "Check every") on top of already using a wider checkbox column (134 vs
+	// "Check every"'s 92), so reusing that row's same label/popup widths would push the
+	// popup's right edge past combined's own bounds — the exact "arrow doesn't respond to
+	// clicks" bug documented above on `width`. Narrower label + narrower popup, laid out via
+	// explicit end-of-previous-view + gap math (rather than copying fixed offsets), keeps the
+	// popup's right edge safely inside combined's bounds.
+	CGFloat notifySliderEndX = notifyIndent + 134 + 110;
+	CGFloat notifyGap = 8;
+	CGFloat notifyLabelW = 60;
 	self.healthNotifyHoursLabel = [NSTextField labelWithString:@""];
 	self.healthNotifyHoursLabel.translatesAutoresizingMaskIntoConstraints = YES;
-	self.healthNotifyHoursLabel.frame = NSMakeRect(notifyIndent + 134 + 118, notifyY + 6, 84, 18);
+	self.healthNotifyHoursLabel.frame = NSMakeRect(notifySliderEndX + notifyGap, notifyY + 6, notifyLabelW, 18);
 	[combined addSubview:self.healthNotifyHoursLabel];
+
+	NSPopUpButton *notifyUnitPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(notifySliderEndX + notifyGap + notifyLabelW + notifyGap, notifyY, 84, healthControlRowH) pullsDown:NO];
+	[notifyUnitPopup addItemsWithTitles:@[NSLocalizedString(@"Hours", @""), NSLocalizedString(@"Minutes", @"")]];
+	[notifyUnitPopup selectItemAtIndex:[self healthNotifyUnit]];
+	notifyUnitPopup.target = self;
+	notifyUnitPopup.action = @selector(healthNotifyUnitChanged:);
+	notifyUnitPopup.translatesAutoresizingMaskIntoConstraints = YES;
+	[combined addSubview:notifyUnitPopup];
+
 	[self updateHealthNotifyHoursLabel];
 
 	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, 260)];

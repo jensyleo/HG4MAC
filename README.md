@@ -34,8 +34,13 @@ Apple Silicon**, starting from the upstream linked above.
   - shows a **per-notification colored icon** (not just the app icon),
   - **grows dynamically** to fit long titles/bodies (e.g. long volume names, multi-line IP info),
   - **stacks** multiple notifications vertically,
-  - has a **close (×)** button and is **click-to-open** (e.g. reveal a mounted volume in Finder).
-- **Seven hardware/system monitors** (loadable plugins):
+  - has a **close (×)** button and is **click-to-open** (e.g. reveal a mounted volume in Finder),
+  - **highlights "before → after" changes in color** — any notification line written as
+    `"Label:\told → new"` automatically gets its new value colored (accent blue/teal,
+    bold) so what actually changed stands out at a glance, instead of having to re-read the
+    whole line. Used by Thermal (state transitions), Display (resolution/refresh
+    rate/rotation/role changes), and Power (AC/battery source changes).
+- **Eight hardware/system monitors** (loadable plugins):
   | Monitor | Reports |
   |---------|---------|
   | **Volume** | mount / unmount (with a Finder "click to open"), ignore-list picker |
@@ -43,8 +48,9 @@ Apple Silicon**, starting from the upstream linked above.
   | **Thunderbolt** | device connect / disconnect |
   | **Network** | Wi-Fi connect/disconnect (SSID + BSSID via CoreWLAN, signal-strength icon, reported at launch too), Ethernet/interface link up/down + media speed/duplex, IPv4/IPv6 + CIDR + gateway |
   | **Bluetooth** | device connect / disconnect |
-  | **Power** | AC/battery transitions, a battery-level icon ramp (0–100), a charging-level ramp, time remaining / time-to-charge, periodic status refire, low-battery warning (announces "fully charged" once, no repeats) |
-  | **Thermal** | system thermal state changes (Nominal/Fair/Serious/Critical throttling), per-level notification toggles. A separate module from **Power** by design (battery state and thermal/throttling state are shown independently), but reads from the same system power/process-info APIs (`NSProcessInfo`) as Power Monitor — noted here for traceability. |
+  | **Power** | AC/battery transitions (with a colored "old → new" source line), a battery-level icon ramp (0–100), a charging-level ramp, time remaining / time-to-charge, periodic status refire, low-battery warning (announces "fully charged" once, no repeats), a separate Battery Health Check (cycle count / battery health %) with its own configurable interval, an optional more-frequent "Notify every" reminder (in hours or minutes) between full checks, and a "Check Now" button to preview it on demand |
+  | **Thermal** | system thermal state changes (Nominal/Fair/Serious/Critical throttling) with a colored "old → new" transition line and an explicit "Cooling down"/"Warming up" direction tag, per-level notification toggles, and a "Simulate Test Notification" control (Preferences) to preview any state combination on demand — useful since many Macs rarely or never reach Serious/Critical under normal/moderate load. A separate module from **Power** by design (battery state and thermal/throttling state are shown independently), but reads from the same system power/process-info APIs (`NSProcessInfo`) as Power Monitor — noted here for traceability. |
+  | **Display** | external display connect/disconnect (name, resolution, refresh rate, rotation, role), plus changes to an *already-connected* display's resolution, refresh rate, rotation, or role (Main/Extended/Mirrored) — each shown with a colored "old → new" line and independently toggleable. An optional, off-by-default experimental early physical-link detection is also available (see below). |
 - **Duplicate suppression** and **"unstable device"** detection (flags a device that
   rapidly connects/disconnects).
 - **Modern macOS integration**: "Start at Login" via `SMAppService`, a custom-drawn
@@ -130,6 +136,16 @@ open /Applications/HG4MAC.app
   arrangement (Extended or Mirror) — not at the instant the cable/HDMI link is raised**, by
   design (see "Experimental: early physical-link detection" below for the optional,
   off-by-default alternative and why it isn't the default path).
+
+- **Switching between "Entire Screen" / "Window or App" / "Extended Display" on an
+  already-connected external display does not fire a new notification. This is expected,
+  not a bug.** Verified empirically (2026-07-19): `system_profiler SPDisplaysDataType`
+  shows the external display disappear from the online list while "Entire Screen" or
+  "Window or App" mirroring is active, then reappear once "Extended Display" is chosen —
+  yet `CGGetOnlineDisplayList` (what Display Monitor reads) does not report a
+  disconnect/reconnect across that transition, because the physical link never actually
+  drops; only the render target changes. A real "Stop Mirroring" followed by picking a mode
+  again does produce a genuine connect event and notifies normally.
 
 ### Experimental: early physical-link detection (Display Monitor, off by default)
 

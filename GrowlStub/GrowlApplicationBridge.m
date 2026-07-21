@@ -103,6 +103,41 @@ static void repositionBanners(NSRect sf, BOOL animated) {
     }
 }
 
+// ── Highlights the changed value in "before → after" description lines ──────
+// Several plugins (Display Monitor's DisplayModeChanged/DisplayRoleChanged, etc.)
+// build multi-line descriptions where one or more lines read "Label:\told → new".
+// Coloring just the "new" part in an accent color lets the reader's eye land on
+// what actually changed instead of re-reading the whole line. Lines without "→"
+// (most notifications — plain "Connected"/"Disconnected" style text) are left
+// exactly as before, just carrying the base font/color.
+static NSAttributedString *HWGAttributedBodyHighlightingChangedValues(NSString *body, NSFont *font, NSColor *baseColor, BOOL dark) {
+    NSDictionary *baseAttrs = @{NSFontAttributeName: font, NSForegroundColorAttributeName: baseColor};
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
+
+    NSColor *highlightColor = dark ? [NSColor systemTealColor] : [NSColor systemBlueColor];
+    NSDictionary *highlightAttrs = @{NSFontAttributeName: [NSFont boldSystemFontOfSize:font.pointSize],
+                                      NSForegroundColorAttributeName: highlightColor};
+
+    NSArray<NSString *> *lines = [body componentsSeparatedByString:@"\n"];
+    for (NSUInteger i = 0; i < [lines count]; i++) {
+        NSString *line = lines[i];
+        NSRange arrowRange = [line rangeOfString:@" → "];
+        if (arrowRange.location == NSNotFound) {
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:baseAttrs]];
+        } else {
+            NSUInteger newValueStart = arrowRange.location + arrowRange.length;
+            NSString *beforeArrow = [line substringToIndex:newValueStart];   // includes " → "
+            NSString *newValue = [line substringFromIndex:newValueStart];
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:beforeArrow attributes:baseAttrs]];
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:newValue attributes:highlightAttrs]];
+        }
+        if (i + 1 < [lines count]) {
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:baseAttrs]];
+        }
+    }
+    return result;
+}
+
 // ── Floating banner styled like a native macOS notification ──────────────────
 // Slides in from the right, slides out on auto-dismiss OR when user clicks "×".
 // clickContext (if non-nil) is sent to the Growl delegate when the banner body
@@ -119,6 +154,19 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
         NSRect sf = screen.visibleFrame;
 
         if (!_activeBanners) _activeBanners = [[NSMutableArray alloc] init];
+
+        // Appearance-adaptive colors — computed early (moved up from its original spot
+        // below) because the body's attributed-string highlight needs `dark` to pick an
+        // accent color before the body height can even be measured.
+        NSAppearance *appearance = [NSApp effectiveAppearance];
+        NSAppearanceName best = [appearance bestMatchFromAppearancesWithNames:
+            @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+        BOOL dark = [best isEqualToString:NSAppearanceNameDarkAqua];
+
+        NSColor *titleColor = dark ? [NSColor whiteColor]
+                                   : [NSColor colorWithWhite:0.08 alpha:1.0];
+        NSColor *bodyColor  = dark ? [NSColor colorWithWhite:0.72 alpha:1.0]
+                                   : [NSColor colorWithWhite:0.35 alpha:1.0];
 
         // ── Measure title + body heights so the card grows to fit the content ──
         const CGFloat bodyX = 54, bodyRightPad = 8;
@@ -137,9 +185,12 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
 
         NSFont *bodyFont = [NSFont systemFontOfSize:11];
         NSString *bodyStr = body ?: @"";
-        NSRect bodyBR = [bodyStr boundingRectWithSize:NSMakeSize(bodyW, 10000)
-                                              options:NSStringDrawingUsesLineFragmentOrigin
-                                           attributes:@{NSFontAttributeName: bodyFont}];
+        // Per-line, highlights the part after "→" (the NEW value in a "before → after"
+        // change line, e.g. "Role:\tExtended → Mirrored") in an accent color, so the reader's
+        // eye lands on what actually changed instead of re-reading the whole line.
+        NSAttributedString *attrBody = HWGAttributedBodyHighlightingChangedValues(bodyStr, bodyFont, bodyColor, dark);
+        NSRect bodyBR = [attrBody boundingRectWithSize:NSMakeSize(bodyW, 10000)
+                                              options:NSStringDrawingUsesLineFragmentOrigin];
         CGFloat bodyH = ceil(bodyBR.size.height);
         if (bodyH < 22) bodyH = 22;   // minimum keeps short notifications looking normal
 
@@ -150,17 +201,6 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
         // New banner starts off-screen to the right at the top slot's Y.
         NSRect startFrame = NSMakeRect(NSMaxX(sf) + 4,
                                        NSMaxY(sf) - M - CARD_H, W, H);
-
-        // Appearance-adaptive colors
-        NSAppearance *appearance = [NSApp effectiveAppearance];
-        NSAppearanceName best = [appearance bestMatchFromAppearancesWithNames:
-            @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
-        BOOL dark = [best isEqualToString:NSAppearanceNameDarkAqua];
-
-        NSColor *titleColor = dark ? [NSColor whiteColor]
-                                   : [NSColor colorWithWhite:0.08 alpha:1.0];
-        NSColor *bodyColor  = dark ? [NSColor colorWithWhite:0.72 alpha:1.0]
-                                   : [NSColor colorWithWhite:0.35 alpha:1.0];
 
         NSPanel *panel = [[NSPanel alloc]
             initWithContentRect:startFrame
@@ -227,9 +267,7 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
         // Body — grows downward; height measured above, no line cap
         NSTextField *bodyLabel         = [[NSTextField alloc]
             initWithFrame:NSMakeRect(bodyX, 10, bodyW, bodyH)];
-        bodyLabel.stringValue          = bodyStr;
-        bodyLabel.font                 = bodyFont;
-        bodyLabel.textColor            = bodyColor;
+        bodyLabel.attributedStringValue = attrBody;   // font/color are embedded in attrBody
         bodyLabel.drawsBackground      = NO;
         bodyLabel.bordered             = NO;
         bodyLabel.editable             = NO;
