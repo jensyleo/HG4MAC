@@ -18,6 +18,12 @@
 #define HWG_TB_SHOW_VIDPID_KEY @"HWGThunderboltShowVIDPID"
 #define HWG_TB_SHOW_TYPE_KEY   @"HWGThunderboltShowType"
 
+// F34 candidate #2: eGPU-specific notification, separate from the generic
+// ThunderboltConnected/Disconnected pair above. OFF by default per user request — this is a
+// NEW behavior (an extra notification on top of the existing generic one), not a visibility
+// toggle on an already-firing notice.
+#define HWG_TB_NOTIFY_EGPU_KEY @"HWGThunderboltNotifyEGPU"
+
 static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -190,6 +196,49 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
+// F34 #2: reads the PCI base-class code the same way -tbExtraInfoForDevice: does, to
+// decide if a device is an eGPU candidate — kept separate from that method since this
+// check must run regardless of the "Type" F33 checkbox (HWG_TB_SHOW_TYPE_KEY), which only
+// controls whether the class name is INCLUDED in the generic notification's text.
+-(BOOL)isDisplayControllerDevice:(io_object_t)device {
+	CFTypeRef classRef = IORegistryEntryCreateCFProperty(device, CFSTR("class-code"), kCFAllocatorDefault, 0);
+	if (!classRef) return NO;
+	uint32_t classCode = 0;
+	BOOL got = NO;
+	if (CFGetTypeID(classRef) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)classRef) >= 3) {
+		const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)classRef);
+		classCode = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
+		got = YES;
+	} else if (CFGetTypeID(classRef) == CFNumberGetTypeID()) {
+		CFNumberGetValue((CFNumberRef)classRef, kCFNumberSInt32Type, (int32_t *)&classCode);
+		got = YES;
+	}
+	CFRelease(classRef);
+	if (!got) return NO;
+	uint8_t baseClass = (classCode >> 16) & 0xFF;
+	return baseClass == 0x03;   // PCI-SIG "Display Controller"
+}
+
+// F34 #2: eGPU-specific notification — a Display Controller PCI function hot-plugged after
+// launch is, in practice, an external GPU attached via Thunderbolt (internal GPUs on Apple
+// Silicon don't enumerate as a post-launch IOPCIDevice add/remove). OFF by default.
+-(void)tbNotifyEGPUIfNeeded:(io_object_t)device deviceName:(NSString *)deviceName added:(BOOL)added {
+	if (!HWGTBBoolForKey(HWG_TB_NOTIFY_EGPU_KEY, NO)) return;
+	if (![self isDisplayControllerDevice:device]) return;
+
+	NSString *title = added ? NSLocalizedString(@"eGPU Connected", @"") : NSLocalizedString(@"eGPU Disconnected", @"");
+	NSString *imageName = added ? @"Thunderbolt-On" : @"Thunderbolt-Off";
+	NSData *iconData = [[NSImage imageNamed:imageName] TIFFRepresentation];
+
+	[delegate notifyWithName:added ? @"ThunderboltEGPUConnected" : @"ThunderboltEGPUDisconnected"
+							 title:title
+					 description:deviceName ?: @""
+							  icon:iconData
+			  identifierString:[NSString stringWithFormat:@"eGPU-%@", deviceName]
+				  contextString:nil
+							plugin:self];
+}
+
 -(void)tbDeviceAdded:(io_iterator_t)iterator {
 	io_object_t	thisObject;
 	while ((thisObject = IOIteratorNext(iterator))) {
@@ -198,7 +247,10 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 		// internal devices, so we deliberately ignore the launch enumeration.
 		if (notificationsArePrimed) {
 			NSString *deviceName = [self nameForThunderboltObject:thisObject];
-			if (deviceName) [self tbDeviceName:deviceName added:YES extraInfo:[self tbExtraInfoForDevice:thisObject]];
+			if (deviceName) {
+				[self tbDeviceName:deviceName added:YES extraInfo:[self tbExtraInfoForDevice:thisObject]];
+				[self tbNotifyEGPUIfNeeded:thisObject deviceName:deviceName added:YES];
+			}
 		}
 		IOObjectRelease(thisObject);
 	}
@@ -215,8 +267,13 @@ static void tbDeviceAdded(void *refCon, io_iterator_t iterator) {
 		if (notificationsArePrimed) {
 			NSString *deviceName = [self nameForThunderboltObject:thisObject];
 			// No extraInfo on removal: registry properties are frequently unreadable
-			// from a terminating entry by the time this callback fires.
-			if (deviceName) [self tbDeviceName:deviceName added:NO extraInfo:nil];
+			// from a terminating entry by the time this callback fires. Same limitation
+			// applies to the eGPU class-code check below — it will often silently miss
+			// eGPU DISCONNECT (but not connect), documented in README.
+			if (deviceName) {
+				[self tbDeviceName:deviceName added:NO extraInfo:nil];
+				[self tbNotifyEGPUIfNeeded:thisObject deviceName:deviceName added:NO];
+			}
 		}
 		IOObjectRelease(thisObject);
 	}
@@ -311,7 +368,7 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 140)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 174)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -321,6 +378,8 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	NSArray<NSButton*> *rows = @[
 		[self checkboxWithKey:HWG_TB_SHOW_VIDPID_KEY title:NSLocalizedString(@"Vendor/device ID (VID:PID)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_TB_SHOW_TYPE_KEY    title:NSLocalizedString(@"Device type (Storage, Display, Bridge/Dock…)", @"") defaultOn:YES],
+		// F34 #2: OFF by default — new behavior, extra notification on top of the generic one.
+		[self checkboxWithKey:HWG_TB_NOTIFY_EGPU_KEY  title:NSLocalizedString(@"Notify separately when an eGPU is connected", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

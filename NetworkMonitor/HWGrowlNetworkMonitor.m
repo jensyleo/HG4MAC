@@ -60,6 +60,13 @@
 #define HWG_IP_SHOW_NONROUTABLE_KEY  @"HWGIPShowNonRoutableTag"
 #define HWG_IP_USE_FRIENDLY_KEY      @"HWGIPUseFriendlyNames"
 
+// F34 #4: VPN connected/disconnected. OFF by default per user request — this is a NEW
+// notification, not a visibility toggle on an existing one. Detection is a HEURISTIC (see
+// -vpnLikeInterfaceNamesFromIPInfo:ipv6: below and the README "Known limitations" entry) —
+// there is no public API that says "this interface IS a VPN"; we infer it from the BSD
+// interface-name prefix macOS gives virtual tunnel interfaces.
+#define HWG_VPN_NOTIFY_KEY @"HWGNetworkNotifyVPN"
+
 // A plain NSView is NOT flipped by default, so inside an NSScrollView whose clip area
 // ends up TALLER than the document (e.g. after the Preferences-window resize fix let the
 // box grow), the document sits at the BOTTOM of the visible area — leaving an empty gap
@@ -159,6 +166,10 @@ typedef enum {
 // CoreLocation: required since macOS 10.14 to read the Wi-Fi SSID
 @property (nonatomic, strong) CLLocationManager *locationManager;
 
+// F34 #4: BSD names of VPN-like interfaces (utunN/pppN/ipsecN with a real address) currently
+// believed active, so we notify only on the connect/disconnect TRANSITION.
+@property (nonatomic, strong) NSMutableSet<NSString*> *activeVPNInterfaceNames;
+
 @end
 
 @implementation HWGrowlNetworkMonitor
@@ -186,6 +197,7 @@ typedef enum {
 		self.networkInterfaceStates = [NSMutableDictionary dictionary];
 		self.interfaceIsEthernet = [NSMutableDictionary dictionary];
 		self.lastReportedWifiBars = -1;
+		self.activeVPNInterfaceNames = [NSMutableSet set];
 
 		[self startObserving];
 		[self startWiFiMonitoring];
@@ -1037,10 +1049,72 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	return map;
 }
 
+// F34 #4: BSD interface-name prefixes macOS uses for VPN/tunnel interfaces — "utun" covers
+// IKEv2/IPSec, WireGuard, and most modern VPN clients (incl. the built-in VPN pane and
+// third-party apps like Tunnelblick/NordVPN/etc.); "ppp" covers legacy PPTP/L2TP. This is a
+// HEURISTIC, not a definitive check: macOS also uses utun for some non-VPN system services
+// (e.g. Content Filter / Network Extension–based features), so a false positive is possible
+// in principle — documented in README. A utun/ppp interface with NO address assigned yet
+// (or one that lost its address) is not counted as "connected".
+-(NSArray<NSString*> *)vpnLikeInterfaceNamesFromIPInfo:(NSArray *)ipv4Info ipv6:(NSArray *)ipv6Info {
+	NSMutableSet<NSString*> *names = [NSMutableSet set];
+	for (NSDictionary *info in ipv4Info) {
+		NSString *ifname = info[@"if"];
+		if ([ifname hasPrefix:@"utun"] || [ifname hasPrefix:@"ppp"] || [ifname hasPrefix:@"ipsec"]) {
+			[names addObject:ifname];
+		}
+	}
+	for (NSDictionary *info in ipv6Info) {
+		NSString *ifname = info[@"if"];
+		if ([ifname hasPrefix:@"utun"] || [ifname hasPrefix:@"ppp"] || [ifname hasPrefix:@"ipsec"]) {
+			[names addObject:ifname];
+		}
+	}
+	return [names allObjects];
+}
+
+// F34 #4: compares the current set of VPN-like interfaces against activeVPNInterfaceNames
+// and fires a connect/disconnect notice for each TRANSITION. OFF by default.
+-(void)checkVPNTransitionsWithIPv4Info:(NSArray *)ipv4Info ipv6Info:(NSArray *)ipv6Info {
+	if (![self boolForKey:HWG_VPN_NOTIFY_KEY default:NO]) return;
+
+	NSSet<NSString*> *currentNames = [NSSet setWithArray:[self vpnLikeInterfaceNamesFromIPInfo:ipv4Info ipv6:ipv6Info]];
+
+	NSMutableSet<NSString*> *newlyConnected = [currentNames mutableCopy];
+	[newlyConnected minusSet:self.activeVPNInterfaceNames];
+	NSMutableSet<NSString*> *newlyDisconnected = [self.activeVPNInterfaceNames mutableCopy];
+	[newlyDisconnected minusSet:currentNames];
+
+	NSData *onIcon  = [[NSImage imageNamed:@"Network-Generic-On"] TIFFRepresentation];
+	NSData *offIcon = [[NSImage imageNamed:@"Network-Generic-Off"] TIFFRepresentation];
+
+	for (NSString *ifname in newlyConnected) {
+		[delegate notifyWithName:@"VPNConnected"
+								 title:NSLocalizedString(@"VPN Connected", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", @""), ifname]
+								  icon:onIcon
+				  identifierString:[NSString stringWithFormat:@"HWGrowlVPN-%@", ifname]
+					  contextString:nil
+								plugin:self];
+	}
+	for (NSString *ifname in newlyDisconnected) {
+		[delegate notifyWithName:@"VPNDisconnected"
+								 title:NSLocalizedString(@"VPN Disconnected", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", @""), ifname]
+								  icon:offIcon
+				  identifierString:[NSString stringWithFormat:@"HWGrowlVPN-%@", ifname]
+					  contextString:nil
+								plugin:self];
+	}
+
+	self.activeVPNInterfaceNames = [currentNames mutableCopy];
+}
+
 -(void)updateIP {
 	NSDictionary *friendly     = [self bsdToFriendlyNameMap];
 	NSArray  *ipv4Info         = [self collectIPv4InfoFromKernel];
 	NSArray  *ipv6Info         = [self collectIPv6InfoFromKernel];
+	[self checkVPNTransitionsWithIPv4Info:ipv4Info ipv6Info:ipv6Info];
 	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
 	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
 
@@ -1372,7 +1446,38 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	ipItem.view = [self scrollWrapping:ipTab height:230];
 	[tabs addTabViewItem:ipItem];
 
-	// --- Tab: Other (catch-all reserved for future fields that don't fit Wi-Fi/Ethernet/IP) ---
+	// --- Tab: VPN (F34 #4 — split out of "Other" 22-jul-2026, own dedicated tab) ---
+	NSView *vpnTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
+	NSTextField *vpnHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"VPN detection (F34)", @"")];
+	[vpnTab addSubview:vpnHeader];
+	[NSLayoutConstraint activateConstraints:@[
+		[vpnHeader.topAnchor     constraintEqualToAnchor:vpnTab.topAnchor constant:16],
+		[vpnHeader.leadingAnchor  constraintEqualToAnchor:vpnTab.leadingAnchor constant:16],
+	]];
+	// F34 #4: OFF by default — new notification, and detection is a heuristic (utun/ppp/ipsec
+	// interface name prefix), not a guaranteed "this is definitely a VPN" signal.
+	NSButton *vpnRow = [self checkboxWithKey:HWG_VPN_NOTIFY_KEY title:NSLocalizedString(@"Notify when a VPN connects/disconnects", @"") defaultOn:NO];
+	[self layoutRows:@[vpnRow] inView:vpnTab belowView:vpnHeader gap:10];
+
+	NSTextField *vpnCaption = [NSTextField wrappingLabelWithString:
+		NSLocalizedString(@"Detected via utun/ppp/ipsec virtual interfaces (used by most VPN clients, incl. macOS's built-in VPN and third-party apps). This is a heuristic — some non-VPN system features can also use a utun interface. See README for details.", @"")];
+	vpnCaption.textColor = [NSColor secondaryLabelColor];
+	vpnCaption.font = [NSFont systemFontOfSize:11];
+	vpnCaption.translatesAutoresizingMaskIntoConstraints = NO;
+	vpnCaption.preferredMaxLayoutWidth = 360;
+	[vpnTab addSubview:vpnCaption];
+	[NSLayoutConstraint activateConstraints:@[
+		[vpnCaption.topAnchor     constraintEqualToAnchor:vpnRow.bottomAnchor constant:6],
+		[vpnCaption.leadingAnchor  constraintEqualToAnchor:vpnTab.leadingAnchor constant:16],
+		[vpnCaption.trailingAnchor constraintLessThanOrEqualToAnchor:vpnTab.trailingAnchor constant:-16],
+	]];
+
+	NSTabViewItem *vpnItem = [[NSTabViewItem alloc] initWithIdentifier:@"vpn"];
+	vpnItem.label = NSLocalizedString(@"VPN", @"");
+	vpnItem.view = [self scrollWrapping:vpnTab height:120];
+	[tabs addTabViewItem:vpnItem];
+
+	// --- Tab: Other (catch-all reserved for FUTURE fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
 	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
 	NSTextField *otherPlaceholder = [NSTextField labelWithString:
 		NSLocalizedString(@"No additional fields yet.", @"")];
@@ -1397,7 +1502,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -1405,7 +1510,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Network Link Down", @""), @"NetworkLinkDown",
 			  NSLocalizedString(@"AirPort Connected", @""), @"AirportConnected",
 			  NSLocalizedString(@"AirPort Disconnected", @""), @"AirportDisconnected",
-			  NSLocalizedString(@"Wi-Fi Signal Changed", @""), @"AirportSignalChange", nil];
+			  NSLocalizedString(@"Wi-Fi Signal Changed", @""), @"AirportSignalChange",
+			  NSLocalizedString(@"VPN Connected", @""), @"VPNConnected",
+			  NSLocalizedString(@"VPN Disconnected", @""), @"VPNDisconnected", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -1413,7 +1520,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when an Ethernet link goes down", @""), @"NetworkLinkDown",
 			  NSLocalizedString(@"Sent when AirPort connects to a network", @""), @"AirportConnected",
 			  NSLocalizedString(@"Sent when AirPort disconnects from a network", @""), @"AirportDisconnected",
-			  NSLocalizedString(@"Sent when the Wi-Fi signal strength level changes", @""), @"AirportSignalChange", nil];
+			  NSLocalizedString(@"Sent when the Wi-Fi signal strength level changes", @""), @"AirportSignalChange",
+			  NSLocalizedString(@"Sent when a VPN tunnel interface connects (F34, heuristic detection)", @""), @"VPNConnected",
+			  NSLocalizedString(@"Sent when a VPN tunnel interface disconnects (F34, heuristic detection)", @""), @"VPNDisconnected", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

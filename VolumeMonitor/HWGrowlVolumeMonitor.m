@@ -33,9 +33,78 @@
 #define HWG_VOLUME_SHOW_FSTYPE_KEY  @"HWGVolumeShowFileSystemType"
 #define HWG_VOLUME_SHOW_SIZE_KEY    @"HWGVolumeShowVolumeSize"
 
+// F34 #3: differentiate an integrated SD/CF card reader from a generic USB volume, via
+// Disk Arbitration's kDADiskDescriptionDeviceProtocolKey (e.g. "Secure Digital", "USB",
+// "PCI-Express"). OFF by default per user request (22-jul-2026) — unlike the other F33
+// fields, this one is a heuristic guess that can be flatly wrong for some readers (see the
+// "Known limitations" README entry), so it doesn't get the same on-by-default trust.
+#define HWG_VOLUME_SHOW_INTERFACE_KEY @"HWGVolumeShowInterfaceType"
+
 static BOOL HWGVolumeBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
+}
+
+// F30/F29 (23-jul-2026): best-effort device-type classifier for the 3 icon categories
+// (SDCard/USBDrive/ExternalDisk) added this session. CONFIRMED LIMITATION (see
+// -interfaceDescriptionForMountedPath: below): there is no public API that reliably says
+// "this is specifically a pendrive" vs "this is specifically an external disk enclosure" —
+// both show up as plain USB Mass Storage with no distinguishing field on many real devices.
+// This is a HEURISTIC that can and will guess wrong for some hardware; when no reasonably
+// confident signal exists at all, it returns nil and the caller falls back to the existing
+// generic icon — a wrong specific icon is worse than an honest generic one, so this never
+// forces a guess between USBDrive/ExternalDisk without at least a size or name/model signal.
+// True automatic-detection accuracy is bounded by what device firmware chooses to report;
+// the only fully reliable path remains the separately-tracked manual per-device override
+// ("Identificación/parametrización de dispositivos DESCONOCIDOS" in TODO.md).
+#define HWG_EXTERNAL_DISK_SIZE_THRESHOLD_BYTES (400ULL * 1024 * 1024 * 1024)   // 400 GB
+
+static NSString *HWGDeviceCategoryFromInfo(NSString *protocol, NSString *mediaName, NSString *deviceModel, unsigned long long mediaSizeBytes, BOOL (^looksLikeCardReader)(NSString *)) {
+	if ([protocol caseInsensitiveCompare:@"Secure Digital"] == NSOrderedSame) return @"SDCard";
+	if (looksLikeCardReader(mediaName) || looksLikeCardReader(deviceModel)) return @"SDCard";
+
+	NSString *combined = [[NSString stringWithFormat:@"%@ %@", mediaName ?: @"", deviceModel ?: @""] lowercaseString];
+	static NSArray<NSString*> *diskTokens = nil;
+	static NSArray<NSString*> *driveTokens = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		diskTokens  = @[@"hdd", @"ssd", @"hard disk", @"hard drive", @"external"];
+		driveTokens = @[@"flash", @"thumb", @"pen drive", @"usb drive", @"mass storage"];
+	});
+	for (NSString *token in diskTokens)  { if ([combined rangeOfString:token].location != NSNotFound) return @"ExternalDisk"; }
+	if (mediaSizeBytes >= HWG_EXTERNAL_DISK_SIZE_THRESHOLD_BYTES) return @"ExternalDisk";
+	for (NSString *token in driveTokens) { if ([combined rangeOfString:token].location != NSNotFound) return @"USBDrive"; }
+
+	// REVERTED (23-jul-2026): a fallback was added here ("plain USB storage under the
+	// ExternalDisk threshold that isn't a card reader is essentially always a pendrive")
+	// after a live test with a Kingston "DT 100 G2" pendrive that had no identifying
+	// token. It seemed safe, but broke immediately on the VERY NEXT live test: a real SD
+	// card in a USB adapter/reader that reports itself as media name "STORAGE DEVICE",
+	// protocol "USB", 63.9GB — no "Secure Digital"/card-reader token anywhere (the exact,
+	// already-documented SD/CF reader limitation) — got wrongly guessed as "USBDrive"
+	// instead of falling back to the honest generic icon. Protocol=="USB" alone cannot
+	// distinguish a pendrive from an unidentifiable SD/CF reader; forcing a guess here
+	// makes the SD-reader case wrong to "fix" the pendrive case, a straight regression of
+	// this function's own stated design rule (see doc comment above `HWGDeviceCategoryFromInfo`:
+	// "a wrong specific icon is worse than an honest generic one"). Genuinely
+	// unidentifiable USB Mass Storage (no card-reader token, no disk/drive token, under
+	// the ExternalDisk size threshold) now correctly falls through to nil/generic again —
+	// this is a known, permanent limitation (see README "Known limitations"), not a bug to
+	// keep patching with ever-more-specific guesses.
+
+	return nil;   // no confident signal — caller falls back to the generic icon
+}
+
+// Returns "Device-<Category>" (or "Device-<Category>-<variant>" when variant is non-nil,
+// e.g. "Critical" or "Unmounted") if that asset exists in the catalog, else nil so the
+// caller can fall back to its own existing default.
+static NSString *HWGDeviceIconNameForCategoryVariant(NSString *category, NSString *variant) {
+	if (![category length]) return nil;
+	NSString *name = [variant length] ? [NSString stringWithFormat:@"Device-%@-%@", category, variant] : [NSString stringWithFormat:@"Device-%@", category];
+	return [NSImage imageNamed:name] ? name : nil;
+}
+static NSString *HWGDeviceIconNameForCategory(NSString *category, BOOL critical) {
+	return HWGDeviceIconNameForCategoryVariant(category, critical ? @"Critical" : nil);
 }
 
 // Plain statfs() syscall — same mechanism already used by noteReadableSiblingForMountedPath:
@@ -54,6 +123,7 @@ static BOOL HWGCopyVolumeFileSystemInfo(NSString *path, NSString **outFSType, un
 @synthesize iconData;
 @synthesize path;
 @synthesize name;
+@synthesize deviceCategory;
 
 + (NSImage*)ejectIconImage {
 	static NSImage *_ejectIconImage = nil;
@@ -180,6 +250,24 @@ static BOOL HWGCopyVolumeFileSystemInfo(NSString *path, NSString **outFSType, un
 // Group keys with a pending settle timer already scheduled, so a second unreadable partition
 // arriving during the window doesn't schedule a duplicate timer.
 @property (nonatomic, strong) NSMutableSet<NSString*> *groupSettleScheduled;
+// F30/F29 (23-jul-2026): best-effort device-type guess (@"SDCard"/@"USBDrive"/@"ExternalDisk",
+// or absent = unknown) per physical-card group, captured at APPEARED time (see
+// HWGDeviceCategoryFromInfo) so -finalizeUnreadableForGroup: can pick a device-specific
+// "-Critical" icon even though by then there's no mounted path left to re-query.
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *groupDeviceCategory;
+// Human-readable name for a group (see -wholeDiskDisplayNameForDisk:), used ONLY for
+// notification text — groupKey itself is now the whole disk's BSD name, not this.
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *groupDisplayName;
+
+// BUG FIX (23-jul-2026, found live): the device category used to be captured only in
+// -volumeWillUnmount:, right before the eject — but that notification only fires for a
+// GRACEFUL software-initiated unmount. A "surprise removal" (physically yanking the device
+// with no prior Finder eject) skips straight to -volumeDidUnmount: with no chance to still
+// query the (already-gone) path, so the "Unmounted" notice silently fell back to the plain
+// generic icon in that case. Cache the category once at MOUNT time instead (when the query
+// is always reliable) — this works for both graceful and surprise removal, since there's no
+// re-query needed at unmount time at all.
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *pathDeviceCategory;
 
 // strong (not assign): these come from the prefs nib. NSArrayController is a
 // top-level nib object — under ARC it needs a strong outlet to survive past
@@ -226,6 +314,9 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		self.groupUnreadablePartitions = [NSMutableDictionary dictionary];
 		self.groupsWithReadableSibling = [NSMutableSet set];
 		self.groupSettleScheduled = [NSMutableSet set];
+		self.groupDeviceCategory = [NSMutableDictionary dictionary];
+		self.groupDisplayName = [NSMutableDictionary dictionary];
+		self.pathDeviceCategory = [NSMutableDictionary dictionary];
 
 		NSNotificationCenter *center = [[NSWorkspace sharedWorkspace] notificationCenter];
 
@@ -263,28 +354,47 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	}
 }
 
-// Returns a stable label for the PHYSICAL disk that `disk` (whole disk, or one of its
-// partitions/slices) belongs to: the whole disk's OWN media name (falling back to its BSD
-// name). Every partition of the same physical card resolves to the SAME group key via
-// DADiskCopyWholeDisk, regardless of each partition's own label (e.g. a card with
-// "android_meta" and "android_expand" partitions both group under the card's own generic
-// media name) — this is what lets multiple unreadable partitions on one card collapse into
-// a single notice instead of one per partition.
+// Returns a stable, UNIQUE label for the PHYSICAL disk that `disk` (whole disk, or one of
+// its partitions/slices) belongs to: the whole disk's own BSD name (e.g. "disk4"). Every
+// partition of the same physical card resolves to the SAME group key via DADiskCopyWholeDisk,
+// regardless of each partition's own label (e.g. a card with "android_meta" and
+// "android_expand" partitions both group under the card's own BSD name) — this is what lets
+// multiple unreadable partitions on one card collapse into a single notice instead of one
+// per partition.
+//
+// BUG FIX (23-jul-2026, found live with a pendrive + an external HDD connected at once): this
+// used to return the whole disk's MEDIA NAME instead of its BSD name. Many external
+// enclosures and pendrives report a generic media name for the whole-disk object (e.g.
+// "Generic") — TWO DIFFERENT physical drives sharing that same generic name collided under
+// the same dictionary key, mixing up their tracked state: one device's false "not readable"
+// timer could fire and get reported using the OTHER device's identity, and one device's
+// "already reported"/"has a readable sibling" bookkeeping could suppress or misdirect the
+// other's real notification. A BSD name is guaranteed unique per physical device within a
+// session, so it can never collide this way — the (possibly non-unique) media name is now
+// tracked separately, purely for what the notification TEXT displays.
 - (NSString *)wholeDiskGroupKeyForDisk:(DADiskRef)disk {
 	DADiskRef whole = DADiskCopyWholeDisk(disk);
 	if (!whole) return nil;
-	NSString *key = nil;
+	const char *bsd = DADiskGetBSDName(whole);
+	NSString *key = bsd ? [NSString stringWithUTF8String:bsd] : nil;
+	CFRelease(whole);
+	return key;
+}
+
+// Human-readable name for a group, for notification text only — never used as a dictionary
+// key (see -wholeDiskGroupKeyForDisk: above for why). Falls back to the group key itself
+// (the BSD name) if the whole disk never reported a media name.
+- (NSString *)wholeDiskDisplayNameForDisk:(DADiskRef)disk {
+	DADiskRef whole = DADiskCopyWholeDisk(disk);
+	if (!whole) return nil;
+	NSString *name = nil;
 	CFDictionaryRef descRef = DADiskCopyDescription(whole);
 	if (descRef) {
 		NSDictionary *desc = (__bridge_transfer NSDictionary *)descRef;
-		key = desc[(__bridge NSString *)kDADiskDescriptionMediaNameKey];
-	}
-	if (!key) {
-		const char *bsd = DADiskGetBSDName(whole);
-		if (bsd) key = [NSString stringWithUTF8String:bsd];
+		name = desc[(__bridge NSString *)kDADiskDescriptionMediaNameKey];
 	}
 	CFRelease(whole);
-	return key;
+	return name;
 }
 
 // Disk Arbitration: a disk (whole disk or a slice/partition of one) has appeared. This
@@ -305,8 +415,28 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	BOOL hasFilesystem = (desc[(__bridge NSString *)kDADiskDescriptionVolumeKindKey] != nil);
 	// Group by the PHYSICAL card, not the individual partition: a card with several
 	// unrecognized partitions (e.g. an Android card's "android_meta"/"android_expand") only
-	// gets ONE "Disk Not Readable" notice, not one per partition.
+	// gets ONE "Disk Not Readable" notice, not one per partition. groupKey is the whole
+	// disk's BSD name (unique) — see -wholeDiskGroupKeyForDisk:'s doc comment for why this
+	// is no longer the (possibly non-unique) media name.
 	NSString *groupKey = [self wholeDiskGroupKeyForDisk:disk] ?: partitionName;
+	NSString *displayName = [self wholeDiskDisplayNameForDisk:disk] ?: partitionName;
+	if (displayName) self.groupDisplayName[groupKey] = displayName;
+
+	// F30/F29: best-effort device-type guess for this group, captured now (while the
+	// description is reliable) so a later "Disk Not Readable" notice can pick a
+	// device-specific icon — see HWGDeviceCategoryFromInfo's doc comment for why this is a
+	// heuristic, not a guarantee. Only set/overwrite when we get an actual guess, so a
+	// stray unreliable read (e.g. from a partition-level appearance) doesn't erase an
+	// earlier, possibly-better whole-disk guess for the same group.
+	{
+		NSString *protocol = desc[(__bridge NSString *)kDADiskDescriptionDeviceProtocolKey];
+		NSString *mediaName = desc[(__bridge NSString *)kDADiskDescriptionMediaNameKey];
+		NSString *deviceModel = desc[(__bridge NSString *)kDADiskDescriptionDeviceModelKey];
+		NSNumber *mediaSize = desc[(__bridge NSString *)kDADiskDescriptionMediaSizeKey];
+		NSString *category = HWGDeviceCategoryFromInfo(protocol, mediaName, deviceModel,
+			[mediaSize unsignedLongLongValue], ^BOOL(NSString *s) { return [self stringContainsCardReaderToken:s]; });
+		if (category) self.groupDeviceCategory[groupKey] = category;
+	}
 
 	// Remember which physical-card group this BSD node belongs to, and that the card is
 	// still (at least partly) present — this is what lets handleDiskDisappeared: know when
@@ -334,17 +464,85 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	// filesystem moments later (handled above); a totally blank/unpartitioned card never
 	// gets a child slice at all, so give it a couple seconds before treating it as
 	// unreadable — long enough for Disk Arbitration to finish probing.
+	//
+	// BUG FIX (23-jul-2026, found live with a real external HDD): a large external HDD can
+	// take noticeably longer than a small pendrive to spin up / get auto-mounted by macOS,
+	// especially with several disks being enumerated at app launch at once. 1.5s wasn't
+	// always enough — confirmed via `diskutil info` that the reported-unreadable partition
+	// had a perfectly valid recognized filesystem (ExFAT) and mounted instantly by hand with
+	// `diskutil mount`, it just hadn't been auto-mounted yet when our timer fired. Bumped to
+	// 3.0s, and added a live re-check (below) that doesn't depend on a fixed delay at all.
 	if (hasFilesystem) return;
 	[self.pendingWholeDisks addObject:groupKey];
+	NSString *wholeBSDName = bsdName ? [NSString stringWithUTF8String:bsdName] : nil;
 	__weak HWGrowlVolumeMonitor *weakSelf = self;
-	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 		HWGrowlVolumeMonitor *strongSelf = weakSelf;
 		if (!strongSelf) return;
 		if ([strongSelf.pendingWholeDisks containsObject:groupKey]) {
 			[strongSelf.pendingWholeDisks removeObject:groupKey];
+			// Bug found live (23-jul-2026): at app LAUNCH, when a disk was already mounted
+			// before HG4MAC started, Disk Arbitration's bulk "existing disks" enumeration can
+			// deliver the whole-disk object noticeably before the already-mounted partition's
+			// own appeared callback (with its filesystem key populated) — the window above
+			// isn't always enough in that specific bulk-scan case, producing a false "Disk Not
+			// Readable" moments before the correct "Mounted" notice for the SAME device. Cross-
+			// check the actual mount table (getmntinfo) before declaring it unreadable: if any
+			// currently-mounted filesystem's device node belongs to this whole disk, it's
+			// readable — just slow to report through the DA callback we were waiting on.
+			if (wholeBSDName && [strongSelf wholeDiskBSDNameHasMountedVolume:wholeBSDName]) return;
+			// Second bug fix (23-jul-2026, external HDD case): the partition can be
+			// perfectly readable and recognized by Disk Arbitration WITHOUT being mounted
+			// yet at all (auto-mount just hasn't caught up) — getmntinfo() alone can't see
+			// that. Re-query DA directly for every BSD node already seen for this group;
+			// if any of them reports a recognized filesystem kind, it's readable.
+			if (groupKey && [strongSelf groupHasRecognizedFilesystem:groupKey]) return;
 			[strongSelf scheduleUnreadableSettleForGroup:groupKey partitionName:partitionName];
 		}
 	});
+}
+
+// Returns YES if any currently mounted filesystem's device node (e.g. "/dev/disk4s1")
+// belongs to the given whole-disk BSD name (e.g. "disk4") — i.e. some partition of this
+// physical disk is, in fact, already mounted and readable, regardless of what Disk
+// Arbitration's own appeared-callback timing has told us so far.
+- (BOOL)wholeDiskBSDNameHasMountedVolume:(NSString *)wholeBSDName {
+	if (![wholeBSDName length]) return NO;
+	NSString *prefix = [NSString stringWithFormat:@"/dev/%@", wholeBSDName];
+	struct statfs *mounts = NULL;
+	int count = getmntinfo(&mounts, MNT_NOWAIT);
+	for (int i = 0; i < count; i++) {
+		NSString *fromName = [NSString stringWithUTF8String:mounts[i].f_mntfromname];
+		// Match "/dev/disk4" itself or any partition of it ("/dev/disk4s1", ...), but not a
+		// different disk that merely shares the prefix (e.g. "disk4" vs "disk40").
+		if ([fromName isEqualToString:prefix] || [fromName hasPrefix:[prefix stringByAppendingString:@"s"]]) {
+			return YES;
+		}
+	}
+	return NO;
+}
+
+// Returns YES if ANY BSD node already tracked for this group (see -handleDiskAppeared:'s
+// self.groupMembers bookkeeping) currently reports a recognized filesystem kind via Disk
+// Arbitration — even if that partition isn't mounted yet. Catches the case an external HDD
+// hits: DA already knows the partition is a valid, recognized filesystem (e.g. exFAT/NTFS)
+// well before macOS gets around to auto-mounting it, so waiting for a mount is unnecessary.
+- (BOOL)groupHasRecognizedFilesystem:(NSString *)groupKey {
+	if (!daSession || ![groupKey length]) return NO;
+	NSSet<NSString*> *members = self.groupMembers[groupKey];
+	for (NSString *bsd in members) {
+		DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, daSession, [bsd UTF8String]);
+		if (!disk) continue;
+		BOOL hasFS = NO;
+		CFDictionaryRef descRef = DADiskCopyDescription(disk);
+		if (descRef) {
+			NSDictionary *desc = (__bridge_transfer NSDictionary *)descRef;
+			hasFS = (desc[(__bridge NSString *)kDADiskDescriptionVolumeKindKey] != nil);
+		}
+		CFRelease(disk);
+		if (hasFS) return YES;
+	}
+	return NO;
 }
 
 // Disk Arbitration: a disk (whole or slice) has gone away. We deliberately do NOT re-read
@@ -376,6 +574,8 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	[self.groupUnreadablePartitions removeObjectForKey:groupKey];
 	[self.groupsWithReadableSibling removeObject:groupKey];
 	[self.groupSettleScheduled removeObject:groupKey];
+	[self.groupDeviceCategory removeObjectForKey:groupKey];
+	[self.groupDisplayName removeObjectForKey:groupKey];
 }
 
 // Records an unreadable partition for this physical card and, if a settle window isn't
@@ -428,14 +628,19 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			NSLocalizedString(@"Part of this device (%@) could not be read. It may be unformatted or use an unsupported file system.", @""),
 			partsJoined];
 	} else {
-		// Case 1: nothing on this device could be read at all — name the DEVICE (groupKey
-		// is the whole disk's own media name), not whichever partition happened first.
+		// Case 1: nothing on this device could be read at all — name the DEVICE by its
+		// display name (media name), not whichever partition happened first, and not
+		// groupKey itself (that's the BSD name now, not fit for user-facing text).
 		description = [NSString stringWithFormat:
 			NSLocalizedString(@"%@ could not be read. It may be unformatted or use an unsupported file system.", @""),
-			groupKey];
+			self.groupDisplayName[groupKey] ?: groupKey];
 	}
 
-	NSData *icon = [[NSImage imageNamed:@"Device-Critical"] TIFFRepresentation];
+	// F29: prefer a device-specific "-Critical" icon (SDCard/USBDrive/ExternalDisk) over the
+	// generic radioactive-symbol one, when the best-effort classifier had enough to go on.
+	NSString *category = self.groupDeviceCategory[groupKey];
+	NSString *iconName = HWGDeviceIconNameForCategory(category, YES) ?: @"Device-Critical";
+	NSData *icon = [[NSImage imageNamed:iconName] TIFFRepresentation];
 	[delegate notifyWithName:@"VolumeNotReadable"
 							 title:NSLocalizedString(@"Disk Not Readable", @"")
 					 description:description
@@ -461,6 +666,108 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	NSString *groupKey = self.bsdNameToGroupKey[bsd];
 	if (!groupKey) return;
 	[self.groupsWithReadableSibling addObject:groupKey];
+}
+
+// F34 #3: resolves the bus/reader interface for a mounted path via Disk Arbitration.
+//
+// CONFIRMED LIMITATION (22-jul-2026, live test with a real USB SD/CF card reader behind a
+// hub): the reader/hub exposed the card purely as a generic USB Mass Storage Class device —
+// kDADiskDescriptionDeviceProtocolKey="USB", kDADiskDescriptionMediaNameKey="Untitled 1",
+// kDADiskDescriptionDeviceModelKey="MassStorageClass" — with NO substring anywhere ("SD",
+// "Secure Digital", "MMC", "CompactFlash", etc.) that could identify it as a card reader.
+// This is a real hardware/driver limitation, not a code bug: the reader's own USB Mass
+// Storage firmware simply never reports card-specific identity to the OS, so Disk Arbitration
+// has nothing to expose — there is no public API workaround. This only works for a native
+// internal SD controller (protocol reports "Secure Digital" directly) or a USB adapter whose
+// specific chipset/firmware DOES surface an SD-related string in its model/media name — not
+// guaranteed for any given reader. Documented in README "Known limitations".
+- (NSString *)interfaceDescriptionForMountedPath:(NSString *)path {
+	if (!daSession || ![path length]) return nil;
+	struct statfs sfs;
+	if (statfs([path fileSystemRepresentation], &sfs) != 0) return nil;
+	NSString *devPath = [NSString stringWithUTF8String:sfs.f_mntfromname];   // e.g. "/dev/disk4s1"
+	NSString *bsd = [devPath lastPathComponent];
+	if (![bsd length]) return nil;
+
+	DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, daSession, [bsd UTF8String]);
+	if (!disk) return nil;
+	NSString *result = nil;
+	CFDictionaryRef descRef = DADiskCopyDescription(disk);
+	if (descRef) {
+		NSDictionary *desc = (__bridge_transfer NSDictionary *)descRef;
+		NSString *protocol = desc[(__bridge NSString *)kDADiskDescriptionDeviceProtocolKey];
+		NSString *mediaName = desc[(__bridge NSString *)kDADiskDescriptionMediaNameKey];
+		NSString *deviceModel = desc[(__bridge NSString *)kDADiskDescriptionDeviceModelKey];
+		BOOL isInternal = [desc[(__bridge NSString *)kDADiskDescriptionDeviceInternalKey] boolValue];
+
+		BOOL looksLikeCardReader =
+			[protocol caseInsensitiveCompare:@"Secure Digital"] == NSOrderedSame ||
+			[self stringContainsCardReaderToken:mediaName] ||
+			[self stringContainsCardReaderToken:deviceModel];
+
+		if (looksLikeCardReader) {
+			result = isInternal
+				? NSLocalizedString(@"SD/CF card (integrated reader)", @"")
+				: NSLocalizedString(@"SD/CF card (external reader)", @"");
+		} else if ([protocol length]) {
+			result = protocol;
+		}
+	}
+	CFRelease(disk);
+	return result;
+}
+
+// F30: best-effort device-type guess for an already-mounted path — same DA lookup as
+// -interfaceDescriptionForMountedPath: above, reused via HWGDeviceCategoryFromInfo (see its
+// doc comment for the accuracy caveats: this is a heuristic, not a guarantee).
+- (NSString *)deviceCategoryForMountedPath:(NSString *)path {
+	if (!daSession || ![path length]) return nil;
+	struct statfs sfs;
+	if (statfs([path fileSystemRepresentation], &sfs) != 0) return nil;
+	NSString *devPath = [NSString stringWithUTF8String:sfs.f_mntfromname];
+	NSString *bsd = [devPath lastPathComponent];
+	if (![bsd length]) return nil;
+
+	DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, daSession, [bsd UTF8String]);
+	if (!disk) return nil;
+	NSString *category = nil;
+	CFDictionaryRef descRef = DADiskCopyDescription(disk);
+	if (descRef) {
+		NSDictionary *desc = (__bridge_transfer NSDictionary *)descRef;
+		// BUG FIX (23-jul-2026): internal APFS system volumes (home, Preboot, VM, Update,
+		// iSCPreboot, xarts, /, …) all report the SAME ~large size as the internal SSD
+		// container, which was tripping the size-based "ExternalDisk" heuristic below and
+		// mislabeling every internal system volume mount with the external-disk icon.
+		// Never classify internal storage — it's never any of these 3 removable-device
+		// categories, matching the same exclusion -handleDiskAppeared: already applies for
+		// the "Disk Not Readable" path.
+		if ([desc[(__bridge NSString *)kDADiskDescriptionDeviceInternalKey] boolValue]) {
+			CFRelease(disk);
+			return nil;
+		}
+		NSString *protocol = desc[(__bridge NSString *)kDADiskDescriptionDeviceProtocolKey];
+		NSString *mediaName = desc[(__bridge NSString *)kDADiskDescriptionMediaNameKey];
+		NSString *deviceModel = desc[(__bridge NSString *)kDADiskDescriptionDeviceModelKey];
+		NSNumber *mediaSize = desc[(__bridge NSString *)kDADiskDescriptionMediaSizeKey];
+		category = HWGDeviceCategoryFromInfo(protocol, mediaName, deviceModel,
+			[mediaSize unsignedLongLongValue], ^BOOL(NSString *s) { return [self stringContainsCardReaderToken:s]; });
+	}
+	CFRelease(disk);
+	return category;
+}
+
+- (BOOL)stringContainsCardReaderToken:(NSString *)s {
+	if (![s length]) return NO;
+	NSString *lower = [s lowercaseString];
+	static NSArray<NSString*> *tokens = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		tokens = @[@"secure digital", @" sd/", @"sd card", @"sdxc", @"sdhc", @"mmc", @"compactflash", @" cf ", @"cardreader", @"card reader"];
+	});
+	for (NSString *token in tokens) {
+		if ([lower rangeOfString:token].location != NSNotFound) return YES;
+	}
+	return NO;
 }
 
 - (void) sendMountNotificationForVolume:(VolumeInfo*)volume mounted:(BOOL)mounted {
@@ -495,15 +802,49 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	NSString *type = mounted ? @"VolumeMounted" : @"VolumeUnmounted";
 	NSString *title = [NSString stringWithFormat:@"%@ %@", [volume name], mounted ? NSLocalizedString(@"Mounted", @"") : NSLocalizedString(@"Unmounted", @"")];
 
+	// F30: best-effort device-specific icon (SDCard/USBDrive/ExternalDisk) in place of the
+	// generic mount/eject icon, when the classifier had enough to go on.
+	NSData *iconData = [volume iconData];
+	if (mounted) {
+		NSString *category = [self deviceCategoryForMountedPath:[volume path]];
+		// Cache now, at mount time — the only point this query is always reliable — so
+		// -volumeDidUnmount: can use it later even for a surprise removal (no prior
+		// Finder eject, no -volumeWillUnmount: firing, path already gone by then).
+		if (category && [volume path]) self.pathDeviceCategory[[volume path]] = category;
+		NSString *iconName = HWGDeviceIconNameForCategory(category, NO);
+		if (iconName) iconData = [[NSImage imageNamed:iconName] TIFFRepresentation];
+	} else {
+		// Bug found live (23-jul-2026): unmount always showed the plain generic eject
+		// icon, even for a device the mount notice had just identified specifically
+		// (e.g. a pendrive). Bug fix #1 (captured the category in -volumeWillUnmount:)
+		// only covered a GRACEFUL eject — a surprise removal (unplugging without
+		// ejecting first) skips that notification entirely, so it still fell back to
+		// generic in that case. Now reads the category cached at MOUNT time instead,
+		// which covers both. Same red-X-over-the-icon treatment as the existing generic
+		// eject icon (per explicit user request — not a new badge design).
+		NSString *category = self.pathDeviceCategory[[volume path]] ?: [volume deviceCategory];
+		NSString *iconName = HWGDeviceIconNameForCategoryVariant(category, @"Unmounted");
+		if (iconName) iconData = [[NSImage imageNamed:iconName] TIFFRepresentation];
+		if ([volume path]) [self.pathDeviceCategory removeObjectForKey:[volume path]];
+	}
+
 	// F33: extra fields, mount-only — an unmounted path has no live filesystem left to stat.
 	NSString *description = mounted ? NSLocalizedString(@"Click to open", @"Message body on a volume mount notification, clicking it opens the drive in finder") : nil;
 	if (mounted) {
-		BOOL showPath   = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_PATH_KEY, YES);
-		BOOL showFSType = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FSTYPE_KEY, YES);
-		BOOL showSize   = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SIZE_KEY, YES);
+		BOOL showPath      = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_PATH_KEY, YES);
+		BOOL showFSType    = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FSTYPE_KEY, YES);
+		BOOL showSize      = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SIZE_KEY, YES);
+		BOOL showInterface = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_INTERFACE_KEY, NO);
 
 		NSMutableArray<NSString*> *extraLines = [NSMutableArray array];
 		if (showPath && [volume path]) [extraLines addObject:[volume path]];
+
+		if (showInterface) {
+			NSString *interface = [self interfaceDescriptionForMountedPath:[volume path]];
+			if ([interface length]) {
+				[extraLines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface: %@", @""), interface]];
+			}
+		}
 
 		if (showFSType || showSize) {
 			NSString *fsType = nil;
@@ -529,7 +870,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	[delegate notifyWithName:type
 							 title:title
 					 description:description
-							  icon:[volume iconData]
+							  icon:iconData
 			  identifierString:[volume path]
 				  contextString:context 
 							plugin:self];
@@ -556,6 +897,12 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	
 	if (path) {
 		VolumeInfo *info = [VolumeInfo volumeInfoForUnmountWithPath:path];
+		// Capture the device-type category NOW, while the volume is still mounted and
+		// statfs()/Disk Arbitration can still resolve it — by -volumeDidUnmount: time the
+		// path is already gone. Lets the eventual "Unmounted" notice use the same
+		// device-specific icon the "Mounted" one used, instead of always falling back to
+		// the plain eject icon.
+		info.deviceCategory = [self deviceCategoryForMountedPath:path];
 		NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:VolumeNotifierUnmountWaitSeconds
 																		  target:self
 																		selector:@selector(staleEjectItemTimerFired:)
@@ -702,6 +1049,8 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		[self checkboxWithKey:HWG_VOLUME_SHOW_PATH_KEY   title:NSLocalizedString(@"Mount path", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_VOLUME_SHOW_FSTYPE_KEY title:NSLocalizedString(@"File system type", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_VOLUME_SHOW_SIZE_KEY   title:NSLocalizedString(@"Volume size", @"") defaultOn:YES],
+		// F34 #3: SD/CF card reader vs generic USB, via Disk Arbitration's protocol key.
+		[self checkboxWithKey:HWG_VOLUME_SHOW_INTERFACE_KEY title:NSLocalizedString(@"Interface / card reader type", @"") defaultOn:YES],
 	];
 	// Build top-down (cursor starts at 0, grows downward) in a FLIPPED content view — see
 	// HWGVolumeFlippedContentView above. This fixes two related problems at once:

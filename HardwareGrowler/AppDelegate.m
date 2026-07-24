@@ -25,6 +25,66 @@
 #define NoPluginPrefsTitle   NSLocalizedString(@"There are no preferences available for this monitor.", @"")
 #define ModuleLabel          NSLocalizedString(@"Modules", @"")
 
+// Performance preset (added 22-jul-2026 per user request — with 12 monitors now, some
+// polling/observing continuously, the user wants an easy way to cap resource usage without
+// hand-picking each monitor in the Modules tab every time).
+#define HWG_PERFORMANCE_MODE_KEY @"HWGPerformanceMode"
+typedef NS_ENUM(NSInteger, HWGPerformanceMode) {
+	HWGPerformanceModeMinimal = 0,
+	HWGPerformanceModeAll     = 1,
+	HWGPerformanceModeCustom  = 2,
+};
+// Default is "All" (not "Minimal") so this new control never silently disables monitors an
+// existing user already had running before this feature existed.
+#define HWG_PERFORMANCE_MODE_DEFAULT HWGPerformanceModeAll
+
+// Remembers the monitor enable/disable arrangement the user had set up under "Custom" —
+// captured the moment they LEAVE Custom for Minimal/All, so switching back to Custom later
+// restores it instead of showing whatever Minimal/All left behind (bug found 22-jul-2026:
+// without this, Custom → Minimal/All → Custom silently lost the custom arrangement, since
+// applying Minimal/All overwrites "DisabledPlugins" directly with no memory of what came before).
+#define HWG_PERFORMANCE_CUSTOM_SNAPSHOT_KEY @"HWGPerformanceCustomSnapshot"
+
+// "Minimal elements": only the monitors the original (pre-fork) HardwareGrowler app shipped
+// with — Volume, USB, Thunderbolt (was FireWire), Bluetooth, Power, Network. Everything added
+// since (Thermal, Display, Audio, Camera, Gamepad, Printer) is what "All elements" adds back.
+static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
+	static NSSet<NSString*> *ids = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSString *prefix = @"com.jensyleo.hg4mac.";
+		ids = [NSSet setWithArray:@[
+			[prefix stringByAppendingString:@"VolumeMonitor"],
+			[prefix stringByAppendingString:@"USBMonitor"],
+			[prefix stringByAppendingString:@"ThunderboltMonitor"],
+			[prefix stringByAppendingString:@"BluetoothMonitor"],
+			[prefix stringByAppendingString:@"PowerMonitor"],
+			[prefix stringByAppendingString:@"NetworkMonitor"],
+		]];
+	});
+	return ids;
+}
+
+// The modules table uses NSTableViewStyleSourceList (see -awakeFromNib below), which by
+// default paints a system BLUE selection highlight — indistinguishable from Bluetooth
+// Monitor's own blue-indigo icon when that row is selected (the icon and the highlight
+// behind it become the same color family, so the glyph loses contrast). Overriding
+// -drawSelectionInRect: substitutes a neutral gray fill instead, which keeps every module's
+// icon color (including Bluetooth's blue) legible against the selection background
+// regardless of which row is selected.
+@interface HWGGraySelectionRowView : NSTableRowView
+@end
+
+@implementation HWGGraySelectionRowView
+-(void)drawSelectionInRect:(NSRect)dirtyRect {
+	if (self.selectionHighlightStyle == NSTableViewSelectionHighlightStyleNone) return;
+	NSRect selectionRect = NSInsetRect(self.bounds, 4, 1);
+	NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:selectionRect xRadius:6 yRadius:6];
+	[[NSColor colorWithWhite:0.5 alpha:0.35] setFill];
+	[path fill];
+}
+@end
+
 @interface AppDelegate ()
 
 @end
@@ -111,6 +171,8 @@
 	}];
 
 	self.pluginController = [[HWGrowlPluginController alloc] init];
+	[self buildPerformanceSection];
+	[self startObservingDefaultsForCustomModeDetection];
 
 	// The currently-selected monitor's prefs pane is sized to match containerView's frame
 	// at the moment it's inserted (see -tableViewSelectionDidChange:). But containerView
@@ -152,7 +214,6 @@
 
 - (IBAction)showPreferences:(id)sender
 {
-	[NSApp activateIgnoringOtherApps:YES];
    if(![self.window isVisible]){
       [self.window center];
       [self.window setFrameAutosaveName:@"HWGrowlerPrefsWindowFrame"];
@@ -161,10 +222,33 @@
 	// Become a regular (Dock-visible, focusable) app so the window can take
 	// focus, then activate. Modern replacement for the deprecated Carbon
 	// TransformProcessType(kProcessTransformToForegroundApplication).
+	//
+	// BUG FIX ATTEMPT #1 (23-jul-2026, DID NOT WORK): bare dispatch_async (single run-loop
+	// tick) between the policy change and activation — no observed change.
+	//
+	// BUG FIX ATTEMPT #2 (23-jul-2026, PARTIAL): -activateWithOptions: + a real 0.15s delay
+	// before activating — user confirmed this helped ("mejoro un poco") but the app still
+	// goes to the end of the switcher in some circumstances.
+	//
+	// BUG FIX ATTEMPT #3 (23-jul-2026): instrumented with NSLog + os_log stream and
+	// reproduced the user's exact repro (quit app, launch, launch again while running to
+	// trigger -applicationShouldHandleReopen:, which is the only way to reach this method
+	// when Visibility=kDontShowIcon since there's no status item to click). Confirmed via
+	// log that AppKit itself already sends the process an "ApplicationDidBecomeActive"
+	// activation BEFORE our delegate method even runs, while activationPolicy is still
+	// Accessory — i.e. the switcher's first activation record for this reopen happens under
+	// the wrong policy no matter what we do afterwards. Fix: activate immediately (matching
+	// the classic, pre-deprecation TransformProcessType+SetFrontProcess pattern) in addition
+	// to the delayed retry, so whichever timing the switcher actually keys off gets a
+	// same-policy activation request from us.
 	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-	[NSApp activateIgnoringOtherApps:YES];
-
+	[NSApp unhide:nil];
+	[[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps];
 	[self.window makeKeyAndOrderFront:sender];
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		[[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps];
+		[self.window makeKeyAndOrderFront:sender];
+	});
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
@@ -507,6 +591,274 @@
     return [[NSFileManager defaultManager] fileExistsAtPath:plistPath];
 }
 
+#pragma mark Performance preset
+
+// Builds the "Performance" radio row (Minimal/All/Custom) at the TOP of the Modules tab —
+// moved here from General (22-jul-2026, user's request: "por sentido común, lleva esas 3
+// opciones a Modules", since this setting is entirely about which modules run).
+//
+// REWRITTEN (22-jul-2026) to use Auto Layout throughout instead of manual frame math: an
+// earlier version tried to preserve the two existing nib-authored subviews' legacy
+// springs-and-struts autoresizing (shrinking their frame height once, relying on
+// NSView's margin-preservation to keep things aligned as the window resizes) — that
+// requires knowing the EXACT view height at the moment the shrink is applied, which this
+// code has no reliable way to determine (the Modules tab may or may not already be at its
+// final stretched size by the time -awakeFromNib runs, unlike the General tab where it
+// happened to still be at the nib's authored size) — got the controls "mal ubicados" (badly
+// placed) as a result. Auto Layout constraints, anchored directly between the views
+// themselves rather than computed from an assumed total height, are correct regardless of
+// when/whether any resize has already happened — matches how NetworkMonitor's own
+// programmatically-built prefs sections in this codebase are already done.
+- (void)buildPerformanceSection {
+	NSTabViewItem *modulesTabItem = [tabView tabViewItemAtIndex:1];
+	NSView *modulesView = [modulesTabItem view];
+	if (!modulesView) return;
+
+	NSScrollView *moduleScrollView = nil;
+	NSBox *detailBox = nil;
+	for (NSView *sub in modulesView.subviews) {
+		if ([sub isKindOfClass:[NSScrollView class]]) moduleScrollView = (NSScrollView *)sub;
+		else if ([sub isKindOfClass:[NSBox class]]) detailBox = (NSBox *)sub;
+	}
+	if (!moduleScrollView || !detailBox) return;
+
+	// Capture the two existing views' current horizontal geometry (left inset, width/right
+	// inset, and the gap between them) BEFORE opting them into Auto Layout, so their
+	// horizontal arrangement is preserved exactly — only their VERTICAL behavior changes
+	// (top edge now depends on the new Performance row instead of a fixed nib y-coordinate).
+	CGFloat scrollLeftInset = NSMinX(moduleScrollView.frame) - NSMinX(modulesView.bounds);
+	CGFloat scrollWidth = NSWidth(moduleScrollView.frame);
+	CGFloat bottomInset = NSMinY(moduleScrollView.frame) - NSMinY(modulesView.bounds);
+	CGFloat gapBetween = NSMinX(detailBox.frame) - NSMaxX(moduleScrollView.frame);
+	CGFloat boxRightInset = NSMaxX(modulesView.bounds) - NSMaxX(detailBox.frame);
+	CGFloat boxBottomInset = NSMinY(detailBox.frame) - NSMinY(modulesView.bounds);
+
+	moduleScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+	detailBox.translatesAutoresizingMaskIntoConstraints = NO;
+
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Performance", @"")];
+	header.font = [NSFont boldSystemFontOfSize:12];
+	header.textColor = [NSColor secondaryLabelColor];
+	header.translatesAutoresizingMaskIntoConstraints = NO;
+	[modulesView addSubview:header];
+
+	NSInteger storedMode = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_PERFORMANCE_MODE_KEY]
+		? [[NSUserDefaults standardUserDefaults] integerForKey:HWG_PERFORMANCE_MODE_KEY]
+		: HWG_PERFORMANCE_MODE_DEFAULT;
+
+	NSButton *minimalRadio = [self performanceRadioWithTitle:NSLocalizedString(@"Minimal elements", @"")
+													  tooltip:NSLocalizedString(@"Only the original monitors: Volume, USB, Thunderbolt, Bluetooth, Power, Network. Lightest on resources.", @"")
+														  tag:HWGPerformanceModeMinimal];
+	NSButton *allRadio = [self performanceRadioWithTitle:NSLocalizedString(@"All elements", @"")
+												  tooltip:NSLocalizedString(@"Every monitor, including Audio/Camera/Gamepad/Printer/Thermal/Display. Default.", @"")
+													  tag:HWGPerformanceModeAll];
+	NSButton *customRadio = [self performanceRadioWithTitle:NSLocalizedString(@"Custom", @"")
+													 tooltip:NSLocalizedString(@"Choose exactly which monitors run below.", @"")
+														 tag:HWGPerformanceModeCustom];
+
+	minimalRadio.state = (storedMode == HWGPerformanceModeMinimal) ? NSControlStateValueOn : NSControlStateValueOff;
+	allRadio.state     = (storedMode == HWGPerformanceModeAll)     ? NSControlStateValueOn : NSControlStateValueOff;
+	customRadio.state  = (storedMode == HWGPerformanceModeCustom)  ? NSControlStateValueOn : NSControlStateValueOff;
+
+	[modulesView addSubview:minimalRadio];
+	[modulesView addSubview:allRadio];
+	[modulesView addSubview:customRadio];
+
+	[NSLayoutConstraint activateConstraints:@[
+		// Header: top-left corner of the Modules tab.
+		[header.topAnchor      constraintEqualToAnchor:modulesView.topAnchor constant:12],
+		[header.leadingAnchor  constraintEqualToAnchor:modulesView.leadingAnchor constant:scrollLeftInset],
+
+		// Radio row: directly below the header, left-aligned with it.
+		[minimalRadio.topAnchor     constraintEqualToAnchor:header.bottomAnchor constant:8],
+		[minimalRadio.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+
+		[allRadio.topAnchor      constraintEqualToAnchor:minimalRadio.topAnchor],
+		[allRadio.leadingAnchor  constraintEqualToAnchor:minimalRadio.trailingAnchor constant:16],
+
+		[customRadio.topAnchor     constraintEqualToAnchor:minimalRadio.topAnchor],
+		[customRadio.leadingAnchor constraintEqualToAnchor:allRadio.trailingAnchor constant:16],
+
+		// Module list (scroll view): same left inset/width as before, now starts below the
+		// radio row instead of at a fixed y, and still ends at the same bottom inset.
+		[moduleScrollView.leadingAnchor  constraintEqualToAnchor:modulesView.leadingAnchor constant:scrollLeftInset],
+		[moduleScrollView.widthAnchor    constraintEqualToConstant:scrollWidth],
+		[moduleScrollView.topAnchor      constraintEqualToAnchor:minimalRadio.bottomAnchor constant:12],
+		[moduleScrollView.bottomAnchor   constraintEqualToAnchor:modulesView.bottomAnchor constant:-bottomInset],
+
+		// Detail box: same gap from the scroll view and right/bottom insets as before, top
+		// aligned with the scroll view (both start right below the radio row together).
+		[detailBox.leadingAnchor  constraintEqualToAnchor:moduleScrollView.trailingAnchor constant:gapBetween],
+		[detailBox.trailingAnchor constraintEqualToAnchor:modulesView.trailingAnchor constant:-boxRightInset],
+		[detailBox.topAnchor      constraintEqualToAnchor:moduleScrollView.topAnchor],
+		[detailBox.bottomAnchor   constraintEqualToAnchor:modulesView.bottomAnchor constant:-boxBottomInset],
+	]];
+
+	performanceMinimalRadio = minimalRadio;
+	performanceAllRadio = allRadio;
+	performanceCustomRadio = customRadio;
+}
+
+// Whenever the user manually flips a single monitor's enabled state in the Modules tab (an
+// action the Minimal/All presets don't do — those only ever touch EVERY monitor at once),
+// the current state no longer matches either preset exactly. Reflect that honestly by
+// switching the Performance selector to "Custom" instead of leaving a stale/misleading
+// Minimal or All selection checked.
+- (void)markPerformanceModeAsCustom {
+	[[NSUserDefaults standardUserDefaults] setInteger:HWGPerformanceModeCustom forKey:HWG_PERFORMANCE_MODE_KEY];
+	performanceMinimalRadio.state = NSControlStateValueOff;
+	performanceAllRadio.state = NSControlStateValueOff;
+	performanceCustomRadio.state = NSControlStateValueOn;
+}
+
+- (NSButton *)performanceRadioWithTitle:(NSString *)title tooltip:(NSString *)tooltip tag:(NSInteger)tag {
+	NSButton *radio = [NSButton radioButtonWithTitle:title target:self action:@selector(performanceModeChanged:)];
+	radio.tag = tag;
+	radio.toolTip = tooltip;
+	radio.translatesAutoresizingMaskIntoConstraints = NO;
+	return radio;
+}
+
+-(IBAction)performanceModeChanged:(NSButton*)sender {
+	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+	HWGPerformanceMode mode = (HWGPerformanceMode)sender.tag;
+	HWGPerformanceMode oldMode = [defaults objectForKey:HWG_PERFORMANCE_MODE_KEY]
+		? [defaults integerForKey:HWG_PERFORMANCE_MODE_KEY]
+		: HWG_PERFORMANCE_MODE_DEFAULT;
+
+	// Leaving Custom for Minimal/All: save the current arrangement first, or it's gone the
+	// moment Minimal/All overwrites "DisabledPlugins" (bug found 22-jul-2026).
+	if (oldMode == HWGPerformanceModeCustom && mode != HWGPerformanceModeCustom) {
+		[self captureCustomSnapshot];
+	}
+
+	[defaults setInteger:mode forKey:HWG_PERFORMANCE_MODE_KEY];
+
+	if (mode == HWGPerformanceModeCustom) {
+		[self restoreCustomSnapshotIfAny];
+		return;
+	}
+	[self applyPerformancePresetMode:mode];
+}
+
+// Shared enable/disable engine for BOTH the Minimal/All presets and restoring a saved Custom
+// snapshot — `resolver` decides, per bundle ID, whether that plugin should end up disabled.
+// Mirrors -moduleCheckbox:'s own start/stopObserving + "DisabledPlugins" persistence, applied
+// to every plugin at once. Skips plugins whose state doesn't actually change (no pointless
+// start/stop calls), then refreshes the Modules table so its checkboxes reflect the new state.
+- (void)applyDisabledStateWithResolver:(BOOL (^)(NSString *bundleID))resolver {
+	// Guard: this method's own writes to "DisabledPlugins" must NOT be mistaken by
+	// -userDefaultsDidChange: for a manual per-monitor-pane change (which would immediately
+	// flip the just-chosen preset back to Custom).
+	applyingPerformancePreset = YES;
+
+	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+	NSMutableDictionary *disabledDict = [[defaults objectForKey:@"DisabledPlugins"] mutableCopy] ?: [NSMutableDictionary dictionary];
+
+	for (NSMutableDictionary *pluginDict in [pluginController plugins]) {
+		id<HWGrowlPluginProtocol> plugin = [pluginDict objectForKey:@"plugin"];
+		NSString *bundleID = [[NSBundle bundleForClass:[plugin class]] bundleIdentifier];
+		BOOL wasDisabled = [[pluginDict objectForKey:@"disabled"] boolValue];
+		BOOL shouldBeDisabled = resolver(bundleID);
+
+		if (shouldBeDisabled != wasDisabled) {
+			[pluginDict setObject:@(shouldBeDisabled) forKey:@"disabled"];
+			if (shouldBeDisabled) {
+				if ([plugin respondsToSelector:@selector(stopObserving)]) [plugin stopObserving];
+			} else {
+				if ([plugin respondsToSelector:@selector(startObserving)]) [plugin startObserving];
+			}
+		}
+		if (bundleID) [disabledDict setObject:@(shouldBeDisabled) forKey:bundleID];
+	}
+
+	[defaults setObject:disabledDict forKey:@"DisabledPlugins"];
+	[defaults synchronize];
+	[tableView reloadData];
+
+	applyingPerformancePreset = NO;
+	lastKnownDefaultsSnapshot = [defaults dictionaryRepresentation];
+}
+
+- (void)applyPerformancePresetMode:(HWGPerformanceMode)mode {
+	NSSet<NSString*> *minimalSet = HWGMinimalPluginBundleIdentifiers();
+	[self applyDisabledStateWithResolver:^BOOL(NSString *bundleID) {
+		return (mode == HWGPerformanceModeMinimal) ? ![minimalSet containsObject:bundleID] : NO;
+	}];
+}
+
+// Saves the CURRENT monitor enable/disable arrangement as "the Custom arrangement" — called
+// right before switching AWAY from Custom to Minimal/All, so it survives Minimal/All
+// overwriting "DisabledPlugins" and can be brought back later (see -restoreCustomSnapshotIfAny).
+- (void)captureCustomSnapshot {
+	NSDictionary *disabledDict = [[NSUserDefaults standardUserDefaults] objectForKey:@"DisabledPlugins"];
+	if (disabledDict) {
+		[[NSUserDefaults standardUserDefaults] setObject:disabledDict forKey:HWG_PERFORMANCE_CUSTOM_SNAPSHOT_KEY];
+	}
+}
+
+// Restores the arrangement captured by -captureCustomSnapshot. If the user has never left
+// Custom before (no snapshot yet — e.g. right after this feature shipped, or a fresh install
+// that's never touched Minimal/All), there's nothing to restore — leave the current
+// arrangement untouched, matching Custom's original "don't force anything" behavior.
+- (void)restoreCustomSnapshotIfAny {
+	NSDictionary *snapshot = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_PERFORMANCE_CUSTOM_SNAPSHOT_KEY];
+	if (!snapshot) return;
+	[self applyDisabledStateWithResolver:^BOOL(NSString *bundleID) {
+		return bundleID ? [[snapshot objectForKey:bundleID] boolValue] : NO;
+	}];
+}
+
+#pragma mark Detecting changes inside a monitor's own prefs pane
+
+// Keys that are NOT a monitor's own setting — changing these must never flip Performance to
+// "Custom". Every other NSUserDefaults key is assumed to belong to some monitor's F33/F34
+// preferences pane (Power/Thermal/Display/Audio/Camera/Gamepad/Network/Volume/Thunderbolt/
+// Printer all persist their own checkboxes straight to NSUserDefaults with no shared callback
+// into AppDelegate, so there is no cheaper way to notice "the user changed a monitor setting"
+// than diffing defaults directly).
++ (NSSet<NSString*> *)nonMonitorDefaultsKeys {
+	static NSSet<NSString*> *keys = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		keys = [NSSet setWithArray:@[
+			@"Visibility", @"OnLogin", @"ShowExisting", @"GroupNetwork",
+			HWG_PERFORMANCE_MODE_KEY, @"DisabledPlugins",
+			// AppKit/window-state autosave keys some AppKit versions persist under
+			// NSUserDefaults for this app's window — not user-facing "settings" at all.
+			@"NSWindow Frame Preferences",
+		]];
+	});
+	return keys;
+}
+
+- (void)startObservingDefaultsForCustomModeDetection {
+	lastKnownDefaultsSnapshot = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+	[[NSNotificationCenter defaultCenter] addObserver:self
+											  selector:@selector(userDefaultsDidChange:)
+												  name:NSUserDefaultsDidChangeNotification
+												object:nil];
+}
+
+- (void)userDefaultsDidChange:(NSNotification *)note {
+	NSDictionary *current = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+	NSDictionary *previous = lastKnownDefaultsSnapshot;
+	lastKnownDefaultsSnapshot = current;
+	if (applyingPerformancePreset) return;   // our own preset-apply write — not a manual change
+
+	NSSet<NSString*> *ignoredKeys = [AppDelegate nonMonitorDefaultsKeys];
+	__block BOOL monitorSettingChanged = NO;
+	[current enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) {
+		if ([ignoredKeys containsObject:key]) return;
+		if (![previous[key] isEqual:value]) { monitorSettingChanged = YES; *stop = YES; }
+	}];
+	if (!monitorSettingChanged) return;
+
+	NSInteger currentMode = [[NSUserDefaults standardUserDefaults] integerForKey:HWG_PERFORMANCE_MODE_KEY];
+	if (currentMode == HWGPerformanceModeCustom) return;   // already Custom, nothing to flip
+	[self markPerformanceModeAsCustom];
+}
+
 #pragma mark Module Table
 
 -(IBAction)moduleCheckbox:(id)sender {
@@ -532,6 +884,10 @@
 		[disabledDict setObject:disabled forKey:identifier];
 		[defaults setObject:disabledDict forKey:@"DisabledPlugins"];
 		[defaults synchronize];
+
+		// A manual per-monitor change no longer matches whichever preset was selected
+		// (Minimal/All only ever change EVERY monitor together) — reflect that honestly.
+		[self markPerformanceModeAsCustom];
 	}
 }
 
@@ -564,6 +920,10 @@
 	if (!currentView) return;
 	[currentView setFrameSize:[containerView frame].size];
 	[containerView layoutSubtreeIfNeeded];
+}
+
+- (NSTableRowView *)tableView:(NSTableView *)aTableView rowViewForRow:(NSInteger)row {
+	return [[HWGGraySelectionRowView alloc] init];
 }
 
 - (id) tableView:(NSTableView *)aTableView objectValueForTableColumn:(NSTableColumn *)aTableColumn row:(NSInteger)rowIndex {

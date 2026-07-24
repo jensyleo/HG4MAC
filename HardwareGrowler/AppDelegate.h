@@ -27,6 +27,21 @@ typedef enum : NSInteger {
 
 	HWGrowlIconState oldIconValue;
 	BOOL oldOnLoginValue;
+
+	// Performance preset radios (Modules tab, built in code — see -buildPerformanceSection).
+	// Weak: owned by the Modules tab's view; kept here only to flip the selection to
+	// "Custom" when the user manually changes a monitor's enabled state or any setting
+	// INSIDE a monitor's own preferences pane.
+	__weak NSButton *performanceMinimalRadio;
+	__weak NSButton *performanceAllRadio;
+	__weak NSButton *performanceCustomRadio;
+
+	// Detects changes made INSIDE any individual monitor's own prefs pane (e.g. Power
+	// Monitor's "Notify when Low Power Mode..." checkbox) — those plugins have no shared
+	// "a setting changed" callback into AppDelegate, so this diffs NSUserDefaults itself
+	// via NSUserDefaultsDidChangeNotification. See -userDefaultsDidChange:.
+	NSDictionary *lastKnownDefaultsSnapshot;
+	BOOL applyingPerformancePreset;   // guards against our OWN preset-apply writes re-triggering Custom
 }
 
 @property (nonatomic, strong) IBOutlet NSString *showDevices;

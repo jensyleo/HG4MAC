@@ -42,6 +42,12 @@
 #define HWG_POWER_HEALTH_NOTIFY_HOURS_DEFAULT 8
 #define HWG_POWER_HEALTH_NOTIFY_UNIT_DEFAULT  0
 
+// F34 candidate #1: Low Power Mode toggle. Public, stable API (NSProcessInfo), off by
+// default per user request — this is a NEW behavior change (existing users never saw this
+// notification before), unlike the F33 fields above which only toggle visibility of parts
+// of an ALREADY-firing notification.
+#define HWG_POWER_LOWPOWER_NOTIFY_KEY @"HWGPowerNotifyLowPowerMode"
+
 static BOOL HWGPowerBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -280,6 +286,10 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 @property (nonatomic, strong) NSSlider *healthNotifySlider;
 @property (nonatomic, strong) NSTextField *healthNotifyHoursLabel;
 
+// F34 #1: last known Low Power Mode state, to dedupe spurious re-fires of
+// NSProcessInfoPowerStateDidChangeNotification.
+@property (nonatomic, assign) BOOL lastLowPowerModeEnabled;
+
 @end
 
 @implementation HWGrowlPowerMonitor
@@ -311,6 +321,16 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 		// Runs regardless of AC/battery state (health doesn't change based on that) — unlike
 		// refireTimer, which checkTimer starts/stops depending on power source.
 		[self startHealthCheckTimer];
+
+		// F34 #1: Low Power Mode. NSProcessInfoPowerStateDidChangeNotification fires on
+		// BOTH low-power-mode toggles AND thermal-state changes sharing the same underlying
+		// KVO-ish mechanism on some OS versions — re-read isLowPowerModeEnabled and compare
+		// against the last known value rather than trusting the notification alone.
+		[[NSNotificationCenter defaultCenter] addObserver:self
+												  selector:@selector(lowPowerModeChanged:)
+													  name:NSProcessInfoPowerStateDidChangeNotification
+													object:nil];
+		_lastLowPowerModeEnabled = [NSProcessInfo processInfo].isLowPowerModeEnabled;
 	}
 	return self;
 }
@@ -323,6 +343,28 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 	}
 	[refireTimer invalidate];
 	[_healthCheckTimer invalidate];
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+#pragma mark Low Power Mode (F34 #1)
+
+-(void)lowPowerModeChanged:(NSNotification *)note {
+	BOOL enabled = [NSProcessInfo processInfo].isLowPowerModeEnabled;
+	if (enabled == _lastLowPowerModeEnabled) return;   // dedupe: notification can share the thermal-state path
+	_lastLowPowerModeEnabled = enabled;
+
+	if (!HWGPowerBoolForKey(HWG_POWER_LOWPOWER_NOTIFY_KEY, NO)) return;   // off by default (F34 #1)
+
+	@autoreleasepool {
+		NSData *iconData = [self currentPowerStatusIconData];
+		[delegate notifyWithName:@"PowerLowPowerMode"
+							title:enabled ? NSLocalizedString(@"Low Power Mode Enabled", @"") : NSLocalizedString(@"Low Power Mode Disabled", @"")
+					  description:@""
+							 icon:iconData
+				 identifierString:@"PowerLowPowerMode"
+					contextString:nil
+						   plugin:self];
+	}
 }
 
 -(void)fireOnLaunchNotes {
@@ -973,6 +1015,8 @@ static void powerSourceChanged(void *context) {
 		[self checkboxWithKey:HWG_POWER_SHOW_STATE_KEY      title:NSLocalizedString(@"Charge state (Charging/Finishing/Charged)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_PERCENTAGE_KEY title:NSLocalizedString(@"Battery percentage", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_TIME_KEY       title:NSLocalizedString(@"Time remaining / time to charge", @"") defaultOn:YES],
+		// F34 #1: OFF by default — new behavior, not a visibility toggle on an existing notice.
+		[self checkboxWithKey:HWG_POWER_LOWPOWER_NOTIFY_KEY title:NSLocalizedString(@"Notify when Low Power Mode is turned on/off", @"") defaultOn:NO],
 	];
 	// #8: battery health/cycle count — own header/section since it's a SEPARATE periodic
 	// notification (see checkBatteryHealthDue), not part of the regular status notice above.

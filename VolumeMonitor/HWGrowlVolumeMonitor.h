@@ -19,6 +19,11 @@
 @property (nonatomic, retain) NSData *iconData;
 @property (nonatomic, retain) NSString *name;
 @property (nonatomic, retain) NSString *path;
+// F30 follow-up (23-jul-2026): device-type category (e.g. "USBDrive"/"SDCard"/
+// "ExternalDisk"), captured at -volumeWillUnmount: time (while the path is still live)
+// so the eventual unmount notification can use the same specific icon the mount
+// notification used, instead of always falling back to the plain eject icon.
+@property (nonatomic, retain) NSString *deviceCategory;
 
 + (VolumeInfo *) volumeInfoForMountWithPath:(NSString *)aPath;
 + (VolumeInfo *) volumeInfoForUnmountWithPath:(NSString *)aPath;
