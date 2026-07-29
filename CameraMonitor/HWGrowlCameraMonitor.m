@@ -307,12 +307,11 @@ static BOOL HWGCameraBoolForKey(NSString *key, BOOL def) {
 	return NSLocalizedString(@"Camera Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [self cameraIconInUse:NO];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable — see the same
+	// note on AudioMonitor's -preferenceIcon. Own dedicated default name ("-Module"),
+	// separate from -cameraIconInUse:'s "CameraMonitor-Icon" — customizing one must never
+	// silently change the other.
+	return HWGResolveIconNamed(@"CameraMonitor-Icon-Module");
 }
 
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -372,6 +371,7 @@ static BOOL HWGCameraBoolForKey(NSString *key, BOOL def) {
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"CameraMonitor-Icon-Module"],
 		@[@"In Use", @"CameraMonitor-Icon-InUse"],
 		@[@"Idle", @"CameraMonitor-Icon"],
 	]];

@@ -323,7 +323,14 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	NSString *defaultName = connected ? @"PrinterMonitor-Icon-Connected" : @"PrinterMonitor-Icon-Disconnected";
 	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:defaultName];
 	if (override) return override;
+	return [self drawnPrinterIconConnected:connected];
+}
 
+// The always-default procedural glyph, ignoring any user override — used for the sidebar/
+// Modules-list icon (-preferenceIcon), which must stay the app's own fixed artwork and not
+// follow the user's "Connected" notification-icon customization (that customization is
+// scoped to notifications only; the module list shouldn't visibly change alongside it).
++(NSImage *)drawnPrinterIconConnected:(BOOL)connected {
 	NSSize canvasSize = NSMakeSize(128, 128);
 	NSImage *image = [NSImage imageWithSize:canvasSize flipped:NO drawingHandler:^BOOL(NSRect rect) {
 		// Enlarged 23-jul-2026 per user request — scale the whole drawing up around the
@@ -428,12 +435,15 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	return NSLocalizedString(@"Printer Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [HWGrowlPrinterMonitor printerIconConnected:YES];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable — see the same
+	// note on AudioMonitor's -preferenceIcon. Own dedicated default name
+	// ("PrinterMonitor-ModuleIcon"), separate from the "Connected"/"Needs Attention"
+	// notification icons — customizing one must never silently change the other. Falls back
+	// to a static render of the procedural connected glyph (Assets.xcassets) rather than
+	// redrawing it live, since this icon never needs to reflect live connection state the
+	// way the notification icon does.
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"PrinterMonitor-ModuleIcon"];
+	return override ?: [NSImage imageNamed:@"PrinterMonitor-ModuleIcon"];
 }
 
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -566,6 +576,7 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"PrinterMonitor-ModuleIcon"],
 		@[@"Connected", @"PrinterMonitor-Icon-Connected"],
 		@[@"Needs Attention", @"PrinterMonitor-Icon-Disconnected"],
 	]];

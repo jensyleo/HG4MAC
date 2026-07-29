@@ -525,12 +525,9 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	return NSLocalizedString(@"Display Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [NSImage imageNamed:@"HWGPrefsDisplay"];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsDisplay-Module");
 }
 
 // F33: single generic handler for every per-field visibility checkbox. Each checkbox's
@@ -681,6 +678,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"HWGPrefsDisplay-Module"],
 		@[@"Display Connected", @"Display-On"],
 		@[@"Display Disconnected", @"Display-Off"],
 	]];

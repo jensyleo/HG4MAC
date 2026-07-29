@@ -923,12 +923,9 @@ static void powerSourceChanged(void *context) {
 	return NSLocalizedString(@"Power Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [NSImage imageNamed:@"HWGPrefsPower"];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsPower-Module");
 }
 // F33: single generic handler for every per-field visibility checkbox — mirrors
 // NetworkMonitor's `fieldToggleChanged:`. Each checkbox's `identifier` carries the
@@ -1211,6 +1208,7 @@ static void powerSourceChanged(void *context) {
 	// sizes itself via its own internal Auto Layout constraints, so it's wrapped in its
 	// own NSScrollView here (the row count is long enough that it won't fit unscrolled).
 	NSMutableArray<NSArray<NSString*>*> *iconSpecs = [NSMutableArray array];
+	[iconSpecs addObject:@[NSLocalizedString(@"Module Icon (Sidebar)", @""), @"HWGPrefsPower-Module"]];
 	[iconSpecs addObject:@[NSLocalizedString(@"Plugged In", @""), @"Power-Plugged"]];
 	for (NSInteger pct = 0; pct <= 100; pct += 10) {
 		NSString *label = [NSString stringWithFormat:NSLocalizedString(@"Battery %ld%%", @""), (long)pct];

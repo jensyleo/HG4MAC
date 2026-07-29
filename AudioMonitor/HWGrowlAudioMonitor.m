@@ -378,12 +378,12 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	return NSLocalizedString(@"Audio Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = HWGResolveIconNamed(@"AudioMonitor-Icon");
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable — AppDelegate's
+	// module list calls this each time it draws a row, so there's no need to cache it
+	// ourselves, and caching it risked showing a stale icon until the app was restarted.
+	// Own dedicated default name ("-Module"), separate from the "Connected" notification
+	// icon's "AudioMonitor-Icon" — customizing one must never silently change the other.
+	return HWGResolveIconNamed(@"AudioMonitor-Icon-Module");
 }
 
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -447,6 +447,7 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"AudioMonitor-Icon-Module"],
 		@[@"Connected", @"AudioMonitor-Icon"],
 		@[@"Disconnected/Muted", @"AudioMonitor-Icon-Off"],
 	]];

@@ -150,12 +150,11 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 	return NSLocalizedString(@"Gamepad Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [self gamepadIcon];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable — see the same
+	// note on AudioMonitor's -preferenceIcon. Own dedicated default name ("-Module"),
+	// separate from -gamepadIcon's "GamepadMonitor-Icon" — customizing one must never
+	// silently change the other.
+	return HWGResolveIconNamed(@"GamepadMonitor-Icon-Module");
 }
 
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -215,6 +214,7 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"GamepadMonitor-Icon-Module"],
 		@[@"Game Controller", @"GamepadMonitor-Icon"],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;

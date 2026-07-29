@@ -191,7 +191,9 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	return NSLocalizedString(@"Thermal Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	return [NSImage imageNamed:@"HWGPrefsThermal"];
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsThermal-Module");
 }
 
 -(IBAction)fieldToggleChanged:(NSButton*)sender {
@@ -318,6 +320,7 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"HWGPrefsThermal-Module"],
 		@[@"Nominal", @"Thermal-Nominal"],
 		@[@"Fair", @"Thermal-Fair"],
 		@[@"Serious", @"Thermal-Serious"],

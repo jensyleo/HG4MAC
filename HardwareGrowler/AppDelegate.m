@@ -630,26 +630,23 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 // themselves rather than computed from an assumed total height, are correct regardless of
 // when/whether any resize has already happened — matches how NetworkMonitor's own
 // programmatically-built prefs sections in this codebase are already done.
-// Icon customization (Preferences → any module → Icons) grew broad enough (12 monitors, 3
-// ways to set an icon each) that a "back up/restore my custom icons" control earns its own
-// General-tab section — anchored directly below the existing "Show connected devices"
-// checkbox (found by button type rather than a dedicated outlet, matching how
-// -buildPerformanceSection above has no outlet to anchor to either) instead of stranded at
-// the tab's bottom edge.
+// Icon customization (Preferences → any module → Icons) plus every other on/off setting
+// (module enable/disable, per-module notification checkboxes, Performance preset…) grew
+// broad enough that a single "back up everything" control earns its own General-tab
+// section — anchored directly below the existing "Show connected devices" checkbox (found
+// by button type rather than a dedicated outlet, matching how -buildPerformanceSection
+// above has no outlet to anchor to either) instead of stranded at the tab's bottom edge.
 //
-// SCOPE, DELIBERATELY NARROW: this profile covers icon overrides ONLY (the
-// HWGIconOverrideStore folder, zipped via `/usr/bin/ditto`) — NOT the app's other on/off
-// settings (module enable/disable, notification checkboxes, Performance preset). An earlier
-// version of this feature also exported/imported the app's entire NSUserDefaults domain via
-// `/usr/bin/defaults export|import` while the app was running, and shortly after that was
-// added the app started re-prompting for Bluetooth permission on every launch (and Location
-// stopped prompting at all) — the whole icon-customization feature was rolled back and
-// rebuilt from scratch to isolate the cause. No code-level cause was ever pinned down, but
-// `defaults import` rewriting this app's ENTIRE preferences domain live is the prime
-// suspect (nothing else new in that session touched anything TCC/permissions-adjacent). This
-// rewrite deliberately leaves that part out. If a "back up all settings" version is wanted
-// again later, add it as a clearly separate, opt-in step — not bundled silently into this
-// one — so a regression is easy to isolate to that specific change.
+// HISTORY (29-jul-2026): an earlier version of this same combined export/import (icons +
+// `/usr/bin/defaults export|import` for the rest of the settings) was rolled back after the
+// app started re-prompting for Bluetooth permission on every launch (and Location stopped
+// prompting at all). No code-level cause was ever pinned down after reverting — entitlements/
+// Info.plist/signing config were all confirmed unchanged, and the monitors' own
+// authorization call sites were untouched. This is a from-scratch reimplementation, added
+// back deliberately (not by accident) after the icon-only version was independently
+// confirmed stable across a reboot. If the permission issue reappears, this is the single
+// most-changed piece of code since the last known-good state (git branch
+// icon-only-profile-working-2026-07-29) and should be the first suspect to roll back.
 - (void)buildIconProfileButtons {
 	NSTabViewItem *generalTabItem = [tabView tabViewItemAtIndex:0];
 	NSView *generalView = [generalTabItem view];
@@ -675,20 +672,20 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 	divider.boxType = NSBoxSeparator;
 	divider.translatesAutoresizingMaskIntoConstraints = NO;
 
-	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Icon Profile", @"")];
+	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Profile", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
 	header.textColor = [NSColor secondaryLabelColor];
 	header.translatesAutoresizingMaskIntoConstraints = NO;
 
-	NSTextField *subheader = [NSTextField wrappingLabelWithString:NSLocalizedString(@"Back up or restore every custom icon (Custom/System/URL, across every module) in one file. This does not affect which modules run or their other settings.", @"")];
+	NSTextField *subheader = [NSTextField wrappingLabelWithString:NSLocalizedString(@"Back up or restore every custom icon AND every on/off setting (which modules run, their notification toggles, Performance preset) in one file.", @"")];
 	subheader.font = [NSFont systemFontOfSize:11];
 	subheader.textColor = [NSColor tertiaryLabelColor];
 	subheader.translatesAutoresizingMaskIntoConstraints = NO;
 
-	NSButton *exportButton = [NSButton buttonWithTitle:NSLocalizedString(@"Export Icon Profile…", @"") target:self action:@selector(exportIconProfileClicked:)];
+	NSButton *exportButton = [NSButton buttonWithTitle:NSLocalizedString(@"Export Profile…", @"") target:self action:@selector(exportIconProfileClicked:)];
 	exportButton.translatesAutoresizingMaskIntoConstraints = NO;
 
-	NSButton *importButton = [NSButton buttonWithTitle:NSLocalizedString(@"Import Icon Profile…", @"") target:self action:@selector(importIconProfileClicked:)];
+	NSButton *importButton = [NSButton buttonWithTitle:NSLocalizedString(@"Import Profile…", @"") target:self action:@selector(importIconProfileClicked:)];
 	importButton.translatesAutoresizingMaskIntoConstraints = NO;
 
 	[generalView addSubview:divider];
@@ -718,9 +715,15 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 	]];
 }
 
-// Icons-only archive: a copy of HWGIconOverrideStore's IconOverrides folder, zipped with
-// `/usr/bin/ditto`. Deliberately does NOT touch NSUserDefaults/`defaults export|import` —
-// see the long comment on -buildIconProfileButtons for why.
+// Both the icon overrides folder AND the app's own NSUserDefaults domain (every checkbox,
+// preset, toggle) go into one archive: a copy of HWGIconOverrideStore's IconOverrides
+// folder alongside <bundle id>.plist (via `/usr/bin/defaults export/import`, so it
+// round-trips through cfprefsd exactly like the system's own prefs tooling would), zipped
+// together with `/usr/bin/ditto`.
+- (NSString *)iconProfileBundleID {
+	return [[NSBundle mainBundle] bundleIdentifier] ?: @"com.jensyleo.hg4mac";
+}
+
 - (BOOL)runProfileTool:(NSString *)launchPath arguments:(NSArray<NSString *> *)arguments error:(NSError **)error {
 	NSTask *task = [NSTask new];
 	task.launchPath = launchPath;
@@ -744,7 +747,7 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 
 - (void)exportIconProfileClicked:(id)sender {
 	NSSavePanel *panel = [NSSavePanel savePanel];
-	panel.title = NSLocalizedString(@"Export Icon Profile", @"");
+	panel.title = NSLocalizedString(@"Export Profile", @"");
 	panel.nameFieldStringValue = @"HG4MAC profile.zip";
 	panel.allowedFileTypes = @[@"zip"];
 
@@ -753,13 +756,18 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 
 		NSFileManager *fm = [NSFileManager defaultManager];
 		NSURL *tempRoot = [fm URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask appropriateForURL:panel.URL create:YES error:nil];
-		NSURL *profileDir = [tempRoot URLByAppendingPathComponent:@"HG4MAC Icons"];
+		NSURL *profileDir = [tempRoot URLByAppendingPathComponent:@"HG4MAC Profile"];
 		[fm createDirectoryAtURL:profileDir withIntermediateDirectories:YES attributes:nil error:nil];
 
 		NSError *error = nil;
 		BOOL ok = [fm copyItemAtURL:[[HWGIconOverrideStore sharedStore] overridesDirectoryURL]
 								toURL:[profileDir URLByAppendingPathComponent:@"IconOverrides"]
 								error:&error];
+		if (ok) {
+			ok = [self runProfileTool:@"/usr/bin/defaults"
+							 arguments:@[@"export", [self iconProfileBundleID], [profileDir URLByAppendingPathComponent:@"Defaults.plist"].path]
+								 error:&error];
+		}
 		if (ok) {
 			ok = [self runProfileTool:@"/usr/bin/ditto"
 							 arguments:@[@"-c", @"-k", @"--keepParent", profileDir.path, panel.URL.path]
@@ -768,7 +776,7 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 		[fm removeItemAtURL:tempRoot error:nil];
 
 		NSAlert *alert = [NSAlert new];
-		alert.messageText = ok ? NSLocalizedString(@"Icon profile exported", @"") : NSLocalizedString(@"Export failed", @"");
+		alert.messageText = ok ? NSLocalizedString(@"Profile exported", @"") : NSLocalizedString(@"Export failed", @"");
 		alert.informativeText = ok ? panel.URL.path : (error.localizedDescription ?: @"");
 		alert.alertStyle = ok ? NSAlertStyleInformational : NSAlertStyleWarning;
 		[alert beginSheetModalForWindow:self.window completionHandler:nil];
@@ -777,7 +785,7 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 
 - (void)importIconProfileClicked:(id)sender {
 	NSOpenPanel *panel = [NSOpenPanel openPanel];
-	panel.title = NSLocalizedString(@"Import Icon Profile", @"");
+	panel.title = NSLocalizedString(@"Import Profile", @"");
 	panel.allowsMultipleSelection = NO;
 	panel.canChooseDirectories = NO;
 	panel.canChooseFiles = YES;
@@ -787,8 +795,8 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 		if (result != NSModalResponseOK || !panel.URL) return;
 
 		NSAlert *confirm = [NSAlert new];
-		confirm.messageText = NSLocalizedString(@"Replace all custom icons?", @"");
-		confirm.informativeText = NSLocalizedString(@"This replaces every custom icon with what's in this profile. This can't be undone.", @"");
+		confirm.messageText = NSLocalizedString(@"Replace all custom icons and settings?", @"");
+		confirm.informativeText = NSLocalizedString(@"This replaces every custom icon AND every on/off setting (modules, notification toggles, Performance preset) with what's in this profile. This can't be undone.", @"");
 		[confirm addButtonWithTitle:NSLocalizedString(@"Import", @"")];
 		[confirm addButtonWithTitle:NSLocalizedString(@"Cancel", @"")];
 		[confirm beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse confirmResult) {
@@ -800,12 +808,17 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 			NSError *error = nil;
 			BOOL ok = [self runProfileTool:@"/usr/bin/ditto" arguments:@[@"-x", @"-k", panel.URL.path, tempRoot.path] error:&error];
 
-			NSURL *profileDir = [tempRoot URLByAppendingPathComponent:@"HG4MAC Icons"];
+			NSURL *profileDir = [tempRoot URLByAppendingPathComponent:@"HG4MAC Profile"];
 			if (ok && ![fm fileExistsAtPath:profileDir.path]) {
 				ok = NO;
-				error = [NSError errorWithDomain:@"AppDelegate" code:2 userInfo:@{NSLocalizedDescriptionKey: NSLocalizedString(@"That file doesn't look like an icon profile.", @"")}];
+				error = [NSError errorWithDomain:@"AppDelegate" code:2 userInfo:@{NSLocalizedDescriptionKey: NSLocalizedString(@"That file doesn't look like a profile.", @"")}];
 			}
 
+			if (ok) {
+				ok = [self runProfileTool:@"/usr/bin/defaults"
+								 arguments:@[@"import", [self iconProfileBundleID], [profileDir URLByAppendingPathComponent:@"Defaults.plist"].path]
+									 error:&error];
+			}
 			if (ok) {
 				NSURL *liveOverridesDir = [[HWGIconOverrideStore sharedStore] overridesDirectoryURL];
 				[fm removeItemAtURL:liveOverridesDir error:nil];
@@ -815,8 +828,8 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 			[fm removeItemAtURL:tempRoot error:nil];
 
 			NSAlert *resultAlert = [NSAlert new];
-			resultAlert.messageText = ok ? NSLocalizedString(@"Icon profile imported", @"") : NSLocalizedString(@"Import failed", @"");
-			resultAlert.informativeText = ok ? NSLocalizedString(@"Icons are already restored — reopen a module's Icons tab to see them.", @"") : (error.localizedDescription ?: @"");
+			resultAlert.messageText = ok ? NSLocalizedString(@"Profile imported", @"") : NSLocalizedString(@"Import failed", @"");
+			resultAlert.informativeText = ok ? NSLocalizedString(@"Quit and reopen HG4MAC for the restored module/notification settings to fully take effect. Icons are already restored — reopen a module's Icons tab to see them.", @"") : (error.localizedDescription ?: @"");
 			resultAlert.alertStyle = ok ? NSAlertStyleInformational : NSAlertStyleWarning;
 			[resultAlert beginSheetModalForWindow:self.window completionHandler:nil];
 		}];

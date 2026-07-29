@@ -386,12 +386,9 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	return NSLocalizedString(@"Thunderbolt Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [NSImage imageNamed:@"HWGPrefsThunderbolt"];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsThunderbolt-Module");
 }
 // F33: single generic handler for every per-field visibility checkbox. Each checkbox's
 // `identifier` carries the NSUserDefaults key it controls.
@@ -460,6 +457,7 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	CGFloat iconsWidth = tabs.bounds.size.width - 2 * iconsPad;
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"HWGPrefsThunderbolt-Module"],
 		@[@"eGPU", @"TB-TypeEGPU"],
 		@[@"Dock", @"TB-TypeDock"],
 		@[@"Disk", @"TB-TypeDisk"],

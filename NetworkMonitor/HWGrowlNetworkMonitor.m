@@ -1217,12 +1217,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	return NSLocalizedString(@"Network Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [NSImage imageNamed:@"HWGPrefsNetwork"];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsNetwork-Module");
 }
 -(IBAction)signalIntervalChanged:(NSSlider*)sender {
 	NSInteger secs = lround([sender doubleValue]);
@@ -1505,6 +1502,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"HWGPrefsNetwork-Module"],
 		@[@"Wi-Fi — No Signal", @"Network-Wifi-0"],
 		@[@"Wi-Fi — Weak", @"Network-Wifi-1"],
 		@[@"Wi-Fi — Fair", @"Network-Wifi-2"],

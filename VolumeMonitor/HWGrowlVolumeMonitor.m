@@ -1024,12 +1024,9 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	return NSLocalizedString(@"Volume Monitor", @"");
 }
 -(NSImage*)preferenceIcon {
-	static NSImage *_icon = nil;
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_icon = [NSImage imageNamed:@"HWGPrefsDrivesVolumes"];
-	});
-	return _icon;
+	// Resolved fresh every call (not cached) since this is user-customizable via the Icons
+	// tab's "Module Icon (Sidebar)" row — see the same note on AudioMonitor's -preferenceIcon.
+	return HWGResolveIconNamed(@"HWGPrefsDrivesVolumes-Module");
 }
 // F33: single generic handler for every per-field visibility checkbox — mirrors the other
 // monitors' `fieldToggleChanged:`. Each checkbox's `identifier` carries the NSUserDefaults
@@ -1158,6 +1155,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	CGFloat iconsWidth = tabs.bounds.size.width - 2 * pad;
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Module Icon (Sidebar)", @"HWGPrefsDrivesVolumes-Module"],
 		@[@"Optical", @"Device-Optical"],
 		@[@"NAS", @"Device-NAS"],
 		@[@"External Disk", @"Device-ExternalDisk"],
