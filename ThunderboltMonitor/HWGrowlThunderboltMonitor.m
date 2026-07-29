@@ -175,11 +175,15 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 // this hardware (internal Apple Silicon GPUs never enumerate as a post-launch add/remove).
 -(NSString *)tbIconNameForBaseClass:(uint8_t)baseClass {
 	switch (baseClass) {
-		case 0x01: return @"TB-TypeDisk";            // Storage Controller
-		case 0x02: return @"TB-TypeNetworkAdapter";  // Network Controller
-		case 0x03: return @"TB-TypeEGPU";            // Display Controller — see note above
-		case 0x04: return @"TB-TypeCapture";         // Multimedia Controller
-		case 0x06: return @"TB-TypeDock";            // Bridge / Dock
+		case 0x01: return @"TB-TypeDisk";             // Storage Controller
+		case 0x02: return @"TB-TypeNetworkAdapter";   // Network Controller
+		case 0x03: return @"TB-TypeEGPU";             // Display Controller — see note above
+		case 0x04: return @"TB-TypeCapture";          // Multimedia Controller
+		case 0x06: return @"TB-TypeDock";             // Bridge / Dock
+		case 0x07: return @"TB-TypeCommunication";    // Communication Controller
+		case 0x09: return @"TB-TypeInputDevice";      // Input Device
+		case 0x0C: return @"TB-TypeSerialBus";        // Serial Bus Controller
+		case 0x0D: return @"TB-TypeWirelessController"; // Wireless Controller
 		default:   return nil;
 	}
 }
@@ -463,6 +467,10 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		@[@"Disk", @"TB-TypeDisk"],
 		@[@"Network Adapter", @"TB-TypeNetworkAdapter"],
 		@[@"Capture", @"TB-TypeCapture"],
+		@[@"Communication Controller", @"TB-TypeCommunication"],
+		@[@"Input Device", @"TB-TypeInputDevice"],
+		@[@"Serial Bus Controller", @"TB-TypeSerialBus"],
+		@[@"Wireless Controller", @"TB-TypeWirelessController"],
 		@[@"Connected (generic)", @"Thunderbolt-On"],
 		@[@"Disconnected", @"Thunderbolt-Off"],
 	]];
