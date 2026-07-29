@@ -31,6 +31,8 @@
 
 // compile with ARC: -fobjc-arc
 #import "HWGrowlPrinterMonitor.h"
+#import "HWGIconOverrideStore.h"
+#import "HWGIconPickerView.h"
 #import <cups/cups.h>
 
 #define HWG_PRINTER_NOTIFY_KEY @"HWGPrinterNotifyConnectDisconnect"
@@ -314,6 +316,14 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 // the reference's composition. Black outlines throughout (as in the reference), which read
 // fine on both light and dark sidebar backgrounds.
 +(NSImage *)printerIconConnected:(BOOL)connected {
+	// This icon is drawn procedurally (no Assets.xcassets entry), so it can't be resolved
+	// via HWGResolveIconNamed's [NSImage imageNamed:] fallback — that would return nil for
+	// these names. Check the override store directly first instead, drawing the procedural
+	// glyph below only when the user hasn't supplied a custom image for this name.
+	NSString *defaultName = connected ? @"PrinterMonitor-Icon-Connected" : @"PrinterMonitor-Icon-Disconnected";
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:defaultName];
+	if (override) return override;
+
 	NSSize canvasSize = NSMakeSize(128, 128);
 	NSImage *image = [NSImage imageWithSize:canvasSize flipped:NO drawingHandler:^BOOL(NSRect rect) {
 		// Enlarged 23-jul-2026 per user request — scale the whole drawing up around the
@@ -444,7 +454,10 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 340)];
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -542,10 +555,50 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 		[errorCaption.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:8],
 		[errorCaption.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
 		[errorCaption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
-		[errorCaption.bottomAnchor constraintLessThanOrEqualToAnchor:v.bottomAnchor constant:-16],
 	]];
 
-	prefsView = v;
+	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
+	generalItem.label = NSLocalizedString(@"General", @"");
+	generalItem.view = v;
+	[tabs addTabViewItem:generalItem];
+
+	// --- Tab: Icons ---
+	CGFloat iconsPad = 16;
+	CGFloat iconsWidth = 560 - 2 * iconsPad;
+	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Connected", @"PrinterMonitor-Icon-Connected"],
+		@[@"Needs Attention", @"PrinterMonitor-Icon-Disconnected"],
+	]];
+	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
+	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
+	CGFloat iconPickerH = iconPicker.fittingSize.height;
+
+	NSTextField *iconsHeader = [NSTextField labelWithString:NSLocalizedString(@"Notification icons", @"")];
+	iconsHeader.font = [NSFont boldSystemFontOfSize:12];
+	iconsHeader.textColor = [NSColor secondaryLabelColor];
+	iconsHeader.translatesAutoresizingMaskIntoConstraints = YES;
+	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
+	CGFloat iconsGap = 12;
+
+	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + 2 * iconsPad)];
+	iconsHeader.frame = NSMakeRect(iconsPad, iconsPad, iconsWidth, iconsHeaderH);
+	[iconsContent addSubview:iconsHeader];
+	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
+	[iconsContent addSubview:iconPicker];
+
+	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
+	iconsScroll.hasVerticalScroller = YES;
+	iconsScroll.autohidesScrollers = YES;
+	iconsScroll.drawsBackground = NO;
+	iconsScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+	iconsScroll.documentView = iconsContent;
+
+	NSTabViewItem *iconsItem = [[NSTabViewItem alloc] initWithIdentifier:@"icons"];
+	iconsItem.label = NSLocalizedString(@"Icons", @"");
+	iconsItem.view = iconsScroll;
+	[tabs addTabViewItem:iconsItem];
+
+	prefsView = tabs;
 	return prefsView;
 }
 

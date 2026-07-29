@@ -5,6 +5,8 @@
 
 // compile with ARC: -fobjc-arc
 #import "HWGrowlDisplayMonitor.h"
+#import "HWGIconOverrideStore.h"
+#import "HWGIconPickerView.h"
 #import <CoreGraphics/CoreGraphics.h>
 #import <OSLog/OSLog.h>
 
@@ -501,7 +503,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 
 -(NSData *)iconDataForConnected:(BOOL)connected {
 	NSString *name = connected ? @"Display-On" : @"Display-Off";
-	return [[NSImage imageNamed:name] TIFFRepresentation];
+	return [HWGResolveIconNamed(name) TIFFRepresentation];
 }
 
 -(void)notifyConnected:(BOOL)connected displayID:(NSNumber *)displayID description:(NSString *)description {
@@ -562,7 +564,10 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 485)];
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 485)];
+	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 485)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -667,7 +672,48 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[warning.trailingAnchor constraintEqualToAnchor:v.trailingAnchor constant:-16],
 	]];
 
-	prefsView = v;
+	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
+	generalItem.label = NSLocalizedString(@"General", @"");
+	generalItem.view = v;
+	[tabs addTabViewItem:generalItem];
+
+	// --- Tab: Icons ---
+	CGFloat iconsPad = 16;
+	CGFloat iconsWidth = 560 - 2 * iconsPad;
+	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
+		@[@"Display Connected", @"Display-On"],
+		@[@"Display Disconnected", @"Display-Off"],
+	]];
+	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
+	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
+	CGFloat iconPickerH = iconPicker.fittingSize.height;
+
+	NSTextField *iconsHeader = [NSTextField labelWithString:NSLocalizedString(@"Notification icons", @"")];
+	iconsHeader.font = [NSFont boldSystemFontOfSize:12];
+	iconsHeader.textColor = [NSColor secondaryLabelColor];
+	iconsHeader.translatesAutoresizingMaskIntoConstraints = YES;
+	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
+	CGFloat iconsGap = 12;
+
+	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + 2 * iconsPad)];
+	iconsHeader.frame = NSMakeRect(iconsPad, iconsPad, iconsWidth, iconsHeaderH);
+	[iconsContent addSubview:iconsHeader];
+	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
+	[iconsContent addSubview:iconPicker];
+
+	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
+	iconsScroll.hasVerticalScroller = YES;
+	iconsScroll.autohidesScrollers = YES;
+	iconsScroll.drawsBackground = NO;
+	iconsScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+	iconsScroll.documentView = iconsContent;
+
+	NSTabViewItem *iconsItem = [[NSTabViewItem alloc] initWithIdentifier:@"icons"];
+	iconsItem.label = NSLocalizedString(@"Icons", @"");
+	iconsItem.view = iconsScroll;
+	[tabs addTabViewItem:iconsItem];
+
+	prefsView = tabs;
 	return prefsView;
 }
 
