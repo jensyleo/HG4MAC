@@ -31,6 +31,13 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	return stored ? [stored boolValue] : def;
 }
 
+// Per-device-type "Notify" toggle (Icons tab) — same mechanism as USB Monitor's.
+// Gates only the generic ThunderboltConnected notification on CONNECT (disconnect has
+// no reliable class-code, same limitation as the eGPU check above); the dedicated eGPU
+// notification (HWG_TB_NOTIFY_EGPU_KEY) is unaffected — it's a separate, additive toggle.
+#define HWG_TB_NOTIFY_KEY_PREFIX @"HWGThunderboltNotifyType_"
+#define HWG_TB_NOTIFY_DISCONNECT_KEY @"HWGThunderboltNotifyDisconnect"
+
 @interface HWGrowlThunderboltMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
@@ -188,6 +195,23 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	}
 }
 
+// Stable identifier per type, used to build the "Notify" defaults key — kept separate
+// from the icon-name lookup so notify-toggle identifiers survive an icon asset rename.
+-(NSString *)tbTypeIdentifierForBaseClass:(uint8_t)baseClass {
+	switch (baseClass) {
+		case 0x01: return @"Disk";
+		case 0x02: return @"NetworkAdapter";
+		case 0x03: return @"EGPU";
+		case 0x04: return @"Capture";
+		case 0x06: return @"Dock";
+		case 0x07: return @"Communication";
+		case 0x09: return @"InputDevice";
+		case 0x0C: return @"SerialBus";
+		case 0x0D: return @"WirelessController";
+		default:   return @"Other";
+	}
+}
+
 -(NSString *)tbExtraInfoForDevice:(io_object_t)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
@@ -295,8 +319,12 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 		if (notificationsArePrimed) {
 			NSString *deviceName = [self nameForThunderboltObject:thisObject];
 			if (deviceName) {
-				NSString *iconName = [self tbIconNameForBaseClass:[self pciBaseClassForDevice:thisObject]];
-				[self tbDeviceName:deviceName added:YES iconName:iconName extraInfo:[self tbExtraInfoForDevice:thisObject]];
+				uint8_t baseClass = [self pciBaseClassForDevice:thisObject];
+				NSString *iconName = [self tbIconNameForBaseClass:baseClass];
+				NSString *notifyKey = [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:[self tbTypeIdentifierForBaseClass:baseClass]];
+				if (HWGTBBoolForKey(notifyKey, YES)) {
+					[self tbDeviceName:deviceName added:YES iconName:iconName extraInfo:[self tbExtraInfoForDevice:thisObject]];
+				}
 				[self tbNotifyEGPUIfNeeded:thisObject deviceName:deviceName added:YES];
 			}
 		}
@@ -319,7 +347,9 @@ static void tbDeviceAdded(void *refCon, io_iterator_t iterator) {
 			// applies to the eGPU class-code check below — it will often silently miss
 			// eGPU DISCONNECT (but not connect), documented in README.
 			if (deviceName) {
-				[self tbDeviceName:deviceName added:NO iconName:nil extraInfo:nil];
+				if (HWGTBBoolForKey(HWG_TB_NOTIFY_DISCONNECT_KEY, YES)) {
+					[self tbDeviceName:deviceName added:NO iconName:nil extraInfo:nil];
+				}
 				[self tbNotifyEGPUIfNeeded:thisObject deviceName:deviceName added:NO];
 			}
 		}
@@ -462,17 +492,17 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"HWGPrefsThunderbolt-Module"],
-		@[@"eGPU", @"TB-TypeEGPU"],
-		@[@"Dock", @"TB-TypeDock"],
-		@[@"Disk", @"TB-TypeDisk"],
-		@[@"Network Adapter", @"TB-TypeNetworkAdapter"],
-		@[@"Capture", @"TB-TypeCapture"],
-		@[@"Communication Controller", @"TB-TypeCommunication"],
-		@[@"Input Device", @"TB-TypeInputDevice"],
-		@[@"Serial Bus Controller", @"TB-TypeSerialBus"],
-		@[@"Wireless Controller", @"TB-TypeWirelessController"],
-		@[@"Connected (generic)", @"Thunderbolt-On"],
-		@[@"Disconnected", @"Thunderbolt-Off"],
+		@[@"eGPU", @"TB-TypeEGPU", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"EGPU"]],
+		@[@"Dock", @"TB-TypeDock", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Dock"]],
+		@[@"Disk", @"TB-TypeDisk", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Disk"]],
+		@[@"Network Adapter", @"TB-TypeNetworkAdapter", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"NetworkAdapter"]],
+		@[@"Capture", @"TB-TypeCapture", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Capture"]],
+		@[@"Communication Controller", @"TB-TypeCommunication", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Communication"]],
+		@[@"Input Device", @"TB-TypeInputDevice", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"InputDevice"]],
+		@[@"Serial Bus Controller", @"TB-TypeSerialBus", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"SerialBus"]],
+		@[@"Wireless Controller", @"TB-TypeWirelessController", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"WirelessController"]],
+		@[@"Connected (generic)", @"Thunderbolt-On", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
+		@[@"Disconnected", @"Thunderbolt-Off", HWG_TB_NOTIFY_DISCONNECT_KEY],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
