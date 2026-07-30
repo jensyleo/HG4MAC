@@ -353,10 +353,12 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	if (wantsResolution && (oldW != newW || oldH != newH)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Resolution:\t%zu×%zu → %zu×%zu", @""), oldW, oldH, newW, newH]];
 	}
-	if (wantsRefresh && oldHz != newHz) {
+	// Compare at the precision actually shown (nearest whole Hz/degree) rather than the raw
+	// double — what the user reads is what should decide whether this counts as "changed".
+	if (wantsRefresh && llround(oldHz) != llround(newHz)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Refresh rate:\t%.0f Hz → %.0f Hz", @""), oldHz, newHz]];
 	}
-	if (wantsRotation && oldRot != newRot) {
+	if (wantsRotation && llround(oldRot) != llround(newRot)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Rotation:\t%.0f° → %.0f°", @""), oldRot, newRot]];
 	}
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;

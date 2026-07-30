@@ -880,9 +880,10 @@ typedef enum {
 	else if ([imageName isEqualToString:@"Network-Interface-Off"]) rowKey = HWG_NET_NOTIFY_OTHER_OFF_KEY;
 	if (rowKey && ![self boolForKey:rowKey default:YES]) noteName = nil;
 
-	NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
-
 	if(noteName){
+		// imageName is only nil when neither transition branch above ran, i.e. exactly the
+		// case where noteName is also still nil — so it's always set here.
+		NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
 		[delegate notifyWithName:noteName
 								 title:noteTitle
 						 description:noteDescription
