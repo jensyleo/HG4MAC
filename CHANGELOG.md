@@ -4,6 +4,16 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.9.5 — 2026-08-05
+
+### Fixed: 5 plugin bundles never received the app's version number
+- Camera, Audio, Printer, Scanner, and Gamepad Monitor's Xcode build configurations were
+  never linked to the shared xcconfig chain that defines the version number, so their
+  bundles' own `CFBundleShortVersionString`/`CFBundleVersion` silently stayed hardcoded at
+  "1.0"/"1" through every release regardless of the app's actual version. Also the direct
+  cause of v1.9.4's own version string drifting at 1.8.0 since v1.9.0 — three prior releases
+  (v1.9.1-v1.9.3) shipped without noticing the visible version hadn't moved.
+
 ## v1.9.4 — 2026-08-05
 
 ### Fixed: Camera/Microphone "in use" notifications getting silently suppressed
@@ -45,14 +55,6 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 - Full audit of every monitor's IOKit/CoreAudio/CoreMediaIO listeners, timers, and caches
   found no other leaks — all other listener registrations, timers, and caches were already
   correctly paired/pruned.
-
-### Fixed: 5 plugin bundles never received the app's version number
-- Camera, Audio, Printer, Scanner, and Gamepad Monitor's Xcode build configurations were
-  never linked to the shared xcconfig chain that defines the version number, so their
-  bundles' own `CFBundleShortVersionString`/`CFBundleVersion` silently stayed hardcoded at
-  "1.0"/"1" through every release regardless of the app's actual version. Also the direct
-  cause of this release's own version string drifting at 1.8.0 since v1.9.0 — three prior
-  releases (v1.9.1-v1.9.3) shipped without noticing the visible version hadn't moved.
 
 ## v1.9.3 — 2026-08-05
 
