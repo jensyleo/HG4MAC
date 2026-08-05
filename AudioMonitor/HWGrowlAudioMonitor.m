@@ -300,7 +300,7 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	// stroke-drawn vector built at runtime.
 	BOOL connected = ![symbolName isEqualToString:@"speaker.slash.fill"];
 	NSString *imageName = connected ? @"AudioMonitor-Icon" : @"AudioMonitor-Icon-Off";
-	return [HWGResolveIconNamed(imageName) TIFFRepresentation];
+	return HWGResolveIconDataNamed(imageName);
 }
 
 #pragma mark Device connect/disconnect
@@ -479,13 +479,18 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		NSMutableSet<NSNumber *> *stoppedUsing = [self.runningMicDeviceIDs mutableCopy];
 		[stoppedUsing minusSet:currentlyRunning];
 
+		// BUG FIX (05-ago-2026): same systemic bug as Camera Monitor's in-use notifications
+		// (see its doc comment for the full mechanism) — Started/Stopped sharing ONE
+		// identifierString per device made UNUserNotificationCenter silently swap the second
+		// notification into the still-displayed first one instead of showing a fresh banner.
+		// Appending the state gives each transition its own request identifier.
 		for (NSNumber *deviceID in startedUsing) {
 			NSString *name = self.deviceNames[deviceID] ?: [self nameForDeviceID:[deviceID unsignedIntValue]] ?: NSLocalizedString(@"Unknown Device", @"");
 			[delegate notifyWithName:@"AudioMicInUse"
 									 title:NSLocalizedString(@"Microphone Started Being Used", @"")
 							 description:name
 									  icon:[self iconDataForMicInUse:YES]
-					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioMicInUse-%@", deviceID]
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioMicInUse-%@-started", deviceID]
 						  contextString:nil
 									plugin:self];
 		}
@@ -495,7 +500,7 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 									 title:NSLocalizedString(@"Microphone Stopped Being Used", @"")
 							 description:name
 									  icon:[self iconDataForMicInUse:NO]
-					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioMicInUse-%@", deviceID]
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioMicInUse-%@-stopped", deviceID]
 						  contextString:nil
 									plugin:self];
 		}
@@ -511,7 +516,7 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 // a red slash for "idle" — same visual language as the app's other muted/off states).
 -(NSData *)iconDataForMicInUse:(BOOL)inUse {
 	NSString *imageName = inUse ? @"AudioMonitor-Icon-MicInUse" : @"AudioMonitor-Icon-MicIdle";
-	return [HWGResolveIconNamed(imageName) TIFFRepresentation];
+	return HWGResolveIconDataNamed(imageName);
 }
 
 #pragma mark Default device changes
