@@ -4,6 +4,17 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.9.6 — 2026-08-05
+
+### Added: USB Mass Storage device icon
+- USB Monitor's device-type classification already labeled Mass Storage devices (flash
+  drives, external HDDs, USB card readers) correctly in text, but had no icon for the class —
+  it fell back to the generic connected icon. Now uses the same drive icon Volume Monitor
+  already shows for these devices.
+- Full audit of connect-time icon coverage across Bluetooth/Thunderbolt/USB's device-type
+  classifiers: Thunderbolt and Bluetooth found to already have complete, correct coverage for
+  every class with an unambiguous real-world meaning — no further gaps.
+
 ## v1.9.5 — 2026-08-05
 
 ### Fixed: 5 plugin bundles never received the app's version number
