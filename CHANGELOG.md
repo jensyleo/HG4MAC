@@ -4,6 +4,18 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.3 — 2026-08-06
+
+### Improved: camera "in use" notification responsiveness
+- v1.10.2's debounce for the camera "Started/Stopped Being Used" notifications (to prevent
+  CoreMediaIO flicker artifacts during video call setup) applied a blanket 1-second delay to
+  all notifications, making even the "Started" signal feel laggy — confirmed by user feedback.
+  The flicker only happens on "Stopped" (the camera briefly reports "off" then "on" again),
+  so redesigned the debounce to be asymmetric: "Started" fires instantly (no delay), while
+  each "Stopped" gets its own 1-second settle check that cancels if the camera shows running
+  again before it fires. This restores pre-fix responsiveness for the privacy-relevant
+  "Started" signal while still suppressing spurious "Stopped" from the CMIO burst.
+
 ## v1.10.2 — 2026-08-06
 
 ### Fixed: Wi-Fi not announced at launch
