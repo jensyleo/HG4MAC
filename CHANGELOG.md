@@ -4,6 +4,24 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.1 — 2026-08-06
+
+### Internal: dead code removal (no functional change)
+- Removed `Growl.framework` and `GNTPClientService` as build dependencies of the app
+  target — both compiled on every build but were never embedded or linked into the app
+  (empty "Copy Frameworks" phase, no XPC copy phase, zero runtime references). The app's
+  actual notification delivery has used its own `GrowlApplicationBridge` copy since
+  earlier in this fork.
+- Removed the entire `Growl.xcodeproj` cross-project reference, along with `Framework/`,
+  `XPC/`, `Plugins/`, `GrowlLauncher/`, and `Unit tests/` — none of it was reachable from
+  the app's build graph.
+- Pruned `Core/Source/` and `Common/Source/` down to only the handful of legacy files the
+  app actually compiles or imports (traced by following the real `#import` chain), removing
+  168 unused files left over from the original Growl preferences UI, ticket database, and
+  GNTP forwarder/subscription code.
+- Verified with a full clean build after each step; the resulting `.app` bundle is
+  byte-identical to the pre-cleanup build.
+
 ## v1.10.0 — 2026-08-05
 
 ### Added: scan job start/finish notifications (experimental)
