@@ -480,17 +480,35 @@ typedef enum {
 
 -(void)fireOnLaunchNotes {
 	[self interateInterfaces];
-	[self fireCurrentWiFiState];
+	// BUG FIX (06-ago-2026): CWWiFiClient's XPC connection to the system WiFi daemon isn't
+	// always warm yet this early in process launch — querying it synchronously right here
+	// (same run-loop tick as -init) can read the interface as "not associated" even when
+	// WiFi is already connected. Since no CoreWLAN change event ever fires for a connection
+	// that was already up before launch, that false read meant WiFi silently never got
+	// announced at all for the rest of the session. Give CoreWLAN a moment to settle, with
+	// one retry in case the first attempt is still too early.
+	[self fireCurrentWiFiStateRetrying:YES];
 }
 
 // At launch (only called when "Show existing" is enabled), announce the WiFi we're
 // ALREADY connected to. CoreWLAN only delivers CHANGE events, so an already-up
 // connection would otherwise never be reported — unlike volumes / IP, which do
 // report at launch. startWiFiMonitoring only records lastReportedSSID silently.
--(void)fireCurrentWiFiState {
+-(void)fireCurrentWiFiStateRetrying:(BOOL)shouldRetry {
+	__weak HWGrowlNetworkMonitor *blockSelf = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+	               dispatch_get_main_queue(), ^{
+		BOOL reported = [blockSelf fireCurrentWiFiState];
+		if (!reported && shouldRetry) {
+			[blockSelf fireCurrentWiFiStateRetrying:NO];
+		}
+	});
+}
+
+-(BOOL)fireCurrentWiFiState {
 	CWInterface *iface = [self.wifiClient interface];
 	if (!(iface && [iface powerOn] && [iface interfaceMode] == kCWInterfaceModeStation))
-		return;
+		return NO;
 
 	NSString *ssid        = [iface ssid];   // nil if Location permission denied
 	NSString *displayName = ssid ?: NSLocalizedString(@"Wi-Fi", @"");
@@ -507,6 +525,7 @@ typedef enum {
 	}
 	self.lastReportedSSID = displayName;
 	[self airportConnected:displayName bssid:bssidData];
+	return YES;
 }
 
 -(void)setupDynamicStore

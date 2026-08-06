@@ -4,6 +4,21 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.2 — 2026-08-06
+
+### Fixed: Wi-Fi not announced at launch
+- Network Monitor's "already connected" Wi-Fi announcement at launch was querying
+  `CWWiFiClient` synchronously in the same run-loop tick as app startup. CoreWLAN's XPC
+  connection to the system Wi-Fi daemon isn't always warm that early, so the read could
+  come back as "not associated" even when Wi-Fi was already connected — and since no
+  CoreWLAN change event ever fires for a connection that was already up before launch,
+  that false read meant Wi-Fi silently never got announced for the rest of the session.
+  Now delayed by 1.5s with one retry, matching the wait-and-recheck pattern already used
+  elsewhere in this file for late-arriving IPv4 addresses.
+- Audited the other two modules that also announce state at launch (Power Monitor,
+  Volume Monitor): both read from sources with no comparable daemon warm-up (IOKit power
+  sources, NSFileManager's mounted-volume list) and aren't affected by this class of bug.
+
 ## v1.10.1 — 2026-08-06
 
 ### Internal: dead code removal (no functional change)
