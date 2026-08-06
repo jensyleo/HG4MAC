@@ -4,6 +4,19 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.5 — 2026-08-06
+
+### Fixed: IP address not announced at launch/restart
+- Same class of bug as v1.10.2's Wi-Fi fix: `getifaddrs()` is an instant, synchronous kernel
+  read (not a daemon needing warm-up), but on an actual macOS restart/login this can run
+  before DHCP finishes, so the very first read at launch can genuinely see zero addresses.
+  Network Monitor now schedules a second `-updateIP` call 1.5s after the first (same delay as
+  the Wi-Fi fix) — safe to always run since `-updateIP`'s existing dedup only re-announces if
+  the interface state actually changed between the two reads.
+- Audited the other two modules that also announce state at launch (Power Monitor, Volume
+  Monitor): both still read from sources with no comparable daemon/DHCP warm-up and aren't
+  affected by this class of bug.
+
 ## v1.10.4 — 2026-08-06
 
 ### Added: first automated test target (HardwareGrowlerTests)

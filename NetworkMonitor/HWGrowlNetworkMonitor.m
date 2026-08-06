@@ -481,6 +481,23 @@ typedef enum {
 
 -(void)fireOnLaunchNotes {
 	[self interateInterfaces];
+	// BUG FIX (06-ago-2026): getifaddrs() itself is an instant synchronous kernel read, not a
+	// daemon that needs warming up — but on an actual Mac restart/login (as opposed to just
+	// relaunching the app while already connected), this runs early enough that DHCP may not
+	// have finished yet, so the very first read here can genuinely see zero addresses even
+	// though a real IP is about to be assigned moments later. Unlike WiFi (where CoreWLAN
+	// only delivers CHANGE events, so a pre-existing connection is otherwise never announced),
+	// a later real IPv4/IPv6 change WOULD normally self-correct via scCallback — but only if
+	// that transition is still ahead of us; if DHCP already raced ahead of this exact read on
+	// a normal (non-boot) relaunch, there's nothing left to self-correct from. -updateIP's own
+	// dedup (repeats are silently skipped when nothing changed) makes a delayed extra call
+	// safe to always schedule — it only produces a second notification if the interface state
+	// legitimately changed between the two calls. Same 1.5s wait as the WiFi fix above.
+	__weak HWGrowlNetworkMonitor *weakSelf = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+	               dispatch_get_main_queue(), ^{
+		[weakSelf updateIP];
+	});
 	// BUG FIX (06-ago-2026): CWWiFiClient's XPC connection to the system WiFi daemon isn't
 	// always warm yet this early in process launch — querying it synchronously right here
 	// (same run-loop tick as -init) can read the interface as "not associated" even when
