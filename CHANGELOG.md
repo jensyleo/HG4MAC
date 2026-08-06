@@ -4,6 +4,33 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.4 — 2026-08-06
+
+### Added: first automated test target (HardwareGrowlerTests)
+- HG4MAC had zero automated tests until now — everything was verified live (build, install,
+  launch, screenshot). Added a standalone XCTest unit test target with 12 tests covering the
+  logic that's safely testable without hardware or destructive side effects:
+  - `HWGWifiBarsForRSSI` (Wi-Fi signal → bar-level mapping, all 5 tiers + boundaries) — this
+    pure function was extracted out of Network Monitor into its own file
+    (`NetworkMonitor/HWGWifiSignal.h/.m`) specifically so it could be tested without pulling
+    in CoreWLAN/CoreLocation. Network Monitor now calls this instead of its old private method
+    (no behavior change).
+  - `HWGIconOverrideStore` round-trip (set/has/remove/resolve), using a fixture name that
+    doesn't correspond to any real icon and is cleaned up in setUp/tearDown so the test can
+    never leave a stray override in the user's real Application Support data.
+  - `HWGNotificationHistoryStore`, read-only only — there's no per-entry removal API (only
+    `pruneOlderThanDays:`/`clearAll`, both of which operate on the user's real history), so
+    testing `addEntry` would either pollute or risk destroying real data. Left as a known gap
+    until the store gains a safe way to remove a single test entry.
+  - Deliberately NOT covered yet: the dedup/bounce-detection logic in
+    `HWGrowlPluginController`, and the per-monitor debounce logic (camera/mic in-use) — both
+    are embedded inline in larger methods rather than separable pure functions; extracting them
+    for testability is future work, not part of this initial pass.
+- Runs standalone (no host application) via `xcodebuild test -scheme HardwareGrowler
+  -only-testing:HardwareGrowlerTests` — avoids this project's ad-hoc-signing friction with
+  Xcode's host-app test injection, and means running tests never launches a second real
+  instance of the app alongside one the user already has running.
+
 ## v1.10.3 — 2026-08-06
 
 ### Improved: camera "in use" notification responsiveness

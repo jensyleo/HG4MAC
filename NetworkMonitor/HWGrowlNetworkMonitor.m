@@ -8,6 +8,7 @@
 
 // compile with ARC: -fobjc-arc
 #import "HWGrowlNetworkMonitor.h"
+#import "HWGWifiSignal.h"
 #import "GrowlNetworkUtilities.h"
 #import "HWGIconOverrideStore.h"
 #import "HWGIconPickerView.h"
@@ -349,7 +350,7 @@ typedef enum {
 		// real change takes two full poll intervals (one just to baseline, one to
 		// compare) instead of one.
 		NSInteger rssiNow = [iface rssiValue];
-		self.lastReportedWifiBars = (rssiNow != 0) ? [self wifiBarsForRSSI:rssiNow] : -1;
+		self.lastReportedWifiBars = (rssiNow != 0) ? HWGWifiBarsForRSSI(rssiNow) : -1;
 		NSData *bssidData = nil;
 		if (bssidStr) {
 			unsigned int b[6] = {0};
@@ -434,7 +435,7 @@ typedef enum {
 	NSInteger rssi = [iface rssiValue];
 	if (rssi == 0) return;
 
-	NSInteger bars = [self wifiBarsForRSSI:rssi];
+	NSInteger bars = HWGWifiBarsForRSSI(rssi);
 
 	if (lastReportedWifiBars < 0) {   // first sample after connect → baseline, don't notify
 		self.lastReportedWifiBars = bars;
@@ -719,22 +720,11 @@ typedef enum {
 							plugin:self];
 }
 
-// Map a Wi-Fi RSSI (dBm — negative, closer to 0 is stronger) to a bar level 0–4.
-// rssi == 0 means "unavailable" → level 0 (the all-gray "no signal" icon).
--(NSInteger)wifiBarsForRSSI:(NSInteger)rssi {
-	if (rssi == 0)        return 0;   // unavailable → gray "no signal" (Network-Wifi-0)
-	else if (rssi >= -55) return 4;
-	else if (rssi >= -65) return 3;
-	else if (rssi >= -73) return 2;
-	else if (rssi >= -80) return 1;
-	else                  return 0;
-}
-
 // Icon name for the current signal. rssiValue does NOT require Location permission.
 -(NSString*)wifiIconNameForCurrentSignal {
 	CWInterface *iface = [self.wifiClient interface];
 	NSInteger rssi = iface ? [iface rssiValue] : 0;
-	return [NSString stringWithFormat:@"Network-Wifi-%ld", (long)[self wifiBarsForRSSI:rssi]];
+	return [NSString stringWithFormat:@"Network-Wifi-%ld", (long)HWGWifiBarsForRSSI(rssi)];
 }
 
 // F33: generic reader for a per-field visibility toggle, defaulting to `def` when unset.
