@@ -4,6 +4,32 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.13.0 — 2026-08-11
+
+### Changed: unified the generic-device "connected" checkmark badge across all modules
+- Bluetooth Monitor's generic (unrecognized-type) "Connected" icon has always shown a green
+  circular checkmark badge overlaid on the base icon. Auditing every other module's own
+  generic/single "Connected" icon found the same convention only partially applied: USB Monitor,
+  Audio Monitor, Camera Monitor, Gamepad Monitor, and Display Monitor had no checkmark badge at
+  all, while Printer Monitor had one but drawn as an inconsistent rounded SQUARE, and Thunderbolt
+  Monitor had one at a slightly different size/position — no two modules matched.
+- Extracted the exact green circle + white checkmark pixels from `Bluetooth-On.png` (isolated via
+  color-based masking so no Bluetooth-icon-blue leaked into the cutout) and applied that identical
+  badge, at the same position, to `USB-On`, `AudioMonitor-Icon`, `CameraMonitor-Icon`,
+  `GamepadMonitor-Icon`, and `Display-On` (added, previously missing), and re-drew it onto
+  `PrinterMonitor-Icon-Connected` and `Thunderbolt-On` (replacing their inconsistent badges) —
+  7 assets updated, all now pixel-identical to Bluetooth's reference badge.
+- Verified pixel-loss-free: confirmed via a before/after diff that Thunderbolt's lightning bolt
+  artwork and Printer's outline weren't damaged when their old badges were removed (only the old
+  badge's own green/white pixels were erased, not a blanket rectangle, after an initial attempt
+  that DID clip 2754 bolt pixels was caught and corrected before this build).
+- Deliberately out of scope: type-SPECIFIC icons (e.g. `BT-TypeMouse`, `USB-TypeScanner`) never
+  had a checkmark and still don't — the badge marks "generic, type unidentified", not "connected"
+  in general. Volume Monitor's own generic-mount fallback uses the system's own default disk icon
+  (`NSWorkspace`), a different mechanism entirely — left untouched.
+- Verified: clean build, 12/12 tests, all 13 plugins present, app launches and runs without
+  crashing.
+
 ## v1.12.0 — 2026-08-11
 
 ### Added: launch notifications now group by module instead of interleaving
