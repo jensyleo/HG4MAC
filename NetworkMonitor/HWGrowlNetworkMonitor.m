@@ -167,6 +167,23 @@ typedef enum {
 // often unreadable once the interface is gone).
 @property (nonatomic, strong) NSMutableDictionary *interfaceIsEthernet;
 
+// Caches -isWiredEthernetInterface:'s result per BSD name (bsdName -> @YES/@NO). BUG FIX
+// (11-ago-2026): unplugging a USB-Ethernet adapter (or the hub/dock it's inside) tears the
+// interface out of SCNetworkInterfaceCopyAll() almost immediately — often before, or at the
+// same moment as, its "Link" key changes — so a live re-query at disconnect time silently
+// fails to classify it as Ethernet, -handleLinkKeyChanged: bails out early, and the real
+// disconnect is never processed (networkInterfaceStates keeps stale "Active: 1"). That stale
+// state then surfaces on the NEXT reconnect: the first link read (while the adapter is still
+// negotiating) reports inactive, compared against the stale "was active" baseline fires a
+// bogus "Ethernet Disconnected", followed shortly by the real "Ethernet Connected" once the
+// link actually comes up — a disconnect that's silently dropped, then a phantom
+// disconnect+reconnect pair on the next plug-in, exactly as reported. Live classification is
+// still tried FIRST every time (so a genuinely different device later reusing the same BSD
+// name is reclassified correctly); this cache is only consulted as a fallback when the
+// interface has already vanished from the live registry, so a real disconnect is still
+// recognized as the SAME (now-gone) Ethernet interface it always was.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *ethernetClassificationCache;
+
 // CoreWLAN: replaces the deprecated SCDynamicStore AirPort keys for WiFi events.
 // weak: the framework owns the +sharedWiFiClient singleton; we don't.
 @property (nonatomic, weak) CWWiFiClient *wifiClient;
@@ -203,6 +220,7 @@ typedef enum {
 @synthesize previousIPv4ByInterface;
 @synthesize previousIPv6ByInterface;
 @synthesize interfaceIsEthernet;
+@synthesize ethernetClassificationCache;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
 @synthesize lastReportedWifiBars;
@@ -220,6 +238,7 @@ typedef enum {
 		self.previousIPv6ByInterface = [NSMutableDictionary dictionary];
 		self.networkInterfaceStates = [NSMutableDictionary dictionary];
 		self.interfaceIsEthernet = [NSMutableDictionary dictionary];
+		self.ethernetClassificationCache = [NSMutableDictionary dictionary];
 		self.lastReportedWifiBars = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
 
@@ -650,6 +669,7 @@ typedef enum {
 -(BOOL)isWiredEthernetInterface:(NSString *)bsdName {
 	if ([self boolForKey:HWG_ETH_SHOW_ALL_KEY default:NO]) return YES;
 	BOOL isEthernet = NO;
+	BOOL found = NO;
 	CFArrayRef ifaces = SCNetworkInterfaceCopyAll();
 	if (ifaces) {
 		for (CFIndex i = 0; i < CFArrayGetCount(ifaces); i++) {
@@ -658,12 +678,23 @@ typedef enum {
 			if (bsd && [bsd isEqualToString:bsdName]) {
 				NSString *type = (__bridge NSString *)SCNetworkInterfaceGetInterfaceType(iface);
 				isEthernet = [type isEqualToString:(__bridge NSString *)kSCNetworkInterfaceTypeEthernet];
+				found = YES;
 				break;
 			}
 		}
 		CFRelease(ifaces);
 	}
-	return isEthernet;
+	// See ethernetClassificationCache's declaration: a live miss (interface already torn down,
+	// e.g. its USB hub was just unplugged) falls back to the last known classification instead
+	// of silently defaulting to "not Ethernet" — which used to make the real disconnect event
+	// get dropped entirely. A live hit always wins and refreshes the cache, so a different
+	// device later reusing the same BSD name is still classified correctly.
+	if (found) {
+		self.ethernetClassificationCache[bsdName] = @(isEthernet);
+		return isEthernet;
+	}
+	NSNumber *cached = self.ethernetClassificationCache[bsdName];
+	return cached ? [cached boolValue] : NO;
 }
 
 // At launch: read the CURRENT raw link state of every WIRED ETHERNET interface (by listing

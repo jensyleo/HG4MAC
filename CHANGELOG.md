@@ -4,6 +4,34 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.14.0 — 2026-08-11
+
+### Fixed: unplugging a USB-Ethernet adapter's hub never announced the disconnect
+- Reported by the user: unplugging a USB hub with an Ethernet cable connected reported nothing
+  at all, but plugging it back in reported a spurious "Ethernet Disconnected" followed shortly
+  by "Ethernet Connected" — IP address updates were detected correctly the whole time.
+- Root cause found by code inspection: `-isWiredEthernetInterface:` classifies a BSD name as
+  real Ethernet by querying `SCNetworkInterfaceCopyAll()` live. Unplugging the hub tears the
+  adapter out of that registry almost immediately — often before, or at the same instant as,
+  its "Link" key changes — so the live re-query at disconnect time fails to classify it,
+  `-handleLinkKeyChanged:` bails out early, and the real disconnect is silently dropped.
+  `networkInterfaceStates` is left holding a stale "Active: 1" for that interface. On the NEXT
+  reconnect, the first link read (while the adapter is still negotiating) reports inactive,
+  which — compared against that stale "was active" baseline — fires a bogus "Ethernet
+  Disconnected", followed shortly by the real "Ethernet Connected" once the link actually comes
+  up: a real disconnect silently dropped, then a phantom disconnect+reconnect pair on the very
+  next plug-in, exactly matching what was reported. IP updates were unaffected since they're
+  driven by a completely separate mechanism (`getifaddrs()`, not this classification gate).
+- Fixed by adding `ethernetClassificationCache`, remembering each BSD name's last successful
+  live classification. A live lookup is still tried first every time (so a genuinely different
+  device later reusing the same BSD name is still classified correctly); the cache is only
+  consulted as a fallback once the interface has already vanished from the live registry, so a
+  real disconnect is still recognized as the same (now-gone) Ethernet interface it always was.
+- Verified live by the user with a real USB-Ethernet hub: disconnect now correctly fires
+  "Network Link Down" with nothing else, and reconnect fires only "Network Link Up" — no more
+  dropped disconnect, no more phantom disconnect+reconnect pair. Clean build, 12/12 tests, app
+  runs without crashing.
+
 ## v1.13.0 — 2026-08-11
 
 ### Changed: unified the generic-device "connected" checkmark badge across all modules
