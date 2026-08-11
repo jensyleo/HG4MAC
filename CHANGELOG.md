@@ -4,6 +4,42 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.6 — 2026-08-10
+
+### Fixed: app crashing on launch on macOS Tahoe 26.x, breaking Network Monitor's launch announcements
+- Confirmed (with a from-scratch minimal test app, zero HardwareGrowler code) that on the
+  current macOS Tahoe 26.x, an ad-hoc-signed app calling Bluetooth's connect-notification API
+  (`IOBluetoothDevice registerForConnectNotifications:` — Bluetooth Monitor's own connect/
+  disconnect detection) gets the whole process aborted by the OS with a TCC privacy-violation
+  crash, falsely claiming `NSBluetoothAlwaysUsageDescription` is missing from Info.plist even
+  though it's present. Confirmed NOT present on macOS Ventura 13.7.8. Since this ran early in
+  launch (`HWGrowlPluginController`'s `postRegistrationInit`), the process died before Network
+  Monitor's own launch announcements (Wi-Fi/IP) ever got a chance to run.
+- Bluetooth connect/disconnect detection is disabled for now (Bluetooth Monitor's other
+  features are unaffected) until this can be re-enabled with a stable, Apple-issued signing
+  identity — ad-hoc signing appears to be the actual trigger, not anything specific to this
+  codebase (verified against the unmodified v1.10.0 codebase and against the HG4MAC-INTEL
+  fork, both of which hit the exact same crash under the same conditions).
+- Also reordered `HWGrowlPluginController`'s init so launch announcements (Wi-Fi/IP) run
+  BEFORE Bluetooth's registration, so they're never at the mercy of what runs after them again
+  in the future.
+- Fixed a real display-order bug found along the way: Wi-Fi's launch announcement always
+  waits ~1.5s (CoreWLAN warm-up), but IP's used to fire synchronously and instantly — so
+  "IP Addresses Updated" could appear before "AirPort Connected", backwards from a sensible
+  reading order. IP's initial check now goes through the same delayed-poll path, so Wi-Fi's
+  announcement reliably lands first.
+- Fixed a banner-eviction bug: the on-launch notification flood (volume mounts, USB, etc.)
+  could evict a just-revealed banner (confirmed via diagnostic logging: Network Monitor's "IP
+  Addresses Updated") within a fraction of a second of it appearing — technically shown
+  (`panel.isVisible == YES`) but never actually visible to a human. Eviction now requires a
+  banner to have been visible for at least ~4.5s (near its full 5s lifetime) before it's a
+  candidate — the stack can temporarily overflow during a big flood instead of cutting a
+  fresh banner short.
+- Removed a redundant `CBCentralManager` in `AppDelegate.requestAllPermissions` that only
+  existed to trigger the Bluetooth permission dialog — Bluetooth Monitor's own registration
+  already does this on its own, and having both running was part of what made the crash above
+  more reliably reproducible.
+
 ## v1.10.3 — 2026-08-06
 
 ### Improved: camera "in use" notification responsiveness

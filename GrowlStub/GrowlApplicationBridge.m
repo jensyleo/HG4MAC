@@ -42,6 +42,18 @@ static NSMutableArray *_activeBanners = nil;
 // eviction logic in `showBannerWindow`).
 static NSMutableArray *_activeBannerDismissBlocks = nil;
 
+// Parallel to _activeBanners (same indices) — each entry is the NSDate the banner was
+// actually revealed. BUG FIX (06-ago-2026): eviction used to always force-close whichever
+// banner was oldest by INSERTION order regardless of how long it had actually been
+// visible — at launch, a burst of ~10+ "existing state" notifications (volume mounts,
+// Bluetooth, etc.) firing within the same second could evict a banner (confirmed via
+// diagnostic logging — Network Monitor's "IP Addresses Updated") within a fraction of a
+// second of it appearing: technically shown (panel.isVisible == YES) but never actually
+// visible to a human eye. Eviction now skips any banner younger than
+// kMinVisibleBeforeEvictable and lets the stack temporarily overflow rather than cut a
+// just-shown banner short — see the eviction-candidate search in showBannerWindow.
+static NSMutableArray *_activeBannerRevealTimes = nil;
+
 // Legacy FIFO queue of banners waiting for screen room. No longer populated
 // (see 05-ago-2026 eviction fix in `showBannerWindow`) — kept only so `dismiss`'s
 // drain code stays harmless dead code instead of needing removal mid-fix.
@@ -380,6 +392,7 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
             if (idx != NSNotFound) {
                 [_activeBanners removeObjectAtIndex:idx];
                 [_activeBannerDismissBlocks removeObjectAtIndex:idx];
+                [_activeBannerRevealTimes removeObjectAtIndex:idx];
                 repositionBanners(sf, YES);
             }
 
@@ -436,6 +449,8 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
             [_activeBanners insertObject:panel atIndex:0];
             if (!_activeBannerDismissBlocks) _activeBannerDismissBlocks = [[NSMutableArray alloc] init];
             [_activeBannerDismissBlocks insertObject:[dismiss copy] atIndex:0];
+            if (!_activeBannerRevealTimes) _activeBannerRevealTimes = [[NSMutableArray alloc] init];
+            [_activeBannerRevealTimes insertObject:[NSDate date] atIndex:0];
 
             // Show off-screen, then animate everyone to their correct positions.
             // The new banner (index 0) slides in from the right; existing banners
@@ -469,9 +484,33 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
         // _activeBanners, since index 0 is newest) to make room, then reveal
         // immediately. The oldest banner has already had most of its 5s to be read;
         // the newest, most relevant one always wins.
+        // BUG FIX (06-ago-2026): see kMinVisibleBeforeEvictable's declaration above — only
+        // evict a candidate that's had at least that long to actually be seen; if every
+        // current banner is younger than that, let the stack temporarily overflow instead
+        // of cutting a just-shown one short. It settles back down on its own as the
+        // burst's 5s timers expire.
+        // BUG FIX (10-ago-2026): 1.5s wasn't enough — during a real launch flood (8+ volume
+        // mounts, USB, Bluetooth, etc. arriving over several seconds, not all at once), a
+        // banner revealed early (e.g. Network Monitor's "IP Addresses Updated") could become
+        // eligible for eviction by a LATER arrival once 1.5s had passed, getting swept away
+        // before the user had a real chance to read it — "shown" for a moment, not actually
+        // seen. Raised to just under the full 5s auto-dismiss lifetime: a banner can now only
+        // be evicted once it was already about to disappear on its own anyway. The stack
+        // overflows more often during a big flood as a result, but nothing gets cut short.
+        static const NSTimeInterval kMinVisibleBeforeEvictable = 4.5;
         if (!bannerStackHasRoomFor(CARD_H, sf) && [_activeBanners count]) {
-            void (^evict)(void) = [_activeBannerDismissBlocks lastObject];
-            if (evict) evict();
+            NSInteger evictIdx = NSNotFound;
+            for (NSInteger i = (NSInteger)_activeBanners.count - 1; i >= 0; i--) {
+                NSDate *revealedAt = _activeBannerRevealTimes[i];
+                if (-[revealedAt timeIntervalSinceNow] >= kMinVisibleBeforeEvictable) {
+                    evictIdx = i;
+                    break;
+                }
+            }
+            if (evictIdx != NSNotFound) {
+                void (^evict)(void) = _activeBannerDismissBlocks[evictIdx];
+                if (evict) evict();
+            }
         }
         revealBlock();
     });

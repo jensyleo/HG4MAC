@@ -479,7 +479,21 @@ typedef enum {
 }
 
 -(void)fireOnLaunchNotes {
-	[self interateInterfaces];
+	// BUG FIX (06-ago-2026): getifaddrs() itself is an instant synchronous kernel read, not a
+	// daemon that needs warming up — but on an actual Mac restart/login this can run before
+	// DHCP finishes, so the very first read here can genuinely see zero addresses even though
+	// a real IP is about to be assigned moments later. -updateIP's own dedup (repeats are
+	// silently skipped when nothing changed) makes repeated delayed calls safe to always
+	// schedule. Poll every 2s for up to 15s, stopping early once an address shows up.
+	//
+	// BUG FIX (10-ago-2026): this used to also call -interateInterfaces synchronously,
+	// right here, BEFORE scheduling the poll — so in the common case (network already up),
+	// IP fired essentially instantly while WiFi (below) always waits out its own 1.5s CoreWLAN
+	// warm-up delay, making "IP Addresses Updated" appear before "AirPort Connected" — backwards
+	// from the order that actually makes sense (you join a network, THEN get an address on it).
+	// Removed the synchronous call; the first iteration of the poll below (at 2s) now serves
+	// as the initial check too, so WiFi's 1.5s announcement reliably lands first.
+	[self pollForIPAtLaunchElapsed:0];
 	// BUG FIX (06-ago-2026): CWWiFiClient's XPC connection to the system WiFi daemon isn't
 	// always warm yet this early in process launch — querying it synchronously right here
 	// (same run-loop tick as -init) can read the interface as "not associated" even when
@@ -488,6 +502,24 @@ typedef enum {
 	// announced at all for the rest of the session. Give CoreWLAN a moment to settle, with
 	// one retry in case the first attempt is still too early.
 	[self fireCurrentWiFiStateRetrying:YES];
+}
+
+// Re-checks -updateIP every 2s for up to 15s after launch (see BUG FIX comment above).
+// Stops as soon as an address is present.
+-(void)pollForIPAtLaunchElapsed:(NSTimeInterval)elapsed {
+	static const NSTimeInterval kPollInterval = 2.0;
+	static const NSTimeInterval kPollDeadline = 15.0;
+	if (elapsed >= kPollDeadline) return;
+	__weak HWGrowlNetworkMonitor *weakSelf = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kPollInterval * NSEC_PER_SEC)),
+	               dispatch_get_main_queue(), ^{
+		__strong HWGrowlNetworkMonitor *strongSelf = weakSelf;
+		if (!strongSelf) return;
+		[strongSelf updateIP];
+		if (!strongSelf.previousHasIPAddresses) {
+			[strongSelf pollForIPAtLaunchElapsed:elapsed + kPollInterval];
+		}
+	});
 }
 
 // At launch (only called when "Show existing" is enabled), announce the WiFi we're

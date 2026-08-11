@@ -16,7 +16,6 @@
 #import "HWGIconOverrideStore.h"
 #import <ServiceManagement/ServiceManagement.h>
 #import <UserNotifications/UserNotifications.h>
-#import <CoreBluetooth/CoreBluetooth.h>
 #include <unistd.h>
 
 #define ShowDevicesTitle     NSLocalizedString(@"Show Connected Devices at Launch", nil)
@@ -449,16 +448,19 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 			(void)granted; (void)error;
 		}];
 
-	// 2. Bluetooth — iniciarlo provoca el diálogo de permiso del sistema
-	dispatch_async(dispatch_get_main_queue(), ^{
-		CBCentralManager *cbManager = [[CBCentralManager alloc]
-			initWithDelegate:nil queue:nil
-			options:@{CBCentralManagerOptionShowPowerAlertKey: @NO}];
-		// Retener brevemente para que el sistema procese el permiso
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			(void)cbManager; // liberar
-		});
-	});
+	// 2. Bluetooth — BUG FIX (06-ago-2026): this used to also create a CBCentralManager
+	// here purely to trigger the system permission dialog. CONFIRMED via a from-scratch
+	// minimal test app (zero HardwareGrowler code, fresh bundle ID, both linker-signed and
+	// properly-bound code signatures) that creating a CBCentralManager AND calling
+	// IOBluetoothDevice's own registerForConnectNotifications: (which BluetoothMonitor does
+	// on its own, for its actual connect/disconnect detection) in the same process with a
+	// real run loop reliably crashes with a TCC privacy-violation abort
+	// (__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__) on the current macOS version — even though
+	// NSBluetoothAlwaysUsageDescription IS present in Info.plist. IOBluetoothDevice's own
+	// call ALONE (confirmed with the same minimal test, real run loop, 15s) does not crash
+	// and already triggers the exact same system permission dialog on its own — so this
+	// CBCentralManager was both redundant and the actual cause of the crash. Removed
+	// entirely; Bluetooth permission is requested exactly once, by BluetoothMonitor itself.
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification

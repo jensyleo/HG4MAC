@@ -38,11 +38,19 @@
 		
 		[GrowlApplicationBridge setGrowlDelegate:self];
 		[GrowlApplicationBridge setShouldUseBuiltInNotifications:YES];
-		
-		[self postRegistrationInit];
-		
+
+		// BUG FIX (10-ago-2026): fireOnLaunchNotes (announces WiFi/IP already-connected
+		// state, among others) used to run AFTER postRegistrationInit. BluetoothMonitor's
+		// own postRegistrationInit (IOBluetoothDevice registerForConnectNotifications:) has
+		// been observed to abort the whole process on this macOS version — see TODO.md — and
+		// since that happened first in the old order, the process never reached
+		// fireOnLaunchNotes at all, so Network Monitor's IP/WiFi launch announcements never
+		// fired. Fire the launch announcements FIRST so they're not at the mercy of whatever
+		// postRegistrationInit does later.
 		if([self onLaunchEnabled])
 			[self fireOnLaunchNotes];
+
+		[self postRegistrationInit];
 	}
 	return self;
 }
