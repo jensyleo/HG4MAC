@@ -58,7 +58,21 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
   apex, and one point safely inside the badge circle) — a convex polygon cannot pinch into a
   concave notch by construction, and its straight edges also read as sharper/more angular,
   matching the rest of the bolt's geometric style better than a rounded curve would.
-- **Follow-up #3 (same day)**: the convex hull still left a tiny notch on the right side —
+- **Correction (same day) — the whole approach above was wrong**: follow-ups #1–#3 all tried to
+  fix this by *redrawing the bolt artwork* (extending its tip with hand-built patches) so it would
+  reach the badge. That was the wrong premise: no other icon's base artwork is modified at all —
+  the badge is simply composited on top of the complete symbol and naturally covers part of it.
+  Measured how much base art the badge actually hides in each of the other icons: USB 11.1%,
+  Display 14.9%, Camera 5.6%, Gamepad 6.9%, Audio 10.4% — versus **0%** for Thunderbolt, which is
+  the real reason it read as two separate floating shapes rather than one overlapping the other.
+  Root cause of the 0%: v1.9.0's icon redraw had shortened the bolt (tip moved from y=8 down to
+  y=99, height 503px → 412px), leaving it too small and too low to ever reach the badge's corner.
+  Fixed properly by discarding every hand-drawn patch, recovering the pristine bolt artwork
+  (verified lossless — zero bolt pixels ever sat under the badge), and scaling/repositioning it
+  **as-is** (1.15×, LANCZOS, no reshaping) so the badge covers 12.0% of it — squarely inside the
+  5.6–14.9% range the other icons use. Validated: artwork fully inside the canvas, 0 unexpected-
+  colour pixels (no resampling halos), bolt geometry unchanged apart from uniform scale.
+- ~~Follow-up #3~~ (superseded by the correction above): the convex hull still left a tiny notch on the right side —
   measured the actual gap between the bolt's true edge and the badge circle's boundary at every
   row from the tip down to the blend zone, and found it is NOT constant (27px near the tip,
   shrinking to ~11px around the "shoulder", widening again below that) — a single straight hull
