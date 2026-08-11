@@ -4,6 +4,26 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.12.0 — 2026-08-11
+
+### Added: launch notifications now group by module instead of interleaving
+- Every module's `-fireOnLaunchNotes` used to run back-to-back in the very same synchronous
+  pass, so one module's own family of related notifications (e.g. Network Monitor's Ethernet
+  -> WiFi -> IP, which already fire in that order internally) landed interleaved with a
+  completely unrelated module's burst arriving in the same instant (e.g. Volume Monitor
+  mounting 7 volumes) — even with v1.11.2's queue fix guaranteeing nothing gets lost off-screen,
+  the two families still visually interleaved, reading as scattered noise instead of "here's
+  what your network did" as one grouped unit.
+- `HWGrowlPluginController.fireOnLaunchNotes` now staggers each module's own call by a small
+  fixed offset (0.6s × its position in the notifiers list) — giving each module's whole family
+  a clear head start before the next module's burst begins, without touching any module's own
+  internal sequencing.
+- Verified live: Notification History timestamps now show clean per-module clusters (USB's 7
+  notifications together at +0.0s, Power at +0.2s, Network's Ethernet at +0.25s, Volume's 8
+  mounts together at +1.7s, Bluetooth at +2.1s, Network's own IP update at +2.3s — landing right
+  after its own Ethernet announcement, exactly the grouped family behavior intended) instead of
+  everything piling into the same ~40ms window as before.
+
 ## v1.11.2 — 2026-08-11
 
 ### Fixed: Ethernet (and other early-firing) launch notifications invisible under the launch flood

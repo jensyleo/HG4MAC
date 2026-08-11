@@ -115,9 +115,25 @@
 }
 
 -(void)fireOnLaunchNotes {
+	// BUG FIX (11-ago-2026): every module's -fireOnLaunchNotes used to run back-to-back in the
+	// very same synchronous pass, so one module's own family of related notifications (e.g.
+	// Network Monitor's Ethernet -> WiFi -> IP, which already fire in that order internally)
+	// landed interleaved with a completely unrelated module's burst arriving in the same
+	// instant (e.g. Volume Monitor mounting 7 volumes) — even with the launch-flood banner
+	// queue fix (see GrowlApplicationBridge.m) guaranteeing nothing is lost off-screen anymore,
+	// the two families still visually interleaved on screen, reading as scattered noise rather
+	// than "here's what your network did" as one grouped unit. Staggering each module's own
+	// -fireOnLaunchNotes call by a small fixed offset (based on its position in this list) gives
+	// each module's whole family a clear head start before the next module's burst begins,
+	// without touching any module's own internal sequencing.
+	static const NSTimeInterval kPerModuleStagger = 0.6;
 	[notifiers enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-		if([obj respondsToSelector:@selector(fireOnLaunchNotes)])
-			[obj fireOnLaunchNotes];
+		if([obj respondsToSelector:@selector(fireOnLaunchNotes)]) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((NSTimeInterval)idx * kPerModuleStagger * NSEC_PER_SEC)),
+			               dispatch_get_main_queue(), ^{
+				[obj fireOnLaunchNotes];
+			});
+		}
 	}];
 }
 
