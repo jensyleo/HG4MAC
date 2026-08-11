@@ -51,6 +51,13 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, assign) io_iterator_t addedIterator;
 @property (nonatomic, assign) io_iterator_t removedIterator;
 
+// deviceName -> type-specific icon name, captured at connect time. Registry properties
+// (class-code) are frequently unreadable from an already-terminating entry by the time the
+// removal callback fires (see -tbDeviceRemoved: below), so the icon is looked up here instead
+// of re-reading the dying IOKit object, letting disconnect notifications still show the
+// correct per-type "-Disconnected" icon instead of falling back to the plain generic one.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastIconNameByDeviceName;
+
 @end
 
 @implementation HWGrowlThunderboltMonitor
@@ -66,6 +73,7 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 -(id)init {
 	if((self = [super init])){
 		self.notificationsArePrimed = NO;
+		self.lastIconNameByDeviceName = [NSMutableDictionary dictionary];
 		self.ioKitNotificationPort = IONotificationPortCreate(kIOMainPortDefault);
 		self.notificationRunLoopSource = IONotificationPortGetRunLoopSource(ioKitNotificationPort);
 
@@ -118,10 +126,18 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 -(void)tbDeviceName:(NSString*)deviceName added:(BOOL)added iconName:(NSString *)iconNameOverride extraInfo:(NSString *)extraInfo {
 	NSString *title = added ? NSLocalizedString(@"Thunderbolt Connection", @"") : NSLocalizedString(@"Thunderbolt Disconnection", @"");
 
-	// Device-type icon only applies on connect — registry properties (including class-code)
-	// are frequently unreadable from an already-terminating entry on disconnect, same
-	// limitation already documented for the extra-info fields and the eGPU check below.
-	NSString *imageName = added ? (iconNameOverride ?: @"Thunderbolt-On") : @"Thunderbolt-Off";
+	// On disconnect, iconNameOverride is looked up by the caller from lastIconNameByDeviceName
+	// (captured at connect time) rather than re-read from the terminating registry entry — see
+	// that dictionary's declaration for why. Falls back to the plain generic icon only when no
+	// connect-time icon was ever recorded for this device name.
+	NSString *imageName;
+	if (added) {
+		imageName = iconNameOverride ?: @"Thunderbolt-On";
+	} else if (iconNameOverride) {
+		imageName = [iconNameOverride stringByAppendingString:@"-Disconnected"];
+	} else {
+		imageName = @"Thunderbolt-Off";
+	}
 	NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
 	NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", deviceName, extraInfo] : deviceName;
 
@@ -321,6 +337,9 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 			if (deviceName) {
 				uint8_t baseClass = [self pciBaseClassForDevice:thisObject];
 				NSString *iconName = [self tbIconNameForBaseClass:baseClass];
+				if (iconName) {
+					self.lastIconNameByDeviceName[deviceName] = iconName;
+				}
 				NSString *notifyKey = [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:[self tbTypeIdentifierForBaseClass:baseClass]];
 				if (HWGTBBoolForKey(notifyKey, YES)) {
 					[self tbDeviceName:deviceName added:YES iconName:iconName extraInfo:[self tbExtraInfoForDevice:thisObject]];
@@ -345,11 +364,15 @@ static void tbDeviceAdded(void *refCon, io_iterator_t iterator) {
 			// No extraInfo on removal: registry properties are frequently unreadable
 			// from a terminating entry by the time this callback fires. Same limitation
 			// applies to the eGPU class-code check below — it will often silently miss
-			// eGPU DISCONNECT (but not connect), documented in README.
+			// eGPU DISCONNECT (but not connect), documented in README. The type icon avoids
+			// this entirely by reusing the value cached at connect time instead of re-reading
+			// the dying registry entry (see lastIconNameByDeviceName's declaration).
 			if (deviceName) {
+				NSString *cachedIconName = self.lastIconNameByDeviceName[deviceName];
 				if (HWGTBBoolForKey(HWG_TB_NOTIFY_DISCONNECT_KEY, YES)) {
-					[self tbDeviceName:deviceName added:NO iconName:nil extraInfo:nil];
+					[self tbDeviceName:deviceName added:NO iconName:cachedIconName extraInfo:nil];
 				}
+				[self.lastIconNameByDeviceName removeObjectForKey:deviceName];
 				[self tbNotifyEGPUIfNeeded:thisObject deviceName:deviceName added:NO];
 			}
 		}

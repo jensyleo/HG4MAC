@@ -162,12 +162,21 @@ static BOOL HWGUSBBoolForKey(NSString *key, BOOL def) {
 		title = added ? NSLocalizedString(@"USB Connection", @"") : NSLocalizedString(@"USB Disconnection", @"");
 	}
 
-	// Device-type icon (Hub/HID/Webcam/Printer/Smart Card/Audio/Wireless Controller) only
-	// applies to the CONNECT notification — like the extra-info fields above, `bDeviceClass`
-	// is only reliably readable at connect time, not from an already-terminating registry
-	// entry on disconnect (same reasoning documented on `-usbExtraInfoForDevice:`). Disconnect
-	// always falls back to the plain generic icon, matching that existing behavior.
-    NSString *imageName = added ? (iconNameOverride ?: @"USB-On") : @"USB-Off";
+	// Device-type icon (Hub/HID/Webcam/Printer/Smart Card/Audio/Wireless Controller/etc.):
+	// on disconnect, use the type's dedicated "-Disconnected" variant (base art + red X, same
+	// convention as Volume Monitor's Unmounted states) instead of the plain generic icon.
+	// "Device-USBDrive" (Mass Storage) is the one exception — it already has its own
+	// "-Unmounted" variant from Volume Monitor, so reuse that instead of a redundant new asset.
+	NSString *imageName;
+	if (added) {
+		imageName = iconNameOverride ?: @"USB-On";
+	} else if ([iconNameOverride isEqualToString:@"Device-USBDrive"]) {
+		imageName = @"Device-USBDrive-Unmounted";
+	} else if (iconNameOverride) {
+		imageName = [iconNameOverride stringByAppendingString:@"-Disconnected"];
+	} else {
+		imageName = @"USB-Off";
+	}
     NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
 	NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", deviceName, extraInfo] : deviceName;
 	// Use the device NAME as the bounce/dedup identifier (matches Bluetooth/Volume/
@@ -451,13 +460,17 @@ static void usbDeviceAdded(void *refCon, io_iterator_t iterator) {
 		NSString *deviceName = [NSString stringWithCString:deviceNameChars encoding:NSASCIIStringEncoding];
 		if (deviceName) {
 			deviceName = [self deviceBusNameSwap:deviceName];
-			BOOL isHub = [self deviceIsHub:thisObject];
+			uint8_t classCode = [self deviceClassCode:thisObject];
+			BOOL isHub = (classCode == kHWGUSBHubDeviceClass);
 
 			// NSLog(@"USB Device Detached: %@" , deviceName);
-			// No extraInfo or device-type icon on removal: registry properties are
-			// frequently unreadable from a terminating entry by the time this callback fires.
+			// No extraInfo on removal: fields like power/speed are frequently unreadable from
+			// a terminating entry by the time this callback fires. bDeviceClass itself, though,
+			// already gets read here for the isHub check above without issue, so the same
+			// device-type icon lookup used on connect is safe to reuse on disconnect too.
+			NSString *iconName = [self usbIconNameForClassCode:classCode isHub:isHub];
 			if (HWGUSBBoolForKey(HWG_USB_NOTIFY_DISCONNECT_KEY, YES)) {
-				[self usbDeviceID:deviceID name:deviceName added:NO isHub:isHub iconName:nil extraInfo:nil];
+				[self usbDeviceID:deviceID name:deviceName added:NO isHub:isHub iconName:iconName extraInfo:nil];
 			}
 		}
 		

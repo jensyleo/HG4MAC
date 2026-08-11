@@ -89,11 +89,20 @@ static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 -(void)bluetoothName:(NSString*)name connected:(BOOL)connected iconName:(NSString *)iconNameOverride extraInfo:(NSString *)extraInfo {
 	NSString *title = connected ? NSLocalizedString(@"Bluetooth Connection", @"") : NSLocalizedString(@"Bluetooth Disconnection", @"");
 
-	// Device-type icon only applies on connect — same reasoning as the extra-info fields:
-	// `deviceClassMajor`/`deviceClassMinor` are read from the live `IOBluetoothDevice` at
-	// connect time; on disconnect this app never even has a device-type icon to offer (see
-	// call sites below), so this always falls back to the plain generic icon there.
-    NSString *imageName = connected ? (iconNameOverride ?: @"Bluetooth-On") : @"Bluetooth-Off";
+	// Device-type icon: `deviceClassMajor`/`deviceClassMinor` (source of `iconNameOverride`)
+	// come from the paired device's cached class-of-device record, not a live-connection-only
+	// property, so it's still available at disconnect (unlike extraInfo's battery reading,
+	// which does need an active connection and stays nil there). When a type-specific icon is
+	// available, use its dedicated "-Disconnected" variant (base art + red X, same convention
+	// as Volume Monitor's Unmounted states) instead of the plain generic icon.
+	NSString *imageName;
+	if (connected) {
+		imageName = iconNameOverride ?: @"Bluetooth-On";
+	} else if (iconNameOverride) {
+		imageName = [iconNameOverride stringByAppendingString:@"-Disconnected"];
+	} else {
+		imageName = @"Bluetooth-Off";
+	}
 	NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
 	NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", name, extraInfo] : name;
 
@@ -361,10 +370,11 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 -(void)bluetoothDisconnection:(IOBluetoothUserNotification*)note
 							  device:(IOBluetoothDevice*)device
 {
-	// No extraInfo on disconnect: class/paired-state read the same way as connect, but a
-	// disconnecting device's properties are less reliably available by the time this fires.
+	// No extraInfo on disconnect: fields like battery level need a live connection and are
+	// less reliably available by the time this fires. The device-type icon is still safe to
+	// compute here (see -bluetoothName:connected:iconName:extraInfo: note above).
 	if (HWGBTBoolForKey(HWG_BT_NOTIFY_DISCONNECT_KEY, YES)) {
-		[self bluetoothName:[device name] connected:NO iconName:nil extraInfo:nil];
+		[self bluetoothName:[device name] connected:NO iconName:[self bluetoothIconNameForDevice:device] extraInfo:nil];
 	}
 	[note unregister];
 
