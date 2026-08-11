@@ -42,6 +42,14 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
   the identical badge tile on top — the badge itself is untouched pixel-for-pixel. First attempt
   left a thin white seam where the patch met the original anti-aliased edge; fixed by extending
   the patch further into the bolt's solid body instead of just touching its boundary.
+- **Follow-up (same day)**: that first patch used a few sharp-angled polygon points, one of
+  which sat too close to the badge circle's true radius (measured: only ~2px margin) — anti-
+  aliasing pushed a small sliver of yellow past the circle's edge, visible as a stray spike
+  poking out above the badge, plus a second angular point created a slight concave notch.
+  Re-measured the badge's exact circle (center/radius from the actual badge tile, not an
+  estimate) and redrew the connecting patch as a smooth two-bezier-curve shape with every point
+  kept at least ~25px inside the true radius, plus a thick overlapping stroke along the seam
+  line for guaranteed full coverage — no spike, no notch, no seam.
 
 ## v1.12.0 — 2026-08-11
 
