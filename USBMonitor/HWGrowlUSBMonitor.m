@@ -589,7 +589,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		@[@"Type-C Bridge", @"USB-TypeTypeCBridge", [HWG_USB_NOTIFY_KEY_PREFIX stringByAppendingString:@"TypeCBridge"]],
 		@[@"Wireless", @"USB-TypeWireless", [HWG_USB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Wireless"]],
 		@[@"Connected (generic)", @"USB-On", [HWG_USB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
-		@[@"Disconnected", @"USB-Off", HWG_USB_NOTIFY_DISCONNECT_KEY],
+		@[@"Disconnected (generic)", @"USB-Off", HWG_USB_NOTIFY_DISCONNECT_KEY],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

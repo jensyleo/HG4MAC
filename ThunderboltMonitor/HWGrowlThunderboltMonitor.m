@@ -525,7 +525,7 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		@[@"Serial Bus Controller", @"TB-TypeSerialBus", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"SerialBus"]],
 		@[@"Wireless Controller", @"TB-TypeWirelessController", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"WirelessController"]],
 		@[@"Connected (generic)", @"Thunderbolt-On", [HWG_TB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
-		@[@"Disconnected", @"Thunderbolt-Off", HWG_TB_NOTIFY_DISCONNECT_KEY],
+		@[@"Disconnected (generic)", @"Thunderbolt-Off", HWG_TB_NOTIFY_DISCONNECT_KEY],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

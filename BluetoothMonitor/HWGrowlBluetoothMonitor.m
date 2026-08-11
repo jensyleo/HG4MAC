@@ -509,7 +509,7 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		@[@"Speaker", @"BT-TypeSpeaker", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Speaker"]],
 		@[@"Headphones", @"BT-TypeHeadphones", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Headphones"]],
 		@[@"Connected (generic)", @"Bluetooth-On", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
-		@[@"Disconnected", @"Bluetooth-Off", HWG_BT_NOTIFY_DISCONNECT_KEY],
+		@[@"Disconnected (generic)", @"Bluetooth-Off", HWG_BT_NOTIFY_DISCONNECT_KEY],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

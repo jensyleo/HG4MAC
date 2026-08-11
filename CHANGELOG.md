@@ -4,6 +4,33 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.11.1 — 2026-08-11
+
+### Fixed: Ethernet not announced at launch (already-connected cable never reported)
+- Root cause confirmed: `-primeWiredLinkState` (detects an Ethernet cable that's already
+  connected before launch) runs from Network Monitor's `-init`, which `HWGrowlPluginController`
+  calls BEFORE it assigns `delegate` to the plugin (`init` happens, THEN `setDelegate:` — see
+  `-loadPlugins`). So `[delegate onLaunchEnabled]` was always messaging `nil` at that point,
+  silently returning NO regardless of the user's real "Show existing on launch" preference —
+  and since nothing ever re-read the state stashed there, the announcement was permanently lost.
+  Same category of bug as the WiFi/IP launch-timing fixes (v1.10.2/v1.10.6/v1.10.8), but a
+  different root cause (delegate-not-set-yet vs. CoreWLAN/DHCP warm-up).
+- Split the responsibility: `-primeWiredLinkState` now only records the dedup baseline (still
+  called early, safely, since it no longer needs `delegate`); a new `-fireExistingWiredEthernetIfEnabled`
+  makes the real announce decision once `delegate` is guaranteed to be set, called from
+  `-fireOnLaunchNotes`. It clears the primed baseline first so `-updateLinkWithInterface:`'s
+  dedup doesn't see the just-recorded state as "no change" and swallow the announcement again.
+- Verified live (own Ethernet adapter, `en5`, USB 10/100/1000 LAN): "Network Link Up" (Interface:
+  en5, Speed: 1000baseT, Mode: full-duplex) now correctly appears in Notification History on 2
+  consecutive clean relaunches — never appeared before this fix. `ShowExisting` (the "Show
+  existing on launch" preference this depends on) defaults to YES for all users.
+
+### Changed: Icon Picker labels clarify the generic-fallback row (Bluetooth/USB/Thunderbolt)
+- The single "Disconnected" row (Bluetooth/USB/Thunderbolt Icons tab) now reads "Disconnected
+  (generic)" — clarifying that it's the fallback used only for unrecognized device classes,
+  since v1.11.0 gave every other type its own dedicated "-Disconnected" icon. No functional
+  change, just disambiguation (matches the existing "Connected (generic)" row's naming).
+
 ## v1.11.0 — 2026-08-11
 
 ### Added: dedicated type-specific "Disconnected" icons (Bluetooth/USB/Thunderbolt)

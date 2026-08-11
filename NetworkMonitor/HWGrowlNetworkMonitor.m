@@ -495,6 +495,10 @@ typedef enum {
 	// Removed the synchronous call; the first iteration of the poll below (at 2s) now serves
 	// as the initial check too, so WiFi's 1.5s announcement reliably lands first.
 	[self pollForIPAtLaunchElapsed:0];
+	// BUG FIX (11-ago-2026): announce an Ethernet cable that was already connected before
+	// launch — see -fireExistingWiredEthernetIfEnabled's comment for why this couldn't be
+	// decided earlier, in -primeWiredLinkState itself.
+	[self fireExistingWiredEthernetIfEnabled];
 	// BUG FIX (06-ago-2026): CWWiFiClient's XPC connection to the system WiFi daemon isn't
 	// always warm yet this early in process launch — querying it synchronously right here
 	// (same run-loop tick as -init) can read the interface as "not associated" even when
@@ -651,25 +655,52 @@ typedef enum {
 }
 
 // At launch: read the CURRENT raw link state of every WIRED ETHERNET interface (by listing
-// all existing ".../Link" keys and filtering out WiFi/AWDL/other virtual ones), and report
-// the ones already up — mirrors what fireOnLaunchNotes does for IP/WiFi. Gated by
-// onLaunchEnabled, same as before.
+// all existing ".../Link" keys and filtering out WiFi/AWDL/other virtual ones) and record it
+// as the dedup baseline for -updateLinkWithInterface: (so the very next real link-change event
+// is compared against reality, not against nothing).
+//
+// BUG FIX (11-ago-2026): this used to also decide whether to ANNOUNCE the already-connected
+// interface, gated on `[delegate onLaunchEnabled]` — but this method runs from -init (via
+// -startObserving), which -loadPlugins calls BEFORE it calls -setDelegate: on the plugin (see
+// HWGrowlPluginController.m: `id plugin = [[... alloc] init]; ... [plugin setDelegate:self];`
+// happens strictly after). So `delegate` was always nil at the time this ran, `[delegate
+// onLaunchEnabled]` was always messaging nil (silently NO), and an already-connected Ethernet
+// cable was NEVER announced at launch — regardless of the user's actual "Show existing on
+// launch" preference — since nothing ever re-read the baseline stashed below to fire it later.
+// The announce decision now happens in -fireExistingWiredEthernetIfEnabled (below), called from
+// -fireOnLaunchNotes once `delegate` is guaranteed to be set.
 -(void)primeWiredLinkState {
 	CFArrayRef keys = SCDynamicStoreCopyKeyList(dynStore, CFSTR("State:/Network/Interface/[^/]+/Link"));
 	if (!keys) return;
-	BOOL announce = [delegate onLaunchEnabled];
 	CFIndex count = CFArrayGetCount(keys);
 	for (CFIndex i = 0; i < count; i++) {
 		NSString *key = (__bridge NSString *)CFArrayGetValueAtIndex(keys, i);
 		NSString *ifname = [self bsdNameFromLinkKey:key];
 		if (!ifname || ![self isWiredEthernetInterface:ifname] || ![self readLinkActiveForKey:key]) continue;
-		if (announce) {
-			[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @1}];
-		} else {
-			HWGrowlNetworkInterfaceStatus *st = [[HWGrowlNetworkInterfaceStatus alloc]
-				initForInterface:ifname ofType:HWGEthernetInterface withStatus:@{@"Active": @1}];
-			[networkInterfaceStates setObject:st forKey:ifname];
-		}
+		HWGrowlNetworkInterfaceStatus *st = [[HWGrowlNetworkInterfaceStatus alloc]
+			initForInterface:ifname ofType:HWGEthernetInterface withStatus:@{@"Active": @1}];
+		[networkInterfaceStates setObject:st forKey:ifname];
+	}
+	CFRelease(keys);
+}
+
+// Real announce decision for an Ethernet cable that was already connected before launch — see
+// the BUG FIX comment on -primeWiredLinkState above for why this has to be a separate step.
+// Called from -fireOnLaunchNotes, where `delegate` is safely non-nil. Removes the interface's
+// primed baseline first so -updateLinkWithInterface:'s dedup sees this as a real change (old
+// state "unknown") instead of "already active, nothing to report" — otherwise the very state
+// -primeWiredLinkState just stored would suppress the announcement a second time.
+-(void)fireExistingWiredEthernetIfEnabled {
+	if (![delegate onLaunchEnabled]) return;
+	CFArrayRef keys = SCDynamicStoreCopyKeyList(dynStore, CFSTR("State:/Network/Interface/[^/]+/Link"));
+	if (!keys) return;
+	CFIndex count = CFArrayGetCount(keys);
+	for (CFIndex i = 0; i < count; i++) {
+		NSString *key = (__bridge NSString *)CFArrayGetValueAtIndex(keys, i);
+		NSString *ifname = [self bsdNameFromLinkKey:key];
+		if (!ifname || ![self isWiredEthernetInterface:ifname] || ![self readLinkActiveForKey:key]) continue;
+		[networkInterfaceStates removeObjectForKey:ifname];
+		[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @1}];
 	}
 	CFRelease(keys);
 }
