@@ -30,6 +30,19 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 - Verified: clean build, 12/12 tests, all 13 plugins present, app launches and runs without
   crashing.
 
+### Fixed: Thunderbolt's bolt tip didn't actually overlap the checkmark badge
+- Spotted after the change above: on every other icon the badge visibly overlaps part of the
+  base artwork (a natural "on top of" look), but Thunderbolt's lightning bolt tip stopped just
+  short of the badge circle — a ~10-20px gap — reading as two separate floating shapes instead
+  of one overlapping the other. Confirmed via git history that this gap existed even in the
+  very first version of this icon that ever had a badge (v1.9.0), so it wasn't something this
+  session's change introduced.
+- Fixed by extending the bolt's tip with a small connecting patch (same yellow, continuing the
+  bolt's existing edge angle) so it genuinely reaches into the badge's circle, then re-compositing
+  the identical badge tile on top — the badge itself is untouched pixel-for-pixel. First attempt
+  left a thin white seam where the patch met the original anti-aliased edge; fixed by extending
+  the patch further into the bolt's solid body instead of just touching its boundary.
+
 ## v1.12.0 — 2026-08-11
 
 ### Added: launch notifications now group by module instead of interleaving
