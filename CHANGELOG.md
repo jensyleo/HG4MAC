@@ -58,6 +58,16 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
   apex, and one point safely inside the badge circle) — a convex polygon cannot pinch into a
   concave notch by construction, and its straight edges also read as sharper/more angular,
   matching the rest of the bolt's geometric style better than a rounded curve would.
+- **Follow-up #3 (same day)**: the convex hull still left a tiny notch on the right side —
+  measured the actual gap between the bolt's true edge and the badge circle's boundary at every
+  row from the tip down to the blend zone, and found it is NOT constant (27px near the tip,
+  shrinking to ~11px around the "shoulder", widening again below that) — a single straight hull
+  edge cannot track a gap that curves non-linearly like that without either falling short (a
+  notch) or overshooting (a bulge) somewhere along the way. Replaced the hull's right edge with
+  a row-by-row fill driven directly by the real measured curve on both sides (the true bolt edge
+  and the circle's own boundary equation) instead of any straight-line or bezier approximation —
+  by construction, every single row is exactly flush with both curves, so no gap or notch is
+  geometrically possible anywhere along the transition.
 
 ## v1.12.0 — 2026-08-11
 
