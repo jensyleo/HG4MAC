@@ -192,7 +192,7 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 			int64_t batteryTime = -1;
 						
 			if(CFNumberGetType(timeToFullOrEmpty) != kCFNumberSInt64Type)
-				NSLog(@"GAH");
+				NSLog(@"HWG PowerMonitor: unexpected CFNumber type %ld for time-to-full/empty (expected kCFNumberSInt64Type)", (long)CFNumberGetType(timeToFullOrEmpty));
 			
 			if (CFNumberGetValue(timeToFullOrEmpty, kCFNumberSInt64Type, &timeToChargeOrDrain))
 				batteryTime = timeToChargeOrDrain;

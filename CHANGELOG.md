@@ -4,6 +4,25 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.14.1 — 2026-08-11
+
+### Housekeeping: pre-publish code audit
+- Full clean-build audit before publishing v1.11.0–v1.14.0: zero compiler warnings across all
+  13 plugin targets plus the main app (only build-system-level noise — `ONLY_ACTIVE_ARCH`/manual
+  target order — no source-level warnings at all), zero orphaned source files (all 63 tracked
+  `.m`/`.h` files confirmed referenced either in `project.pbxproj` or via `#import` + header
+  search path), zero unused `#import`s (an automated heuristic flagged 19 candidates; every
+  single one was manually verified as a false positive — e.g. `HWGIconOverrideStore.h` is used
+  via its `HWGResolveIconNamed()` function, not a class matching the header's own name — so
+  none were removed), zero `#if 0` blocks, zero real `TODO`/`FIXME` markers (the 5 matches found
+  are just doc comments cross-referencing `TODO.md`, not broken/incomplete code).
+- Found and fixed one genuine leftover: `PowerMonitor/HWGrowlPowerMonitor.m`'s battery
+  time-remaining parser logged the unhelpful `NSLog(@"GAH")` when a `CFNumber` came back in an
+  unexpected type — replaced with a real diagnostic message naming the actual type encountered.
+  This file is flagged delicate (see TODO.md's P20 retain note) but the touched line has no
+  interaction with that concern — it's a log-message-only change, no logic/memory behavior
+  touched. Verified: clean build, 12/12 tests, all 13 plugins present, app runs without crashing.
+
 ## v1.14.0 — 2026-08-11
 
 ### Fixed: unplugging a USB-Ethernet adapter's hub never announced the disconnect
