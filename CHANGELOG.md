@@ -4,6 +4,14 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.7 — 2026-08-10
+
+### Restored: automated test target (dropped during today's investigation)
+- The `HardwareGrowlerTests` target (12 tests) and the `HWGWifiSignal` extraction from
+  v1.10.4 got dropped during the Bluetooth-crash investigation above (several `git reset
+  --hard` steps while bisecting). Recreated on top of v1.10.6's fixes — same 12 tests,
+  same standalone (no host application) setup. Verified: `xcodebuild test` passes 12/12.
+
 ## v1.10.6 — 2026-08-10
 
 ### Fixed: app crashing on launch on macOS Tahoe 26.x, breaking Network Monitor's launch announcements
