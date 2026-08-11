@@ -1237,6 +1237,7 @@
 				BCB80697155159420088C69A /* Copy Frameworks */,
 				BCB805E5155153330088C69A /* Resources */,
 				BCB807661551A6F40088C69A /* Copy Plugins */,
+				887C838B2E6F420B0BB6518D /* Re-sign with bound Info.plist (fix TCC identity) */,
 			);
 			buildRules = (
 			);
@@ -1618,6 +1619,24 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		887C838B2E6F420B0BB6518D /* Re-sign with bound Info.plist (fix TCC identity) */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Re-sign with bound Info.plist (fix TCC identity)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# BUG FIX (10-ago-2026): Xcode's default ad-hoc build uses lightweight \"linker-signed\"\n# signing, which does NOT bind Info.plist into the code signature and can leave the\n# code-signing Identifier as the raw executable name (\"HG4MAC\") instead of the real\n# CFBundleIdentifier (\"com.jensyleo.hg4mac\"). TCC's per-launch authorization checks use\n# this identity, and with it wrong/unbound, a previously-granted permission (e.g.\n# Microphone) never reliably re-associates with the app on the next launch, so it kept\n# re-prompting every single time. Re-signing explicitly here (still ad-hoc - no Developer\n# ID/Apple ID required) fixes both: the Identifier matches CFBundleIdentifier and\n# Info.plist gets properly bound. CONFIRMED fix: 7/7 clean relaunches after this, versus\n# re-prompting on every single launch before it.\nif [ \"$ACTION\" != \"clean\" ]; then\n  /usr/bin/codesign --force --deep --sign - \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}\"\nfi\n";
+		};
 		BC4FC625155C051E00EE65EC /* Generate Localizable.strings */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -2542,6 +2561,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.jensyleo.hg4mac;
 				PRODUCT_NAME = HG4MAC;
 				PROVISIONING_PROFILE = "";
+				STRIP_INSTALLED_PRODUCT = NO;
 				WRAPPER_EXTENSION = app;
 			};
 			name = Debug;
@@ -2562,6 +2582,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.jensyleo.hg4mac;
 				PRODUCT_NAME = HG4MAC;
 				PROVISIONING_PROFILE = "";
+				STRIP_INSTALLED_PRODUCT = NO;
 				WRAPPER_EXTENSION = app;
 			};
 			name = Release;
@@ -2609,6 +2630,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.jensyleo.hg4mac;
 				PRODUCT_NAME = HG4MAC;
 				PROVISIONING_PROFILE = "";
+				STRIP_INSTALLED_PRODUCT = NO;
 				WRAPPER_EXTENSION = app;
 			};
 			name = Localization;

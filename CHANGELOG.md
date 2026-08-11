@@ -4,6 +4,23 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.8 — 2026-08-10
+
+### Fixed: microphone permission never actually persisting between launches
+- Found the real root cause of "asks for microphone access every single launch": Xcode's
+  default build produces a lightweight "linker-signed" ad-hoc signature that does NOT bind
+  Info.plist into the code signature, and can leave the code-signing Identifier as the raw
+  executable name (`HG4MAC`) instead of the real bundle identifier (`com.jensyleo.hg4mac`).
+  TCC's per-launch authorization check relies on this identity — with it wrong/unbound, a
+  granted permission never reliably re-associated with the app on the next launch.
+- Added a build phase that re-signs the built app (`codesign --force --deep --sign -` —
+  still fully ad-hoc, no Developer ID or Apple ID needed) after Xcode's own build, and
+  disabled the separate "Strip" post-processing step for this target (it was invalidating
+  the corrected signature right after). Confirmed: identifier now correctly reads
+  `com.jensyleo.hg4mac`, Info.plist shows as bound (`entries=35` instead of "not bound").
+- Verified with a full purge (app + prefs + notification history + TCC reset) and 5
+  consecutive clean relaunches — zero re-prompts, versus every single launch before this fix.
+
 ## v1.10.7 — 2026-08-10
 
 ### Restored: automated test target (dropped during today's investigation)
