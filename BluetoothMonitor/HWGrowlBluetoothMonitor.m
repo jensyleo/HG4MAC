@@ -70,23 +70,20 @@ static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 }
 
 -(void)postRegistrationInit {
-	// BUG FIX (10-ago-2026): CONFIRMED on the current macOS Tahoe 26.x — calling
-	// [IOBluetoothDevice registerForConnectNotifications:selector:] (this app's connect/
-	// disconnect detection) makes the OS abort the ENTIRE process a few seconds later with a
-	// TCC privacy-violation crash (__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__), claiming
-	// NSBluetoothAlwaysUsageDescription is missing even though it's present in Info.plist.
-	// Reproduced from a from-scratch minimal test app with zero HardwareGrowler code (fresh
-	// bundle ID, properly Info.plist-bound ad-hoc signature) and with the completely
-	// unmodified v1.10.0 codebase — confirmed NOT specific to this app or this session's
-	// changes. Does NOT happen on macOS Ventura 13.7.8 (confirmed against the user's real
-	// Intel Mac) — this is a real behavior change in Tahoe 26.x for ad-hoc-signed apps
-	// (no Developer ID Team). Since this crash was killing the whole process during launch —
-	// before Network Monitor's own launch announcements (WiFi/IP) ever got to run — Bluetooth
-	// connect/disconnect detection is disabled here until the app is signed with a real
-	// Developer ID (or a free Xcode "Personal Team", once confirmed that's enough to avoid
-	// this specific crash). See TODO.md for the full investigation and the three candidate
-	// fixes.
-	(void)0;
+	self.starting = YES;
+	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
+	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
+	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
+	// code-signing Identifier as the raw executable name ("HG4MAC") instead of the real
+	// CFBundleIdentifier ("com.jensyleo.hg4mac"), AND never bound Info.plist into the
+	// signature at all. The earlier test that still crashed only had Info.plist bound — the
+	// Identifier mismatch was still present, since that fix hadn't been found yet. Re-testing
+	// now that the build phase fixes BOTH (see HardwareGrowler target's "Re-sign..." script
+	// phase) to see if a fully correct ad-hoc identity (no paid Developer ID/Team needed) is
+	// actually sufficient to avoid this crash.
+	self.connectionNotification = [IOBluetoothDevice registerForConnectNotifications:self
+																									selector:@selector(bluetoothConnection:device:)];
+	self.starting = NO;
 }
 
 -(void)bluetoothName:(NSString*)name connected:(BOOL)connected iconName:(NSString *)iconNameOverride extraInfo:(NSString *)extraInfo {

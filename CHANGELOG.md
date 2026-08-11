@@ -4,6 +4,21 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.10.9 — 2026-08-10
+
+### Fixed: Bluetooth connect/disconnect detection re-enabled — same root cause as v1.10.8
+- The Bluetooth TCC crash disabled in v1.10.6 turned out to be caused by the exact same
+  bad ad-hoc signature fixed in v1.10.8 (wrong code-signing Identifier + unbound Info.plist)
+  — NOT something that required a paid Apple Developer Program membership. An earlier test
+  during the investigation only had Info.plist bound but still had the Identifier mismatch,
+  which is why it still crashed and looked like this needed a real (paid) Developer ID.
+- Re-enabled `BluetoothMonitor`'s `IOBluetoothDevice registerForConnectNotifications:` call.
+  Verified with a full purge (app + prefs + notification history + Microphone/Bluetooth TCC
+  reset) and 5 consecutive clean relaunches — zero crashes, matching v1.10.8's fix.
+- Bluetooth connect/disconnect detection and Apple accessory battery reporting (F36:
+  AirPods/Magic Mouse/Keyboard/Trackpad) are both back to fully working — the ad-hoc,
+  free, no-Developer-ID-needed signature fix from v1.10.8 was sufficient on its own.
+
 ## v1.10.8 — 2026-08-10
 
 ### Fixed: microphone permission never actually persisting between launches
