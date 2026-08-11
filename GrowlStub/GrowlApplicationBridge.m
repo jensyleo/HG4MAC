@@ -498,7 +498,23 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
         // be evicted once it was already about to disappear on its own anyway. The stack
         // overflows more often during a big flood as a result, but nothing gets cut short.
         static const NSTimeInterval kMinVisibleBeforeEvictable = 4.5;
-        if (!bannerStackHasRoomFor(CARD_H, sf) && [_activeBanners count]) {
+        // BUG FIX (11-ago-2026): confirmed with a real launch flood (17 banners firing within
+        // ~40ms — Power, Network Link Up, 7 volume mounts, 6 USB devices) that a burst fast
+        // enough for EVERY current banner to be younger than kMinVisibleBeforeEvictable (no
+        // eviction candidate) used to fall through and call revealBlock() unconditionally
+        // anyway — creating a real window, just positioned off the bottom of the screen by
+        // repositionBanners' unbounded stacking math (measured Y origins past 2000pt on a
+        // 956pt-tall screen). That banner then sat there, genuinely invisible, for its entire
+        // 5s lifetime with zero chance of being seen — which is exactly the failure mode
+        // _pendingBannerReveals (declared above) and the dismiss() consumer near the top of
+        // this function were originally built to prevent, but the 05-ago-2026 change removed
+        // the one place that ever added to that queue, leaving it permanently empty. Restored:
+        // only THIS specific case (no room AND nothing evictable) queues instead of revealing;
+        // eviction still wins whenever it can, so a normal-sized burst still shows the newest
+        // notification instantly, same as before.
+        BOOL hasRoom = bannerStackHasRoomFor(CARD_H, sf);
+        BOOL evicted = NO;
+        if (!hasRoom && [_activeBanners count]) {
             NSInteger evictIdx = NSNotFound;
             for (NSInteger i = (NSInteger)_activeBanners.count - 1; i >= 0; i--) {
                 NSDate *revealedAt = _activeBannerRevealTimes[i];
@@ -510,9 +526,15 @@ static void showBannerWindow(NSString *title, NSString *body, id clickContext, N
             if (evictIdx != NSNotFound) {
                 void (^evict)(void) = _activeBannerDismissBlocks[evictIdx];
                 if (evict) evict();
+                evicted = YES;
             }
         }
-        revealBlock();
+        if (hasRoom || evicted) {
+            revealBlock();
+        } else {
+            if (!_pendingBannerReveals) _pendingBannerReveals = [[NSMutableArray alloc] init];
+            [_pendingBannerReveals addObject:[revealBlock copy]];
+        }
     });
 }
 

@@ -4,6 +4,35 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.11.2 — 2026-08-11
+
+### Fixed: Ethernet (and other early-firing) launch notifications invisible under the launch flood
+- After v1.11.1's fix made the Ethernet detection logic correct (confirmed present in
+  Notification History), the user reported "still not detecting Ethernet" — investigated
+  further and confirmed, live, this was a pure DISPLAY/visibility bug, not detection: every
+  plugin fires its own "already connected"/"already mounted" notifications within the same
+  ~40ms window at launch (measured: Power, Network Link Up, 7 Volume Monitor mounts, 6 USB
+  devices — 15 notifications in 40ms). Both our own custom banner stack (`GrowlApplicationBridge.m`)
+  and real macOS notification banners (already authorized on this Mac) stack newest-on-top, so
+  anything fired that early gets buried under whatever arrives a few ms later.
+- Found the deeper bug while investigating: `_pendingBannerReveals` (the queue meant to hold
+  banners that can't fit on screen yet) has been dead code since the 05-ago-2026 eviction
+  rework — something still *consumes* it (in the dismiss handler) but nothing has *produced*
+  into it since. So a burst too fast for eviction to apply (every current banner younger than
+  `kMinVisibleBeforeEvictable`) fell through and revealed the new banner anyway — positioned by
+  `repositionBanners`' unbounded stacking math past the bottom of the screen (measured Y origins
+  over 2000pt on a 956pt-tall screen), genuinely invisible for its whole 5s lifetime with zero
+  chance of ever being seen.
+- Restored the queue: when there's no room AND nothing is old enough to evict, the banner now
+  queues instead of revealing off-screen; eviction still wins whenever it can, so a normal-sized
+  burst still shows the newest notification instantly like before. Verified with a window-list
+  probe (`CGWindowListCopyWindowInfo`, on-screen only): the visible custom-banner stack now
+  holds a clean, non-overlapping set of exactly as many banners as fit the screen (8 on this
+  display) with zero off-screen duplicates, cycling in the queued ones as each dismisses.
+- Verified live with the real Ethernet adapter, isolated (all other plugins temporarily
+  disabled to remove ambiguity): "Network Link Up — Interface: en5, Speed: 1000baseT, Mode:
+  full-duplex" now correctly appears on screen. Restored normal plugin configuration afterward.
+
 ## v1.11.1 — 2026-08-11
 
 ### Fixed: Ethernet not announced at launch (already-connected cable never reported)

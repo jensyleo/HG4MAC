@@ -498,6 +498,18 @@ typedef enum {
 	// BUG FIX (11-ago-2026): announce an Ethernet cable that was already connected before
 	// launch — see -fireExistingWiredEthernetIfEnabled's comment for why this couldn't be
 	// decided earlier, in -primeWiredLinkState itself.
+	//
+	// NOTE (11-ago-2026, later same day): confirmed live (window-list probe) that firing this
+	// immediately meant it competed with the ~14 OTHER notifications every plugin fires in the
+	// same ~40ms launch instant (Power, 7 volume mounts, 6 USB devices) for the small number of
+	// on-screen banner slots — a real visibility problem (the notification itself always fired
+	// correctly; confirmed present in Notification History the whole time). The actual fix for
+	// that is in GrowlApplicationBridge.m (see its BUG FIX comment near kMinVisibleBeforeEvictable):
+	// a launch burst too fast for any banner to be evictable used to fall through and create a
+	// banner positioned off the bottom of the screen — genuinely unshowable for its whole 5s
+	// lifetime — instead of queuing it to be shown once room frees up. With that fixed, this can
+	// stay a plain, immediate call: Ethernet's banner is now guaranteed to eventually get its
+	// turn on screen instead of being lost, same as everything else in the launch flood.
 	[self fireExistingWiredEthernetIfEnabled];
 	// BUG FIX (06-ago-2026): CWWiFiClient's XPC connection to the system WiFi daemon isn't
 	// always warm yet this early in process launch — querying it synchronously right here
