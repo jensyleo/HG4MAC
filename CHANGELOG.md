@@ -4,6 +4,71 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.15.1 — 2026-08-12
+
+### Added: dedicated icons for Default Printer Changed and Print Job Started/Finished
+- Both notifications used to reuse the "Connected" checkmark badge — each now has its own icon,
+  designed with the user via mockup iterations and approved before implementing:
+  - **Default Printer Changed**: the printer glyph's existing green badge circle, with the
+    checkmark replaced by a rotating two-arrow "sync" symbol (same badge circle/outline as
+    Connected — only the symbol inside it changed).
+  - **Print Job Started/Finished**: crossed racing flags (one plain green, one checkered — the
+    classic motorsport "start" and "finish" pairing) placed directly on the printer glyph's
+    top-right corner, without a badge circle behind them.
+- New assets: `PrinterMonitor-Icon-DefaultChanged` and `PrinterMonitor-Icon-JobStatus` in
+  Assets.xcassets — both fully user-customizable (Custom/System/Reset) via their own Icons tab
+  rows, same as every other notification icon in this monitor.
+
+## v1.15.0 — 2026-08-12
+
+### Added: Printer Monitor — toner/ink level notifications
+- New opt-in notification, "Printer Supply Low", fires when a printer's toner/ink level drops
+  to 10% or below (with hysteresis: only re-arms once the level recovers to 15%+, so a level
+  hovering right at the threshold can't spam repeated notifications).
+- Reads the standard IPP "Marker" attribute group (`marker-levels`/`marker-names`/
+  `marker-colors`) via a direct `Get-Printer-Attributes` request — this is live printer state,
+  not part of what `cupsGetDests()` already caches locally, so it needs its own IPP round-trip
+  per printer. Polled far less often than the rest of this monitor (~every 30s instead of every
+  3s) since, unlike the local-only CUPS calls this monitor already makes, this is a live
+  round-trip to the physical printer for network/Bluetooth devices.
+- Not all printers/drivers report this — many older or cheaper printers simply don't expose
+  marker levels over IPP at all, in which case this feature silently never fires for that
+  printer (not an error).
+- Checkbox: "Notify when toner/ink is running low" (Preferences → Printer Monitor → Icons,
+  next to its icon row — see the app-convention fix below), OFF by default like the other
+  opt-in additions to this monitor.
+
+### Improved: Printer Monitor — human-readable error reasons and richer job notifications
+- "Printer Needs Attention" used to show the raw comma-separated IPP `printer-state-reasons`
+  keywords verbatim (e.g. `media-empty-error,cover-open-warning`). Now translated to plain
+  language ("Out of paper, Cover open") via a table of ~25 known keywords from RFC 8011 plus
+  common vendor-neutral extensions, with a reasonable fallback (dash→space, capitalized) for
+  anything not in the table.
+- "Print Job Started" now includes the submitting user and job size in KB.
+- "Print Job Finished" now includes the actual print duration.
+
+### Fixed: new notification toggles were placed on the wrong tab
+- The 4 new/changed "does this event notify at all" checkboxes (Needs Attention, Default
+  Printer Changed, Print Job Started/Finished, Supply Low) were initially added to the
+  "General" tab as a plain checkbox list. That breaks this app's own convention, followed by
+  every other monitor: **General** configures *how* a notification behaves/looks (which
+  fields it shows, thresholds, polling); **Icons** is where each distinct notification event
+  gets its own row — icon + on/off toggle together, via the shared `HWGIconPickerView`.
+  Moved all 4 into the Icons tab as their own rows (reusing the existing Connected/Disconnected
+  icon slots, since no dedicated artwork exists yet for these events — same pattern "Needs
+  Attention" already used). The 2 explanatory notes that don't fit the picker's fixed row
+  format (the state-reasons heuristic, the ~30s supply-check interval) moved to a caption
+  under the icon list instead of being dropped.
+
+### Fixed: a scroll-view content view could anchor to the bottom instead of the top
+- Found while adding the checkbox above: Printer Monitor's "General" tab content, when wrapped
+  in an `NSScrollView` to avoid clipping against the Preferences window's fixed container size
+  (same technique Network Monitor's Wi-Fi tab already uses), used a plain non-flipped `NSView`
+  as the scroll view's document view. When the content is shorter than the visible viewport,
+  a non-flipped document view anchors to the bottom, leaving a blank gap above the content and
+  potentially clipping content at the very bottom. Fixed by using `HWGFlippedContentView`
+  (already used elsewhere in this same file, for the Icons tab) instead of a plain `NSView`.
+
 ## v1.14.1 — 2026-08-11
 
 ### Housekeeping: pre-publish code audit

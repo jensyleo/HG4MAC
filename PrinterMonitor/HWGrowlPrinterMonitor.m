@@ -58,6 +58,26 @@
 // COMPLETED) but not exercised against an actual job in flight. See TODO.md.
 #define HWG_PRINTER_NOTIFY_JOB_KEY @"HWGPrinterNotifyJobStatus"
 
+// Toner/ink levels via IPP marker-levels (12-ago-2026 investigation) — this is live printer
+// STATE, not part of cupsGetDests()'s cached destination options like #1/#2/#3 above (those
+// come from CUPS's own local cache; marker-levels requires an explicit Get-Printer-Attributes
+// IPP round-trip per printer). Confirmed public/standard: the IPP "Marker" attribute group
+// (marker-names/marker-levels/marker-colors/marker-types) is part of the IPP Everywhere /
+// Printer MIB-derived standard attribute set, exposed identically by CUPS regardless of the
+// underlying connection (USB/Bluetooth/Network all present as local CUPS queues either way).
+// Polled far less often than connect/disconnect/error/job checks (every 10th tick ≈ 30s
+// instead of every 3s) since — unlike cupsGetDests()/cupsGetJobs(), which only ever talk to
+// the local cupsd — this is a live round-trip to the physical printer itself for network/
+// Bluetooth devices, and many older/cheaper printers simply don't report it at all (silently
+// skipped, not an error). OFF by default; threshold fixed at 10% (documented in the UI
+// caption) rather than a slider — unlike WiFi's poll interval, which genuinely varies by
+// environment, one sensible low-ink threshold covers the real use case here without adding a
+// second control surface for a checkbox this minor.
+#define HWG_PRINTER_NOTIFY_SUPPLY_KEY @"HWGPrinterNotifySupplyLow"
+#define HWG_PRINTER_SUPPLY_POLL_EVERY_N_TICKS 10
+#define HWG_PRINTER_SUPPLY_LOW_THRESHOLD 10
+#define HWG_PRINTER_SUPPLY_RECOVER_THRESHOLD 15
+
 static BOOL HWGPrinterBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -143,6 +163,142 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	return NO;
 }
 
+// Maps known IPP printer-state-reasons keywords (RFC 8011 §5.4.12 base set + common vendor-
+// neutral extensions also defined in the same registry) to short, human-readable phrases —
+// e.g. "Out of paper" instead of the raw "media-empty-error" that used to be shown verbatim in
+// the notification body. Falls back to a dash→space, capitalized rendering of the raw keyword
+// for anything not in this table, so an unrecognized/vendor-specific reason still reads
+// reasonably instead of being dropped or shown as raw hyphenated IPP syntax.
+static NSString *HWGFriendlyLabelForStateReason(NSString *reasonWithSuffix) {
+	static NSDictionary<NSString*, NSString*> *table = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		table = @{
+			@"media-empty":              NSLocalizedString(@"Out of paper", @""),
+			@"media-jam":                NSLocalizedString(@"Paper jam", @""),
+			@"media-low":                NSLocalizedString(@"Paper low", @""),
+			@"media-needed":             NSLocalizedString(@"Wrong paper loaded", @""),
+			@"door-open":                NSLocalizedString(@"Door open", @""),
+			@"cover-open":               NSLocalizedString(@"Cover open", @""),
+			@"interlock-open":           NSLocalizedString(@"Interlock open", @""),
+			@"toner-low":                NSLocalizedString(@"Toner low", @""),
+			@"toner-empty":              NSLocalizedString(@"Toner empty", @""),
+			@"marker-supply-low":        NSLocalizedString(@"Ink/toner low", @""),
+			@"marker-supply-empty":      NSLocalizedString(@"Ink/toner empty", @""),
+			@"marker-waste-almost-full": NSLocalizedString(@"Waste tank almost full", @""),
+			@"marker-waste-full":        NSLocalizedString(@"Waste tank full", @""),
+			@"input-tray-missing":       NSLocalizedString(@"Paper tray missing", @""),
+			@"output-tray-missing":      NSLocalizedString(@"Output tray missing", @""),
+			@"output-area-almost-full":  NSLocalizedString(@"Output tray almost full", @""),
+			@"output-area-full":         NSLocalizedString(@"Output tray full", @""),
+			@"paused":                   NSLocalizedString(@"Paused", @""),
+			@"shutdown":                 NSLocalizedString(@"Shutting down", @""),
+			@"stopped-partly":           NSLocalizedString(@"Partially stopped", @""),
+			@"stopping":                 NSLocalizedString(@"Stopping", @""),
+			@"timed-out":                NSLocalizedString(@"Not responding", @""),
+			@"offline":                  NSLocalizedString(@"Offline", @""),
+			@"fuser-over-temp":          NSLocalizedString(@"Fuser overheating", @""),
+			@"fuser-under-temp":         NSLocalizedString(@"Fuser too cold", @""),
+			@"spool-area-full":          NSLocalizedString(@"Spool area full", @""),
+		};
+	});
+
+	NSString *base = reasonWithSuffix;
+	for (NSString *suffix in @[@"-error", @"-warning", @"-report"]) {
+		if ([base hasSuffix:suffix]) { base = [base substringToIndex:base.length - suffix.length]; break; }
+	}
+	NSString *friendly = table[base];
+	if (friendly) return friendly;
+	NSString *spaced = [base stringByReplacingOccurrencesOfString:@"-" withString:@" "];
+	if (!spaced.length) return base;
+	return [spaced stringByReplacingCharactersInRange:NSMakeRange(0, 1) withString:[[spaced substringToIndex:1] uppercaseString]];
+}
+
+// Builds the full human-readable description for a "Needs Attention" notification from the raw
+// comma-separated printer-state-reasons string — e.g. "Out of paper, Cover open" instead of
+// "media-empty-error,cover-open-warning". Only the "-error"/"-warning" keywords are included
+// (matching HWGStateReasonsIndicateProblem's own definition of "an actual problem" above);
+// purely informational "-report" keywords are left out here too. Returns nil if there's
+// nothing to show (caller falls back to the raw string in that case, which shouldn't normally
+// happen since this is only called when HWGStateReasonsIndicateProblem already said YES).
+static NSString *HWGFriendlyStateReasonsDescription(NSString *reasons) {
+	if (![reasons length] || [reasons isEqualToString:@"none"]) return nil;
+	NSMutableArray<NSString*> *labels = [NSMutableArray array];
+	for (NSString *reason in [reasons componentsSeparatedByString:@","]) {
+		if ([reason hasSuffix:@"-error"] || [reason hasSuffix:@"-warning"]) {
+			[labels addObject:HWGFriendlyLabelForStateReason(reason)];
+		}
+	}
+	return labels.count ? [labels componentsJoinedByString:@", "] : nil;
+}
+
+// Formats a job's processing duration for the "Print Job Finished" notification body.
+static NSString *HWGFormattedDuration(NSTimeInterval seconds) {
+	NSInteger total = (NSInteger)llround(seconds);
+	NSInteger mins = total / 60;
+	NSInteger secs = total % 60;
+	if (mins > 0) return [NSString stringWithFormat:NSLocalizedString(@"%ldm %lds", @""), (long)mins, (long)secs];
+	return [NSString stringWithFormat:NSLocalizedString(@"%lds", @""), (long)secs];
+}
+
+// One toner/ink marker's live reading — a printer usually reports several (e.g. separate
+// Cyan/Magenta/Yellow/Black cartridges), so a printer can appear more than once in the array
+// HWGCopyMarkerLevelsForDest returns below.
+@interface HWGMarkerInfo : NSObject
+@property (nonatomic, copy) NSString *name;    // e.g. "Black Cartridge" — from marker-names
+@property (nonatomic, copy) NSString *color;   // e.g. "black" / "#00FFFF" — from marker-colors, may be nil
+@property (nonatomic, assign) NSInteger level; // 0-100, or -1 per IPP spec meaning "not reported"
+@end
+@implementation HWGMarkerInfo
+@end
+
+// Queries live marker-levels (toner/ink) via a direct IPP Get-Printer-Attributes request against
+// the printer's own local CUPS queue URI ("ipp://localhost:<port>/printers/<name>" — the same
+// address `lpstat`/`ipptool` use for any CUPS-registered destination, regardless of whether the
+// physical printer itself is USB/Bluetooth/Network). This data is NOT part of cupsGetDests()'s
+// cached destination options (unlike printer-state-reasons/location/make-model above), so it
+// needs its own request — hence why this is polled on a slower cadence than the rest of this
+// monitor (see HWG_PRINTER_SUPPLY_POLL_EVERY_N_TICKS). Returns nil if the printer doesn't answer
+// within the timeout (offline/unreachable) or doesn't report any markers at all (common on
+// older/cheaper printers) — both cases are silently skipped by the caller, not treated as errors.
+static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
+	char resource[1024];
+	http_t *http = cupsConnectDest(dest, CUPS_DEST_FLAGS_NONE, 3000, NULL, resource, sizeof(resource), NULL, NULL);
+	if (!http) return nil;
+
+	char uri[1024];
+	httpAssembleURIf(HTTP_URI_CODING_ALL, uri, sizeof(uri), "ipp", NULL, "localhost", ippPort(), "/printers/%s", dest->name);
+
+	ipp_t *request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+	ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, uri);
+	ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, cupsUser());
+	static const char * const requestedAttrs[] = { "marker-names", "marker-levels", "marker-colors", "marker-types" };
+	ippAddStrings(request, IPP_TAG_OPERATION, IPP_TAG_KEYWORD, "requested-attributes", 4, NULL, requestedAttrs);
+
+	ipp_t *response = cupsDoRequest(http, request, resource);
+	httpClose(http);
+	if (!response) return nil;
+
+	ipp_attribute_t *levelsAttr = ippFindAttribute(response, "marker-levels", IPP_TAG_ZERO);
+	ipp_attribute_t *namesAttr  = ippFindAttribute(response, "marker-names", IPP_TAG_ZERO);
+	ipp_attribute_t *colorsAttr = ippFindAttribute(response, "marker-colors", IPP_TAG_ZERO);
+	if (!levelsAttr) { ippDelete(response); return nil; }
+
+	int count = ippGetCount(levelsAttr);
+	NSMutableArray<HWGMarkerInfo*> *result = [NSMutableArray arrayWithCapacity:(NSUInteger)MAX(count, 0)];
+	for (int i = 0; i < count; i++) {
+		HWGMarkerInfo *marker = [[HWGMarkerInfo alloc] init];
+		marker.level = ippGetInteger(levelsAttr, i);
+		const char *name = (namesAttr && i < ippGetCount(namesAttr)) ? ippGetString(namesAttr, i, NULL) : NULL;
+		const char *color = (colorsAttr && i < ippGetCount(colorsAttr)) ? ippGetString(colorsAttr, i, NULL) : NULL;
+		marker.name = name ? [NSString stringWithUTF8String:name] : [NSString stringWithFormat:NSLocalizedString(@"Supply %d", @""), i + 1];
+		marker.color = color ? [NSString stringWithUTF8String:color] : nil;
+		[result addObject:marker];
+	}
+	ippDelete(response);
+	return result;
+}
+
 @interface HWGrowlPrinterMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
@@ -162,6 +318,14 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*> *lastKnownJobStates;
 @property (nonatomic, assign) BOOL jobTrackingBaselineSeeded;
 
+// Toner/ink levels: tick counter to poll the slower marker-levels check every Nth
+// -checkPrinters call (see HWG_PRINTER_SUPPLY_POLL_EVERY_N_TICKS), and last known "was low"
+// state per printer+marker (key: "printerName|markerName") so the notification fires only on
+// the healthy→low transition, with hysteresis (HWG_PRINTER_SUPPLY_LOW_THRESHOLD vs
+// _RECOVER_THRESHOLD) so a level hovering right at the cutoff can't flap repeatedly.
+@property (nonatomic, assign) NSUInteger pollTickCount;
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*> *lastKnownSupplyLow;
+
 @end
 
 @implementation HWGrowlPrinterMonitor
@@ -173,6 +337,7 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	if ((self = [super init])) {
 		self.lastKnownStateReasons = [NSMutableDictionary dictionary];
 		self.lastKnownJobStates = [NSMutableDictionary dictionary];
+		self.lastKnownSupplyLow = [NSMutableDictionary dictionary];
 		// Baseline silently at launch — never announce printers/states/defaults that were
 		// already present.
 		NSDictionary<NSString*, HWGPrinterInfo*> *info = HWGCollectPrinterInfo();
@@ -199,7 +364,8 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	BOOL enabled = HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_KEY, NO) ||
 		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_ERROR_KEY, NO) ||
 		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_DEFAULT_KEY, NO) ||
-		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_JOB_KEY, NO);
+		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_JOB_KEY, NO) ||
+		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_SUPPLY_KEY, NO);
 	if (enabled && !_pollTimer) {
 		self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:HWG_PRINTER_POLL_INTERVAL
 														   target:self
@@ -283,9 +449,10 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 			BOOL isProblem  = HWGStateReasonsIndicateProblem(info.stateReasons);
 			if (isProblem && !wasProblem) {
 				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:NO] TIFFRepresentation];
+				NSString *friendlyReasons = HWGFriendlyStateReasonsDescription(info.stateReasons);
 				[delegate notifyWithName:@"PrinterError"
 										 title:NSLocalizedString(@"Printer Needs Attention", @"")
-								 description:[NSString stringWithFormat:@"%@\n%@", info.name, info.stateReasons]
+								 description:[NSString stringWithFormat:@"%@\n%@", info.name, friendlyReasons ?: info.stateReasons]
 										  icon:iconData
 						  identifierString:[NSString stringWithFormat:@"HWGrowlPrinterError-%@", info.name]
 							  contextString:nil
@@ -315,7 +482,11 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 			NSString *previous = self.lastKnownDefaultPrinter;
 			self.lastKnownDefaultPrinter = currentDefault;
 			if (previous) {   // skip the very first baseline read
-				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:YES] TIFFRepresentation];
+				// 12-ago-2026: own dedicated icon (rotating-arrows badge on the printer glyph,
+				// replacing the shared Connected checkmark badge) instead of reusing
+				// +printerIconConnected: — see PrinterMonitor-Icon-DefaultChanged in
+				// Assets.xcassets. HWGResolveIconNamed already handles the user-override check.
+				NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-DefaultChanged") TIFFRepresentation];
 				[delegate notifyWithName:@"PrinterDefaultChanged"
 										 title:NSLocalizedString(@"Default Printer Changed", @"")
 								 description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), previous, currentDefault]
@@ -341,6 +512,18 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 		[self.lastKnownJobStates removeAllObjects];
 		self.jobTrackingBaselineSeeded = NO;
 	}
+
+	// Toner/ink levels: slower cadence than everything above (see the define's comment) — only
+	// actually queries IPP marker-levels every Nth tick, and only while the checkbox is on.
+	self.pollTickCount++;
+	if (HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_SUPPLY_KEY, NO)) {
+		if (self.pollTickCount % HWG_PRINTER_SUPPLY_POLL_EVERY_N_TICKS == 0) {
+			[self checkSupplyLevels];
+		}
+	} else if (self.lastKnownSupplyLow.count) {
+		// Feature turned off mid-session — same reasoning as job tracking above.
+		[self.lastKnownSupplyLow removeAllObjects];
+	}
 }
 
 // #6: polls the CUPS job queue (all local jobs, not just this user's — `cupsGetJobs` with
@@ -363,17 +546,30 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 
 		NSString *destName = job->dest ? [NSString stringWithUTF8String:job->dest] : NSLocalizedString(@"Unknown printer", @"");
 		NSString *jobTitle = (job->title && *job->title) ? [NSString stringWithUTF8String:job->title] : nil;
-		NSString *description = jobTitle ? [NSString stringWithFormat:@"%@\n%@", jobTitle, destName] : destName;
+		NSString *jobUser  = (job->user && *job->user) ? [NSString stringWithUTF8String:job->user] : nil;
 
 		if (!previousStateNum) {
 			// New job. Only announce "Started" once baseline-seeded (i.e. not the very first
 			// poll after enabling the checkbox, which would otherwise retroactively "start"-
 			// notify every job already in flight) AND it's genuinely still active.
 			if (self.jobTrackingBaselineSeeded && isActive) {
-				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:YES] TIFFRepresentation];
+				// 12-ago-2026: enriched with submitting user + job size (`cups_job_t.size`, in
+				// KB per the public header) on their own line — the plain title+printer name
+				// this used to show gave no sense of "is this a big job" at a glance.
+				NSMutableArray<NSString*> *lines = [NSMutableArray arrayWithObject:jobTitle ?: destName];
+				if (jobTitle) [lines addObject:destName];
+				NSMutableArray<NSString*> *metaParts = [NSMutableArray array];
+				if (jobUser.length) [metaParts addObject:jobUser];
+				if (job->size > 0) [metaParts addObject:[NSString stringWithFormat:NSLocalizedString(@"%d KB", @""), job->size]];
+				if (metaParts.count) [lines addObject:[metaParts componentsJoinedByString:@" • "]];
+
+				// 12-ago-2026: own dedicated icon (crossed racing flags — one plain green for
+				// "start", one checkered for "finish" — designed and approved with the user via
+				// mockup before implementing) instead of reusing +printerIconConnected:.
+				NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-JobStatus") TIFFRepresentation];
 				[delegate notifyWithName:@"PrintJobStarted"
 										 title:NSLocalizedString(@"Print Job Started", @"")
-								 description:description
+								 description:[lines componentsJoinedByString:@"\n"]
 										  icon:iconData
 						  identifierString:[NSString stringWithFormat:@"HWGrowlPrintJob-%d", job->id]
 							  contextString:nil
@@ -384,12 +580,22 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 			BOOL wasActive = (previousState == IPP_JSTATE_PENDING || previousState == IPP_JSTATE_HELD || previousState == IPP_JSTATE_PROCESSING);
 			if (isTerminal && wasActive) {
 				BOOL succeeded = (state == IPP_JSTATE_COMPLETED);
-				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:succeeded] TIFFRepresentation];
+				NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-JobStatus") TIFFRepresentation];
 				NSString *title = succeeded ? NSLocalizedString(@"Print Job Finished", @"")
 													  : NSLocalizedString(@"Print Job Canceled", @"");
+
+				// 12-ago-2026: enriched with elapsed processing duration when CUPS reports both
+				// endpoints (`processing_time` falls back to `creation_time` for jobs that
+				// never actually left the queue — e.g. canceled before printing started).
+				NSMutableArray<NSString*> *lines = [NSMutableArray arrayWithObject:jobTitle ?: destName];
+				if (jobTitle) [lines addObject:destName];
+				time_t start = job->processing_time > 0 ? job->processing_time : job->creation_time;
+				if (succeeded && job->completed_time > 0 && start > 0 && job->completed_time >= start) {
+					[lines addObject:HWGFormattedDuration((NSTimeInterval)(job->completed_time - start))];
+				}
 				[delegate notifyWithName:@"PrintJobFinished"
 										 title:title
-								 description:description
+								 description:[lines componentsJoinedByString:@"\n"]
 										  icon:iconData
 						  identifierString:[NSString stringWithFormat:@"HWGrowlPrintJob-%d", job->id]
 							  contextString:nil
@@ -409,7 +615,7 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 		ipp_jstate_t previousState = (ipp_jstate_t)[self.lastKnownJobStates[jobID] integerValue];
 		BOOL wasActive = (previousState == IPP_JSTATE_PENDING || previousState == IPP_JSTATE_HELD || previousState == IPP_JSTATE_PROCESSING);
 		if (wasActive && self.jobTrackingBaselineSeeded) {
-			NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:YES] TIFFRepresentation];
+			NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-JobStatus") TIFFRepresentation];
 			[delegate notifyWithName:@"PrintJobFinished"
 									 title:NSLocalizedString(@"Print Job Finished", @"")
 							 description:NSLocalizedString(@"Job completed", @"")
@@ -423,6 +629,56 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 
 	self.jobTrackingBaselineSeeded = YES;
 	if (jobs) cupsFreeJobs(jobCount, jobs);
+}
+
+// Toner/ink levels (12-ago-2026): re-fetches its own `cups_dest_t` array (rather than reusing
+// `HWGCollectPrinterInfo`'s already-freed one) since `HWGCopyMarkerLevelsForDest` needs the raw
+// CUPS dest struct to connect to each printer — a second, independent `cupsGetDests()` call,
+// acceptable here since this only runs every 10th tick (~30s), not every 3s like the rest of
+// this monitor. Fires "Printer Supply Low" once per printer+marker on the healthy→low
+// transition; recovering above the (higher) recovery threshold just resets the tracking
+// silently so a later dip re-fires, without a matching "supply OK" notification — replacing a
+// cartridge is something the user just did and observed directly, unlike PrinterError's
+// OK/problem pair which covers a fault the user may not be looking at when it clears.
+-(void)checkSupplyLevels {
+	cups_dest_t *dests = NULL;
+	int count = cupsGetDests(&dests);
+	for (int i = 0; i < count; i++) {
+		cups_dest_t *dest = &dests[i];
+		if (!dest->name) continue;
+		NSString *printerName = [NSString stringWithUTF8String:dest->name];
+
+		NSArray<HWGMarkerInfo*> *markers = HWGCopyMarkerLevelsForDest(dest);
+		if (!markers) continue;   // offline/unreachable, or doesn't report markers at all
+
+		for (HWGMarkerInfo *marker in markers) {
+			if (marker.level < 0) continue;   // IPP "-1" = not reported, per spec — not a real 0%
+			NSString *stateKey = [NSString stringWithFormat:@"%@|%@", printerName, marker.name];
+			BOOL wasLow = [self.lastKnownSupplyLow[stateKey] boolValue];
+			BOOL isLow = marker.level <= HWG_PRINTER_SUPPLY_LOW_THRESHOLD;
+			BOOL hasRecovered = marker.level >= HWG_PRINTER_SUPPLY_RECOVER_THRESHOLD;
+
+			if (isLow && !wasLow) {
+				// 12-ago-2026: own dedicated icon (ink dropper with a falling drop — the user's
+				// own reference image, background-removed and composited onto the printer
+				// glyph, approved via mockup before implementing) instead of reusing
+				// +printerIconConnected:NO's red-X Disconnected badge.
+				NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-SupplyLow") TIFFRepresentation];
+				NSString *label = marker.color.length ? [NSString stringWithFormat:@"%@ (%@)", marker.name, marker.color] : marker.name;
+				[delegate notifyWithName:@"PrinterSupplyLow"
+										 title:NSLocalizedString(@"Printer Supply Low", @"")
+								 description:[NSString stringWithFormat:@"%@\n%@: %ld%%", printerName, label, (long)marker.level]
+										  icon:iconData
+						  identifierString:[NSString stringWithFormat:@"HWGrowlPrinterSupply-%@", stateKey]
+							  contextString:nil
+										plugin:self];
+				self.lastKnownSupplyLow[stateKey] = @YES;
+			} else if (hasRecovered && wasLow) {
+				self.lastKnownSupplyLow[stateKey] = @NO;
+			}
+		}
+	}
+	if (dests) cupsFreeDests(count, dests);
 }
 
 #pragma mark Icon
@@ -587,13 +843,40 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	return box;
 }
 
+// Wraps a fixed-height content view in a scroll view sized to fill whatever the tab control
+// actually gives it — AppDelegate force-sizes the top-level preferencePane view to the prefs
+// window's container (a fixed size, decided once), which can be shorter than a tab's full
+// content — same technique already used by Network Monitor's Wi-Fi tab for the same reason.
+-(NSScrollView *)scrollWrapping:(NSView *)content height:(CGFloat)height {
+	NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:content.frame];
+	scroll.hasVerticalScroller = YES;
+	scroll.autohidesScrollers = YES;
+	scroll.drawsBackground = NO;
+	scroll.documentView = content;
+	content.translatesAutoresizingMaskIntoConstraints = NO;
+	[NSLayoutConstraint activateConstraints:@[
+		[content.topAnchor      constraintEqualToAnchor:scroll.contentView.topAnchor],
+		[content.leadingAnchor  constraintEqualToAnchor:scroll.contentView.leadingAnchor],
+		[content.widthAnchor    constraintEqualToAnchor:scroll.contentView.widthAnchor],
+		[content.heightAnchor   constraintEqualToConstant:height],
+	]];
+	return scroll;
+}
+
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
 	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	// 12-ago-2026: switched to HWGFlippedContentView (same class the Icons tab below already
+	// uses for its own scroll-view document view) and enlarged to fit the new supply-low
+	// checkbox + caption. A plain non-flipped NSView as an NSScrollView's documentView anchors
+	// content to the BOTTOM of the viewport when the content is shorter than the visible area
+	// (confirmed live: caused a large blank gap above "Notification fields" and clipped the
+	// last caption at the bottom) — flipped fixes that, matching Auto Layout's normal top-down
+	// expectations. The actual visible height is controlled by -scrollWrapping:height: below.
+	NSView *v = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, 620)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -654,58 +937,33 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 		gap = 6;
 	}
 
-	// #1 + #2: new notifications, both OFF by default (23-jul-2026).
-	NSTextField *newNotesHeader = [NSTextField labelWithString:NSLocalizedString(@"Additional notifications", @"")];
-	newNotesHeader.font = [NSFont boldSystemFontOfSize:12];
-	newNotesHeader.textColor = [NSColor secondaryLabelColor];
-	newNotesHeader.translatesAutoresizingMaskIntoConstraints = NO;
-	[v addSubview:newNotesHeader];
-	[NSLayoutConstraint activateConstraints:@[
-		[newNotesHeader.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:18],
-		[newNotesHeader.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-	]];
-
-	NSButton *errorRow   = [self checkboxWithKey:HWG_PRINTER_NOTIFY_ERROR_KEY   title:NSLocalizedString(@"Notify when a printer needs attention (out of paper/toner, jammed, offline…)", @"") defaultOn:NO];
-	NSButton *defaultRow = [self checkboxWithKey:HWG_PRINTER_NOTIFY_DEFAULT_KEY title:NSLocalizedString(@"Notify when the default printer changes", @"") defaultOn:NO];
-	NSButton *jobRow     = [self checkboxWithKey:HWG_PRINTER_NOTIFY_JOB_KEY    title:NSLocalizedString(@"Notify when a print job starts/finishes", @"") defaultOn:NO];
-	previous = newNotesHeader;
-	gap = 10;
-	for (NSButton *r in @[errorRow, defaultRow, jobRow]) {
-		[v addSubview:r];
-		[NSLayoutConstraint activateConstraints:@[
-			[r.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:gap],
-			[r.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-			[r.heightAnchor   constraintEqualToConstant:24],
-		]];
-		previous = r;
-		gap = 6;
-	}
-
-	NSTextField *errorCaption = [NSTextField wrappingLabelWithString:
-		NSLocalizedString(@"\"Needs attention\" is read from the printer's standard IPP state-reasons — a heuristic (any reason other than \"none\"), not a CUPS-specific guarantee of what's wrong.", @"")];
-	errorCaption.textColor = [NSColor secondaryLabelColor];
-	errorCaption.font = [NSFont systemFontOfSize:11];
-	errorCaption.translatesAutoresizingMaskIntoConstraints = NO;
-	errorCaption.preferredMaxLayoutWidth = 380;
-	[v addSubview:errorCaption];
-	[NSLayoutConstraint activateConstraints:@[
-		[errorCaption.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:8],
-		[errorCaption.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[errorCaption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
-	]];
+	// 12-ago-2026: the "which events notify, on/off + icon" toggles used to live here as a
+	// plain checkbox list ("Additional notifications") — moved to the Icons tab below instead,
+	// each as its own row via HWGIconPickerView (label + icon + notify checkbox together),
+	// matching how "Connected"/"Needs Attention" already worked. General is for configuring
+	// HOW a notification looks/behaves (which fields it shows, thresholds, polling); WHETHER a
+	// given event notifies at all — and its icon — belongs with the icon it's paired with.
+	[v.bottomAnchor constraintGreaterThanOrEqualToAnchor:previous.bottomAnchor constant:16].active = YES;
 
 	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
 	generalItem.label = NSLocalizedString(@"General", @"");
-	generalItem.view = v;
+	generalItem.view = [self scrollWrapping:v height:420];
 	[tabs addTabViewItem:generalItem];
 
 	// --- Tab: Icons ---
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
+	// 12-ago-2026: "Default Printer Changed" and "Print Job Started/Finished" each got their
+	// own dedicated icon (rotating-arrows badge, and crossed start/finish racing flags,
+	// respectively — both designed and approved with the user via mockup before implementing),
+	// replacing the shared Connected checkmark badge they used to reuse.
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"PrinterMonitor-ModuleIcon"],
 		@[@"Connected", @"PrinterMonitor-Icon-Connected", HWG_PRINTER_NOTIFY_CONNECT_KEY],
 		@[@"Needs Attention", @"PrinterMonitor-Icon-Disconnected", HWG_PRINTER_NOTIFY_ERROR_KEY, @NO],
+		@[@"Default Printer Changed", @"PrinterMonitor-Icon-DefaultChanged", HWG_PRINTER_NOTIFY_DEFAULT_KEY, @NO],
+		@[@"Print Job Started / Finished", @"PrinterMonitor-Icon-JobStatus", HWG_PRINTER_NOTIFY_JOB_KEY, @NO],
+		@[@"Supply Low (Toner/Ink)", @"PrinterMonitor-Icon-SupplyLow", HWG_PRINTER_NOTIFY_SUPPLY_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -718,11 +976,24 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
 	CGFloat iconsGap = 12;
 
-	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + 2 * iconsPad)];
+	// 12-ago-2026: notes on 2 rows' behavior that don't fit in the picker's fixed label/icon/
+	// checkbox row format — kept here rather than dropped when their checkboxes moved from
+	// General's old "Additional notifications" list into this tab.
+	NSTextField *iconsCaption = [NSTextField wrappingLabelWithString:
+		NSLocalizedString(@"\"Needs Attention\" is read from the printer's standard IPP state-reasons — a heuristic (any reason other than \"none\"), not a CUPS-specific guarantee of what's wrong. \"Supply Low\" (10% or below) is checked every ~30s via IPP marker-levels, separately from the other rows above — not all printers/drivers report it.", @"")];
+	iconsCaption.textColor = [NSColor secondaryLabelColor];
+	iconsCaption.font = [NSFont systemFontOfSize:11];
+	iconsCaption.translatesAutoresizingMaskIntoConstraints = YES;
+	iconsCaption.preferredMaxLayoutWidth = iconsWidth;
+	CGFloat iconsCaptionH = [iconsCaption sizeThatFits:NSMakeSize(iconsWidth, CGFLOAT_MAX)].height;
+
+	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + iconsGap + iconsCaptionH + 2 * iconsPad)];
 	iconsHeader.frame = NSMakeRect(iconsPad, iconsPad, iconsWidth, iconsHeaderH);
 	[iconsContent addSubview:iconsHeader];
 	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
 	[iconsContent addSubview:iconPicker];
+	iconsCaption.frame = NSMakeRect(iconsPad, NSMaxY(iconPicker.frame) + iconsGap, iconsWidth, iconsCaptionH);
+	[iconsContent addSubview:iconsCaption];
 
 	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
 	iconsScroll.hasVerticalScroller = YES;
@@ -743,7 +1014,7 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"PrinterConnected", @"PrinterDisconnected", @"PrinterError", @"PrinterDefaultChanged", @"PrintJobStarted", @"PrintJobFinished", nil];
+	return [NSArray arrayWithObjects:@"PrinterConnected", @"PrinterDisconnected", @"PrinterError", @"PrinterDefaultChanged", @"PrintJobStarted", @"PrintJobFinished", @"PrinterSupplyLow", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Printer Connected", @""), @"PrinterConnected",
@@ -751,7 +1022,8 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 			  NSLocalizedString(@"Printer Needs Attention", @""), @"PrinterError",
 			  NSLocalizedString(@"Default Printer Changed", @""), @"PrinterDefaultChanged",
 			  NSLocalizedString(@"Print Job Started", @""), @"PrintJobStarted",
-			  NSLocalizedString(@"Print Job Finished", @""), @"PrintJobFinished", nil];
+			  NSLocalizedString(@"Print Job Finished", @""), @"PrintJobFinished",
+			  NSLocalizedString(@"Printer Supply Low", @""), @"PrinterSupplyLow", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a printer is added to the system (F34)", @""), @"PrinterConnected",
@@ -759,7 +1031,8 @@ static BOOL HWGStateReasonsIndicateProblem(NSString *reasons) {
 			  NSLocalizedString(@"Sent when a printer's state indicates a problem (out of paper/toner, jammed, offline…), and when it clears", @""), @"PrinterError",
 			  NSLocalizedString(@"Sent when the system's default printer changes", @""), @"PrinterDefaultChanged",
 			  NSLocalizedString(@"Sent when a print job starts processing", @""), @"PrintJobStarted",
-			  NSLocalizedString(@"Sent when a print job completes or is canceled", @""), @"PrintJobFinished", nil];
+			  NSLocalizedString(@"Sent when a print job completes or is canceled", @""), @"PrintJobFinished",
+			  NSLocalizedString(@"Sent when a printer's toner/ink level drops to 10% or below", @""), @"PrinterSupplyLow", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray array];
