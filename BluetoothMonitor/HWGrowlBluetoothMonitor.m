@@ -26,10 +26,23 @@
 // rely on) for Apple's own accessories specifically. Non-Apple (CoreBluetooth GATT Battery
 // Service) is a separate, not-yet-implemented rope — see TODO.md, blocked on hardware to test.
 #define HWG_BT_SHOW_BATTERY_KEY @"HWGBluetoothShowBattery"
+#define HWG_BT_SHOW_RSSI_KEY    @"HWGBluetoothShowRSSI"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
+}
+
+// Same dBm thresholds as HWGWifiBarsForRSSI (NetworkMonitor/HWGWifiSignal.m) — both values are
+// raw receiver signal strength in dBm, so the physical scale is comparable even though
+// Bluetooth doesn't document a standard "golden range" the way Wi-Fi chipsets do. Best-effort,
+// not a verified Bluetooth-specific calibration.
+static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
+	if (rssi >= -55) return 4;
+	else if (rssi >= -65) return 3;
+	else if (rssi >= -73) return 2;
+	else if (rssi >= -80) return 1;
+	else return 0;
 }
 
 // Per-device-type "Notify" toggle (Icons tab) — same mechanism as USB/Thunderbolt Monitor's.
@@ -364,6 +377,22 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		if (batteryInfo) [lines addObject:batteryInfo];
 	}
 
+	if (HWGBTBoolForKey(HWG_BT_SHOW_RSSI_KEY, YES)) {
+		// rawRSSI()/RSSI() only return a meaningful value while CONNECTED (public API,
+		// IOBluetoothDevice) — not during discovery/pairing, which this monitor doesn't do.
+		BluetoothHCIRSSIValue rssi = [device rawRSSI];
+		if (rssi != 127) { // 127 = "not available" per IOBluetooth
+			// Bars use the SAME dBm thresholds as Wi-Fi's signal bars (both are raw receiver
+			// signal strength in dBm) — a reasonable but unverified assumption, since Bluetooth
+			// firmwares don't document a standard "golden range" the way Wi-Fi chipsets do.
+			// The connect notification deliberately keeps the device-type icon (headphones/
+			// mouse/etc.) rather than swapping to a signal-bars icon — per-level icons still
+			// exist in the Icons tab for reference/customization (feedback 13-ago-2026).
+			NSInteger bars = HWGBluetoothBarsForRSSI(rssi);
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Signal:\t%ld dBm (%ld/4)", @""), (long)rssi, (long)bars]];
+		}
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -467,6 +496,7 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[self checkboxWithKey:HWG_BT_SHOW_PAIRED_KEY  title:NSLocalizedString(@"Paired state", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_ADDRESS_KEY title:NSLocalizedString(@"MAC address", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_BATTERY_KEY title:NSLocalizedString(@"Battery level (Apple accessories: AirPods, Magic Mouse/Keyboard/Trackpad)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_BT_SHOW_RSSI_KEY    title:NSLocalizedString(@"Signal strength (RSSI, while connected)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
@@ -510,6 +540,14 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		@[@"Headphones", @"BT-TypeHeadphones", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Headphones"]],
 		@[@"Connected (generic)", @"Bluetooth-On", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
 		@[@"Disconnected (generic)", @"Bluetooth-Off", HWG_BT_NOTIFY_DISCONNECT_KEY],
+		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
+		// notification keeps the device-type icon above, it does NOT switch to one of these.
+		// No notifyKey: nothing separate to enable/disable here, just icon customization.
+		@[@"Signal — No Signal", @"Bluetooth-Signal-0"],
+		@[@"Signal — Weak", @"Bluetooth-Signal-1"],
+		@[@"Signal — Fair", @"Bluetooth-Signal-2"],
+		@[@"Signal — Good", @"Bluetooth-Signal-3"],
+		@[@"Signal — Excellent", @"Bluetooth-Signal-4"],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -522,11 +560,26 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
 	CGFloat iconsGap = 12;
 
-	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, iconsHeaderH + iconsGap + iconPickerH + 2 * iconsPad)];
+	// Explains why the 5 "Signal — …" rows above have no checkbox, since users naturally
+	// expect one there given every other row in this picker has it (feedback 13-ago-2026).
+	// Per-level RSSI notifications are technically possible but not implemented: RSSI
+	// fluctuates continuously (multipath/distance jitter, no hysteresis smoothing applied
+	// to it the way WiFi bars are), so a naive per-level trigger would fire repeatedly as
+	// the value crosses a threshold back and forth. Tracked as pending work.
+	NSTextField *signalNote = [NSTextField wrappingLabelWithString:NSLocalizedString(@"Note: the 5 signal-strength icons above have no notification checkbox — they only customize which image is shown at each RSSI level while “Signal strength” is enabled in General. Per-level signal notifications (e.g. “notify when signal drops to Weak”) are technically possible but not implemented yet, pending hysteresis logic to avoid notification spam from RSSI’s natural fluctuation.", @"")];
+	signalNote.font = [NSFont systemFontOfSize:11];
+	signalNote.textColor = [NSColor tertiaryLabelColor];
+	signalNote.translatesAutoresizingMaskIntoConstraints = YES;
+	signalNote.preferredMaxLayoutWidth = iconsWidth;
+	CGFloat signalNoteH = signalNote.fittingSize.height;
+
+	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, iconsHeaderH + iconsGap + iconPickerH + iconsGap + signalNoteH + 2 * iconsPad)];
 	iconsHeader.frame = NSMakeRect(iconsPad, iconsPad, iconsWidth, iconsHeaderH);
 	[iconsContent addSubview:iconsHeader];
 	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
 	[iconsContent addSubview:iconPicker];
+	signalNote.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap + iconPickerH + iconsGap, iconsWidth, signalNoteH);
+	[iconsContent addSubview:signalNote];
 
 	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 320)];
 	iconsScroll.hasVerticalScroller = YES;

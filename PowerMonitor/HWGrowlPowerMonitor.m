@@ -53,6 +53,11 @@
 // of an ALREADY-firing notification.
 #define HWG_POWER_LOWPOWER_NOTIFY_KEY @"HWGPowerNotifyLowPowerMode"
 
+// Adapter wattage/type — IOPSCopyExternalPowerAdapterDetails() is public IOKit (ps/IOPowerSources.h),
+// unrelated to the delicate P20 retain area in -powerSourceChanged:. OFF by default like the
+// other opt-in additions to this monitor.
+#define HWG_POWER_ADAPTER_NOTIFY_KEY @"HWGPowerNotifyAdapterChanged"
+
 // Per-row "Notify?" checkbox (Icons tab) — one per battery-level/plugged icon. All battery
 // percentages funnel through ONE shared PowerChange/PowerWarning notify call (see
 // -powerSourceChanged:), so gating happens by looking up the row key for whichever icon
@@ -191,8 +196,9 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 			int64_t timeToChargeOrDrain;
 			int64_t batteryTime = -1;
 						
-			if(CFNumberGetType(timeToFullOrEmpty) != kCFNumberSInt64Type)
-				NSLog(@"HWG PowerMonitor: unexpected CFNumber type %ld for time-to-full/empty (expected kCFNumberSInt64Type)", (long)CFNumberGetType(timeToFullOrEmpty));
+			CFNumberType timeToFullOrEmptyType = CFNumberGetType(timeToFullOrEmpty);
+			if(timeToFullOrEmptyType != kCFNumberSInt64Type)
+				NSLog(@"HWG PowerMonitor: unexpected CFNumber type %ld for time-to-full/empty (expected kCFNumberSInt64Type)", (long)timeToFullOrEmptyType);
 			
 			if (CFNumberGetValue(timeToFullOrEmpty, kCFNumberSInt64Type, &timeToChargeOrDrain))
 				batteryTime = timeToChargeOrDrain;
@@ -285,6 +291,10 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 @property (nonatomic, assign) BOOL lastWarnState;
 @property (nonatomic, assign) BOOL announcedFullyCharged;
 
+// Adapter wattage/type tracking — entirely separate from the power-source-changed state
+// above (see -checkPowerAdapterInfo).
+@property (nonatomic, strong) NSString *lastKnownAdapterDescription;
+
 @property (nonatomic, strong) NSString *refireBatteryStatusLabel;
 @property (nonatomic, strong) NSString *refireEveryLabel;
 @property (nonatomic, strong) NSString *minutesLabel;
@@ -313,6 +323,7 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 @synthesize refireTimer;
 @synthesize lastWarnState;
 @synthesize announcedFullyCharged;
+@synthesize lastKnownAdapterDescription;
 
 -(id)init {
 	if((self = [super init])){
@@ -367,7 +378,7 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 	if (!HWGPowerBoolForKey(HWG_POWER_LOWPOWER_NOTIFY_KEY, NO)) return;   // off by default (F34 #1)
 
 	@autoreleasepool {
-		NSData *iconData = [self currentPowerStatusIconData];
+		NSData *iconData = HWGResolveIconDataNamed(@"Power-LowPowerMode");
 		[delegate notifyWithName:@"PowerLowPowerMode"
 							title:enabled ? NSLocalizedString(@"Low Power Mode Enabled", @"") : NSLocalizedString(@"Low Power Mode Disabled", @"")
 					  description:@""
@@ -779,10 +790,42 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 	return result;
 }
 
+// Reports the connected AC adapter's wattage/type (e.g. "61W" vs. a low-wattage/generic
+// charger), separate from the main power-source-changed flow above. IOPSCopyExternalPowerAdapterDetails()
+// is public IOKit; only present while actually running on AC with a recognized adapter attached.
+-(void)checkPowerAdapterInfo {
+	if (!HWGPowerBoolForKey(HWG_POWER_ADAPTER_NOTIFY_KEY, NO)) return;
+
+	CFDictionaryRef adapterDetails = IOPSCopyExternalPowerAdapterDetails();
+	if (!adapterDetails) {
+		self.lastKnownAdapterDescription = nil;   // unplugged / no adapter — re-arm for next plug-in
+		return;
+	}
+	NSDictionary *details = (__bridge_transfer NSDictionary *)adapterDetails;
+	NSNumber *watts = details[@kIOPSPowerAdapterWattsKey];
+	NSString *desc = watts ? [NSString stringWithFormat:@"%@W", watts] : NSLocalizedString(@"Unknown wattage", @"");
+
+	if (lastKnownAdapterDescription && ![lastKnownAdapterDescription isEqualToString:desc]) {
+		NSData *iconData = HWGResolveIconDataNamed(@"Power-AdapterChanged");
+		[delegate notifyWithName:@"PowerAdapterChanged"
+							title:NSLocalizedString(@"Power Adapter Changed", @"")
+						description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), lastKnownAdapterDescription, desc]
+							 icon:iconData
+				 identifierString:@"HWGrowlPowerAdapter"
+					contextString:nil
+						   plugin:self];
+	}
+	self.lastKnownAdapterDescription = desc;
+}
+
 static void powerSourceChanged(void *context) {
 	HWGrowlPowerMonitor *monitor = (__bridge HWGrowlPowerMonitor*)context;
 	[monitor powerSourceChanged:NO];
 	[monitor checkTimer];
+	// Deliberately its own self-contained method, not folded into -powerSourceChanged: above —
+	// that method is a documented delicate zone (P20, retain load-bearing); this only READS a
+	// separate IOKit call and keeps its own tiny bit of state, with no interaction with it.
+	[monitor checkPowerAdapterInfo];
 }
 
 #pragma mark Battery health check (#8)
@@ -1035,8 +1078,6 @@ static void powerSourceChanged(void *context) {
 		[self checkboxWithKey:HWG_POWER_SHOW_PERCENTAGE_KEY title:NSLocalizedString(@"Battery percentage", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_TIME_KEY       title:NSLocalizedString(@"Time remaining / time to charge", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_SOURCE_CHANGE_KEY title:NSLocalizedString(@"Show old → new power source when it changes", @"") defaultOn:YES],
-		// F34 #1: OFF by default — new behavior, not a visibility toggle on an existing notice.
-		[self checkboxWithKey:HWG_POWER_LOWPOWER_NOTIFY_KEY title:NSLocalizedString(@"Notify when Low Power Mode is turned on/off", @"") defaultOn:NO],
 	];
 	// #8: battery health/cycle count — own header/section since it's a SEPARATE periodic
 	// notification (see checkBatteryHealthDue), not part of the regular status notice above.
@@ -1243,6 +1284,11 @@ static void powerSourceChanged(void *context) {
 	}
 	[iconSpecs addObject:@[NSLocalizedString(@"Battery Failure", @""), @"Power-BatteryFailure", [HWG_POWER_NOTIFY_ROW_PREFIX stringByAppendingString:@"Power-BatteryFailure"]]];
 	[iconSpecs addObject:@[NSLocalizedString(@"No Battery", @""), @"Power-NoBattery", [HWG_POWER_NOTIFY_ROW_PREFIX stringByAppendingString:@"Power-NoBattery"]]];
+	// Moved here from the General tab (13-ago-2026, feedback del usuario): these are separate
+	// NOTIFICATION events (not visibility toggles on the existing status notice above), so per
+	// the app's convention they belong in Icons — same as every other monitor's own events.
+	[iconSpecs addObject:@[NSLocalizedString(@"Low Power Mode", @""), @"Power-LowPowerMode", HWG_POWER_LOWPOWER_NOTIFY_KEY, @NO]];
+	[iconSpecs addObject:@[NSLocalizedString(@"Adapter Changed", @""), @"Power-AdapterChanged", HWG_POWER_ADAPTER_NOTIFY_KEY, @NO]];
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:iconSpecs];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
@@ -1290,15 +1336,17 @@ static void powerSourceChanged(void *context) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", nil];
+	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", @"PowerAdapterChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Power Changed", @""), @"PowerChange",
-			  NSLocalizedString(@"Power Warning", @""), @"PowerWarning", nil];
+			  NSLocalizedString(@"Power Warning", @""), @"PowerWarning",
+			  NSLocalizedString(@"Power Adapter Changed", @""), @"PowerAdapterChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the type or status of power changed", @""), @"PowerChange",
-			  NSLocalizedString(@"Sent when the battery is getting low", @""), @"PowerWarning", nil];
+			  NSLocalizedString(@"Sent when the battery is getting low", @""), @"PowerWarning",
+			  NSLocalizedString(@"Sent when the connected AC adapter's wattage/type changes", @""), @"PowerAdapterChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", nil];

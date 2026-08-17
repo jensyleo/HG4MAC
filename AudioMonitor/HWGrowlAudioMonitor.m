@@ -6,6 +6,7 @@
 // compile with ARC: -fobjc-arc
 #import "HWGrowlAudioMonitor.h"
 #import <CoreAudio/CoreAudio.h>
+#import <AudioToolbox/AudioHardwareService.h>
 #import <AVFoundation/AVFoundation.h>
 #import "HWGIconOverrideStore.h"
 #import "HWGIconPickerView.h"
@@ -53,6 +54,14 @@
 // Monitor's simpler single-default-device tracking, since the user wants to know about ANY
 // mic being used, not just the default one.
 #define HWG_AUDIO_NOTIFY_MIC_IN_USE_KEY @"HWGAudioNotifyMicInUse"
+#define HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY @"HWGAudioNotifySampleRateChanged"
+
+// Volume-critical: fires when the DEFAULT OUTPUT device's volume crosses at/above the
+// configured threshold. Re-arms once it drops 10 points below (hysteresis), same shape as
+// Printer Monitor's toner/ink and Volume Monitor's low-space checks. Only tracks the default
+// output — not every device — since that's the one actually driving what the user hears.
+#define HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY @"HWGAudioNotifyVolumeCritical"
+#define HWG_AUDIO_VOLUME_THRESHOLD_KEY        @"HWGAudioVolumeCriticalThresholdPercent"
 
 static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -95,6 +104,20 @@ static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 // mirrors Camera Monitor's `deviceIDsWithInUseListener`, so teardown/re-diffing on device-list
 // changes only touches IDs known to actually have one registered.
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *deviceIDsWithMicInUseListener;
+
+// Sample-rate-change tracking — same registered-per-device-listener shape as the mic-in-use
+// pair above, just watching kAudioDevicePropertyNominalSampleRate instead of "running
+// somewhere". Relevant for pro audio interfaces whose rate can change while still connected.
+@property (nonatomic, strong) AudioObjectPropertyListenerBlock sampleRateListenerBlock;
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *deviceIDsWithSampleRateListener;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *lastKnownSampleRateByDeviceID;
+
+// Volume-critical tracking — listener lives on whichever device is CURRENTLY the default
+// output, re-attached every time -defaultOutputChanged fires (unlike the per-device sample
+// rate/mic listeners above, which track every connected device at once).
+@property (nonatomic, assign) AudioDeviceID volumeCriticalListenerDeviceID;   // kAudioObjectUnknown when not registered
+@property (nonatomic, strong) AudioObjectPropertyListenerBlock volumeCriticalListenerBlock;
+@property (nonatomic, assign) BOOL volumeCriticalArmed;   // YES once we've crossed at/above threshold, until it recovers
 // Device IDs currently observed as "running somewhere" (i.e. actively in use by some app) —
 // updated on every raw callback, independent of the debounce below, so it always reflects
 // the true current hardware state.
@@ -134,6 +157,12 @@ static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 @synthesize defaultInputListenerBlock;
 @synthesize micInUseListenerBlock;
 @synthesize deviceIDsWithMicInUseListener;
+@synthesize sampleRateListenerBlock;
+@synthesize deviceIDsWithSampleRateListener;
+@synthesize lastKnownSampleRateByDeviceID;
+@synthesize volumeCriticalListenerDeviceID;
+@synthesize volumeCriticalListenerBlock;
+@synthesize volumeCriticalArmed;
 @synthesize runningMicDeviceIDs;
 @synthesize lastNotifiedMicDeviceIDs;
 @synthesize pendingMicNotifyBlock;
@@ -163,6 +192,9 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		deviceIDsWithMicInUseListener = [NSMutableSet set];
 		runningMicDeviceIDs = [NSMutableSet set];
 		lastNotifiedMicDeviceIDs = [NSMutableSet set];
+		deviceIDsWithSampleRateListener = [NSMutableSet set];
+		lastKnownSampleRateByDeviceID = [NSMutableDictionary dictionary];
+		volumeCriticalListenerDeviceID = kAudioObjectUnknown;
 
 		// Baseline silently at launch — like every other monitor — so the first real
 		// connect/disconnect/default-change after this point is the first thing notified.
@@ -187,6 +219,16 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 			(void)n; (void)addrs;
 			[weakSelf refreshMicInUseStateNotifying:YES];
 		};
+		// Shared across every listening device (like micInUseListenerBlock) — the callback
+		// doesn't identify which device fired, so just re-check every tracked device's rate.
+		sampleRateListenerBlock = ^(UInt32 n, const AudioObjectPropertyAddress *addrs) {
+			(void)n; (void)addrs;
+			[weakSelf refreshSampleRatesNotifying:YES];
+		};
+		volumeCriticalListenerBlock = ^(UInt32 n, const AudioObjectPropertyAddress *addrs) {
+			(void)n; (void)addrs;
+			[weakSelf checkVolumeCritical];
+		};
 		AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &kDevicesAddress, dispatch_get_main_queue(), devicesListenerBlock);
 		AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &kDefaultOutputAddress, dispatch_get_main_queue(), defaultOutputListenerBlock);
 		AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &kDefaultInputAddress, dispatch_get_main_queue(), defaultInputListenerBlock);
@@ -195,6 +237,13 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 			[self requestMicrophoneAccessIfNeeded];
 			[self registerMicInUseListeners];
 			[self refreshMicInUseStateNotifying:NO];   // baseline silently, like every other feature
+		}
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY, NO)) {
+			[self registerSampleRateListeners];
+			[self refreshSampleRatesNotifying:NO];   // baseline silently
+		}
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY, NO)) {
+			[self registerVolumeCriticalListenerForDeviceID:self.lastDefaultOutputID];
 		}
 	}
 	return self;
@@ -208,6 +257,11 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	for (NSNumber *deviceID in deviceIDsWithMicInUseListener) {
 		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &kRunningSomewhereAddress, dispatch_get_main_queue(), micInUseListenerBlock);
 	}
+	AudioObjectPropertyAddress sampleRateAddress = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	for (NSNumber *deviceID in deviceIDsWithSampleRateListener) {
+		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &sampleRateAddress, dispatch_get_main_queue(), sampleRateListenerBlock);
+	}
+	[self unregisterVolumeCriticalListener];
 }
 
 #pragma mark CoreAudio helpers
@@ -412,6 +466,11 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		[self registerMicInUseListeners];
 		[self refreshMicInUseStateNotifying:YES];
 	}
+	if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY, NO)) {
+		[self unregisterStaleSampleRateListeners];
+		[self registerSampleRateListeners];
+		[self refreshSampleRatesNotifying:NO];   // a newly-connected device baselines silently
+	}
 }
 
 #pragma mark Microphone in-use (#7)
@@ -486,6 +545,52 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		[self.runningMicDeviceIDs removeObject:deviceID];
 	}
 	[self.deviceIDsWithMicInUseListener minusSet:stale];
+}
+
+// Same shape as -registerMicInUseListeners, but for ANY device (not just input-capable ones —
+// sample rate applies to output devices too), and gated by its own toggle.
+-(void)registerSampleRateListeners {
+	AudioObjectPropertyAddress address = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	for (NSNumber *deviceID in self.knownDeviceIDs) {
+		if ([self.deviceIDsWithSampleRateListener containsObject:deviceID]) continue;
+		AudioObjectAddPropertyListenerBlock([deviceID unsignedIntValue], &address, dispatch_get_main_queue(), self.sampleRateListenerBlock);
+		[self.deviceIDsWithSampleRateListener addObject:deviceID];
+	}
+}
+
+-(void)unregisterStaleSampleRateListeners {
+	NSMutableSet<NSNumber *> *stale = [NSMutableSet set];
+	for (NSNumber *deviceID in self.deviceIDsWithSampleRateListener) {
+		if ([self.knownDeviceIDs containsObject:deviceID]) continue;
+		// Gone entirely — same caution as -unregisterStaleMicInUseListeners: no removal call
+		// on a disconnected ID, just drop the bookkeeping.
+		[stale addObject:deviceID];
+		[self.lastKnownSampleRateByDeviceID removeObjectForKey:deviceID];
+	}
+	[self.deviceIDsWithSampleRateListener minusSet:stale];
+}
+
+// Compares each tracked device's current nominal sample rate against the last-known value,
+// notifying only on an actual change (not every poll/callback). `shouldNotify:NO` is the
+// silent-baseline path, same convention as every other feature here.
+-(void)refreshSampleRatesNotifying:(BOOL)shouldNotify {
+	for (NSNumber *deviceID in self.deviceIDsWithSampleRateListener) {
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		double rate = [self sampleRateForDeviceID:audioID];
+		if (rate <= 0) continue;
+		NSNumber *previous = self.lastKnownSampleRateByDeviceID[deviceID];
+		self.lastKnownSampleRateByDeviceID[deviceID] = @(rate);
+		if (shouldNotify && previous && fabs([previous doubleValue] - rate) > 0.5) {
+			NSString *name = [self nameForDeviceID:audioID] ?: NSLocalizedString(@"Audio Device", @"");
+			[delegate notifyWithName:@"AudioSampleRateChanged"
+								 title:NSLocalizedString(@"Sample Rate Changed", @"")
+							description:[NSString stringWithFormat:NSLocalizedString(@"%@:\t%.0f Hz → %.0f Hz", @""), name, [previous doubleValue], rate]
+								  icon:HWGResolveIconDataNamed(@"AudioMonitor-Icon-SampleRate")
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioSampleRate-%@", deviceID]
+						  contextString:nil
+									plugin:self];
+		}
+	}
 }
 
 // Recomputes which tracked input devices are currently "running somewhere" and fires
@@ -595,11 +700,77 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 						plugin:self];
 }
 
+// Attaches the volume-critical listener to the device that is CURRENTLY the default output.
+// Safe to call with kAudioObjectUnknown (does nothing) or a device that already has one
+// (won't double-register, since -unregisterVolumeCriticalListener always runs first at every
+// call site — see -defaultOutputChanged).
+-(void)registerVolumeCriticalListenerForDeviceID:(AudioDeviceID)deviceID {
+	if (deviceID == kAudioObjectUnknown) return;
+	AudioObjectPropertyAddress address = { kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain };
+	if (!AudioObjectHasProperty(deviceID, &address)) return;   // not every output device exposes a scalar volume (e.g. some aggregates)
+	AudioObjectAddPropertyListenerBlock(deviceID, &address, dispatch_get_main_queue(), self.volumeCriticalListenerBlock);
+	self.volumeCriticalListenerDeviceID = deviceID;
+
+	// Baseline SILENTLY against whatever this device's volume already is — an already-loud
+	// device at registration time shouldn't announce itself as a fresh "crossing".
+	Float32 volume = 0;
+	UInt32 size = sizeof(volume);
+	NSInteger percent = 0;
+	if (AudioObjectGetPropertyData(deviceID, &address, 0, NULL, &size, &volume) == noErr) {
+		float rounded = roundf(volume * 100.0f);
+		percent = (NSInteger)rounded;
+	}
+	NSInteger threshold = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_AUDIO_VOLUME_THRESHOLD_KEY]
+		? [[NSUserDefaults standardUserDefaults] integerForKey:HWG_AUDIO_VOLUME_THRESHOLD_KEY] : 90;
+	self.volumeCriticalArmed = (percent >= threshold);
+}
+
+-(void)unregisterVolumeCriticalListener {
+	if (volumeCriticalListenerDeviceID == kAudioObjectUnknown) return;
+	AudioObjectPropertyAddress address = { kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain };
+	AudioObjectRemovePropertyListenerBlock(volumeCriticalListenerDeviceID, &address, dispatch_get_main_queue(), self.volumeCriticalListenerBlock);
+	self.volumeCriticalListenerDeviceID = kAudioObjectUnknown;
+}
+
+// Reads the default output's current volume and fires once when it crosses AT/ABOVE the
+// configured threshold, re-arming only once it drops 10 points below — same hysteresis shape
+// as every other threshold check in this app (toner/ink, low disk space).
+-(void)checkVolumeCritical {
+	if (volumeCriticalListenerDeviceID == kAudioObjectUnknown) return;
+	AudioObjectPropertyAddress address = { kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain };
+	Float32 volume = 0;
+	UInt32 size = sizeof(volume);
+	if (AudioObjectGetPropertyData(volumeCriticalListenerDeviceID, &address, 0, NULL, &size, &volume) != noErr) return;
+	float roundedVolume = roundf(volume * 100.0f);
+	NSInteger percent = (NSInteger)roundedVolume;
+
+	NSInteger threshold = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_AUDIO_VOLUME_THRESHOLD_KEY]
+		? [[NSUserDefaults standardUserDefaults] integerForKey:HWG_AUDIO_VOLUME_THRESHOLD_KEY] : 90;
+
+	if (!volumeCriticalArmed && percent >= threshold) {
+		self.volumeCriticalArmed = YES;
+		NSString *name = [self nameForDeviceID:volumeCriticalListenerDeviceID] ?: NSLocalizedString(@"Audio Output", @"");
+		[delegate notifyWithName:@"AudioVolumeCritical"
+							 title:NSLocalizedString(@"Volume Critically High", @"")
+						   description:[NSString stringWithFormat:NSLocalizedString(@"%@:\t%ld%%", @""), name, (long)percent]
+							  icon:HWGResolveIconDataNamed(@"AudioMonitor-Icon-VolumeCritical")
+				  identifierString:@"HWGrowlAudioVolumeCritical"
+					 contextString:nil
+							plugin:self];
+	} else if (volumeCriticalArmed && percent <= threshold - 10) {
+		self.volumeCriticalArmed = NO;
+	}
+}
+
 -(void)defaultOutputChanged {
 	AudioDeviceID newID = [self currentDefaultDeviceForAddress:&kDefaultOutputAddress];
 	if (newID == self.lastDefaultOutputID) return;
 	AudioDeviceID oldID = self.lastDefaultOutputID;
 	self.lastDefaultOutputID = newID;
+	if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY, NO)) {
+		[self unregisterVolumeCriticalListener];
+		[self registerVolumeCriticalListenerForDeviceID:newID];
+	}
 	[self reportDefaultDeviceChangeFromID:oldID toID:newID
 								   noteName:@"AudioDefaultOutputChanged"
 									  title:NSLocalizedString(@"Default Audio Output Changed", @"")
@@ -654,6 +825,26 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 			}
 			[self.deviceIDsWithMicInUseListener removeAllObjects];
 			[self.runningMicDeviceIDs removeAllObjects];
+		}
+	}
+	if ([key isEqualToString:HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY]) {
+		if (isOn) {
+			[self registerSampleRateListeners];
+			[self refreshSampleRatesNotifying:NO];   // baseline silently, don't announce the rate already in use
+		} else {
+			AudioObjectPropertyAddress address = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+			for (NSNumber *deviceID in self.deviceIDsWithSampleRateListener) {
+				AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &address, dispatch_get_main_queue(), self.sampleRateListenerBlock);
+			}
+			[self.deviceIDsWithSampleRateListener removeAllObjects];
+			[self.lastKnownSampleRateByDeviceID removeAllObjects];
+		}
+	}
+	if ([key isEqualToString:HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY]) {
+		if (isOn) {
+			[self registerVolumeCriticalListenerForDeviceID:self.lastDefaultOutputID];
+		} else {
+			[self unregisterVolumeCriticalListener];
 		}
 	}
 }
@@ -720,6 +911,11 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		@[@"Disconnected/Muted", @"AudioMonitor-Icon-Off", HWG_AUDIO_NOTIFY_DEVICE_DISCONNECT_KEY],
 		@[@"Microphone In Use", @"AudioMonitor-Icon-MicInUse", HWG_AUDIO_NOTIFY_MIC_IN_USE_KEY],
 		@[@"Microphone Idle", @"AudioMonitor-Icon-MicIdle", HWG_AUDIO_NOTIFY_MIC_IN_USE_KEY],
+		// Moved here from the General tab (13-ago-2026, feedback del usuario): separate
+		// notification events belong in Icons, not General — same convention as every other
+		// monitor. OFF by default, unlike the rows above.
+		@[@"Sample Rate Changed", @"AudioMonitor-Icon-SampleRate", HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY, @NO],
+		@[@"Volume Critical", @"AudioMonitor-Icon-VolumeCritical", HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -757,7 +953,7 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse"];
+	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse", @"AudioSampleRateChanged", @"AudioVolumeCritical"];
 }
 -(NSDictionary*)localizedNames {
 	return @{
@@ -766,6 +962,8 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		@"AudioDefaultOutputChanged": NSLocalizedString(@"Default Audio Output Changed", @""),
 		@"AudioDefaultInputChanged": NSLocalizedString(@"Default Audio Input Changed", @""),
 		@"AudioMicInUse": NSLocalizedString(@"Microphone In Use", @""),
+		@"AudioSampleRateChanged": NSLocalizedString(@"Sample Rate Changed", @""),
+		@"AudioVolumeCritical": NSLocalizedString(@"Volume Critically High", @""),
 	};
 }
 -(NSDictionary*)noteDescriptions {
@@ -775,10 +973,13 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		@"AudioDefaultOutputChanged": NSLocalizedString(@"Sent when macOS switches the default audio output device", @""),
 		@"AudioDefaultInputChanged": NSLocalizedString(@"Sent when macOS switches the default audio input device", @""),
 		@"AudioMicInUse": NSLocalizedString(@"Sent when any connected microphone starts or stops actively being used by an app", @""),
+		@"AudioSampleRateChanged": NSLocalizedString(@"Sent when a connected device's nominal sample rate changes while still connected", @""),
+		@"AudioVolumeCritical": NSLocalizedString(@"Sent when the default output's volume crosses at/above the configured threshold (default 90%)", @""),
 	};
 }
 -(NSArray*)defaultNotifications {
-	return [self noteNames];
+	// AudioSampleRateChanged deliberately excluded — OFF by default, unlike the rest.
+	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse"];
 }
 
 @end

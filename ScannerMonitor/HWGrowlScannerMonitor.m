@@ -41,6 +41,13 @@
 #define HWG_SCANNER_SCANSTATUS_POLL_MIN     5.0
 #define HWG_SCANNER_SCANSTATUS_POLL_MAX     60.0
 
+// 13-ago-2026: automatic document feeder state (paper jam/empty/cover open), same ScannerStatus
+// poll used above for scan job status. AdfState is OPTIONAL in the eSCL spec — not every
+// scanner/MFP firmware exposes it — so this genuinely may never fire for a given device, which
+// is expected behavior, not a bug. Pending validation against a real ADF-equipped device (see
+// TODO.md); implemented now so it's ready once that hardware is available.
+#define HWG_SCANNER_NOTIFY_ADFSTATE_KEY @"HWGScannerNotifyAdfState"
+
 static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -53,24 +60,37 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 // response uses these exact prefixes per the spec's own examples.
 @interface HWGESCLStatusParser : NSObject <NSXMLParserDelegate>
 @property (nonatomic, copy) NSString *deviceState;
+// ADF (automatic document feeder) state — e.g. ScannerAdfLoaded/ScannerAdfJam/ScannerAdfEmpty
+// per the Mopria eSCL spec's <pwg:AdfState>. OPTIONAL in the spec: nil here just means this
+// device's firmware doesn't report it, not a parse failure.
+@property (nonatomic, copy) NSString *adfState;
 @end
 @implementation HWGESCLStatusParser {
 	BOOL _inPwgState;
+	BOOL _inAdfState;
 	NSMutableString *_buffer;
+	NSMutableString *_adfBuffer;
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
 	if ([elementName isEqualToString:@"pwg:State"]) {
 		_inPwgState = YES;
 		_buffer = [NSMutableString string];
+	} else if ([elementName isEqualToString:@"pwg:AdfState"]) {
+		_inAdfState = YES;
+		_adfBuffer = [NSMutableString string];
 	}
 }
 - (void)parser:(NSXMLParser *)parser foundCharacters:(NSString *)string {
 	if (_inPwgState) [_buffer appendString:string];
+	if (_inAdfState) [_adfBuffer appendString:string];
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
 	if ([elementName isEqualToString:@"pwg:State"] && _inPwgState) {
 		self.deviceState = [_buffer stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 		_inPwgState = NO;
+	} else if ([elementName isEqualToString:@"pwg:AdfState"] && _inAdfState) {
+		self.adfState = [_adfBuffer stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		_inAdfState = NO;
 	}
 }
 @end
@@ -98,6 +118,8 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 // a real Idle<->Processing transition, not every tick. No entry yet = not seen/baselined.
 @property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *lastKnownScanStateByKey;
 @property (nonatomic, strong) NSTimer *scanStatusPollTimer;
+// Same baseline-then-diff pattern as lastKnownScanStateByKey above, for <pwg:AdfState>.
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *lastKnownAdfStateByKey;
 
 @end
 
@@ -111,6 +133,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		self.knownServices = [NSMutableDictionary dictionary];
 		self.resolvedHostPortByKey = [NSMutableDictionary dictionary];
 		self.lastKnownScanStateByKey = [NSMutableDictionary dictionary];
+		self.lastKnownAdfStateByKey = [NSMutableDictionary dictionary];
 		[self updateBrowsingState];
 	}
 	return self;
@@ -186,6 +209,9 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		if (![xmlParser parse] || ![parser.deviceState length]) return;   // unparseable/unexpected shape — skip rather than guess
 		dispatch_async(dispatch_get_main_queue(), ^{
 			[weakSelf handleScanState:parser.deviceState forKey:key deviceName:deviceName];
+			if ([parser.adfState length]) {
+				[weakSelf handleAdfState:parser.adfState forKey:key deviceName:deviceName];
+			}
 		});
 	}];
 	[task resume];
@@ -210,6 +236,27 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 					 description:deviceName
 							  icon:iconData
 			  identifierString:[NSString stringWithFormat:@"HWGrowlScannerScanStatus-%@-%@", key, isScanning ? @"started" : @"finished"]
+				  contextString:nil
+							plugin:self];
+}
+
+// Same baseline-then-diff pattern as -handleScanState:forKey:deviceName: above. AdfState values
+// per the Mopria eSCL spec are things like ScannerAdfProcessing/ScannerAdfEmpty/ScannerAdfJam/
+// ScannerAdfCoverOpen — shown verbatim rather than mapped to a fixed table, since the exact set
+// of values a given vendor's firmware sends hasn't been confirmed against real hardware yet.
+-(void)handleAdfState:(NSString *)newState forKey:(NSString *)key deviceName:(NSString *)deviceName {
+	if (!HWGScannerBoolForKey(HWG_SCANNER_NOTIFY_ADFSTATE_KEY, NO)) return;
+	NSString *previousState = self.lastKnownAdfStateByKey[key];
+	self.lastKnownAdfStateByKey[key] = newState;
+	if (!previousState) return;   // first sighting for this device — baseline only, no notification
+	if ([previousState isEqualToString:newState]) return;
+
+	NSData *iconData = [[HWGrowlScannerMonitor scannerIcon] TIFFRepresentation];
+	[delegate notifyWithName:@"ScannerAdfStateChanged"
+							 title:NSLocalizedString(@"Scanner Feeder State Changed", @"")
+					 description:[NSString stringWithFormat:@"%@\n%@", deviceName, newState]
+							  icon:iconData
+			  identifierString:[NSString stringWithFormat:@"HWGrowlScannerAdfState-%@", key]
 				  contextString:nil
 							plugin:self];
 }
@@ -373,29 +420,6 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		[caption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
 	]];
 
-	// #6: scan start/finish — OFF by default (see the feature's own doc comment above for why:
-	// never verified against a real network scanner yet, unlike Printer Job Status).
-	NSButton *scanStatusRow = [self checkboxWithKey:HWG_SCANNER_NOTIFY_SCANSTATUS_KEY title:NSLocalizedString(@"Notify when a scan starts/finishes (experimental)", @"") defaultOn:NO];
-	[v addSubview:scanStatusRow];
-	[NSLayoutConstraint activateConstraints:@[
-		[scanStatusRow.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:14],
-		[scanStatusRow.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[scanStatusRow.heightAnchor   constraintEqualToConstant:24],
-	]];
-
-	NSTextField *scanStatusCaption = [NSTextField wrappingLabelWithString:
-		NSLocalizedString(@"Polls each scanner's eSCL status over the network to detect scan start/finish. Not yet verified against a real network scanner — firmware support for this varies by manufacturer.", @"")];
-	scanStatusCaption.textColor = [NSColor secondaryLabelColor];
-	scanStatusCaption.font = [NSFont systemFontOfSize:11];
-	scanStatusCaption.translatesAutoresizingMaskIntoConstraints = NO;
-	scanStatusCaption.preferredMaxLayoutWidth = 380;
-	[v addSubview:scanStatusCaption];
-	[NSLayoutConstraint activateConstraints:@[
-		[scanStatusCaption.topAnchor     constraintEqualToAnchor:scanStatusRow.bottomAnchor constant:8],
-		[scanStatusCaption.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[scanStatusCaption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
-	]];
-
 	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
 	generalItem.label = NSLocalizedString(@"General", @"");
 	generalItem.view = v;
@@ -407,6 +431,12 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"USB-TypeScanner"],
 		@[@"Scanner Found/Lost", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_FOUNDLOST_KEY],
+		// Moved here from General (13-ago-2026, feedback del usuario) — per this app's
+		// convention, "Notify when X" toggles always live in Icons, never General (General is
+		// only for field-visibility toggles on an existing notice). Both OFF by default: neither
+		// has been verified against real hardware yet (see each feature's own doc comment above).
+		@[@"Scan Started/Finished (experimental)", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
+		@[@"Feeder State Changed (experimental)", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -444,17 +474,19 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"ScannerFound", @"ScannerLost", @"ScannerScanStatus", nil];
+	return [NSArray arrayWithObjects:@"ScannerFound", @"ScannerLost", @"ScannerScanStatus", @"ScannerAdfStateChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Network Scanner Found", @""), @"ScannerFound",
 			  NSLocalizedString(@"Network Scanner Lost", @""), @"ScannerLost",
-			  NSLocalizedString(@"Scan Started/Finished", @""), @"ScannerScanStatus", nil];
+			  NSLocalizedString(@"Scan Started/Finished", @""), @"ScannerScanStatus",
+			  NSLocalizedString(@"Feeder State Changed", @""), @"ScannerAdfStateChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a network scanner (Bonjour _scanner._tcp/_uscan._tcp) appears on the LAN", @""), @"ScannerFound",
 			  NSLocalizedString(@"Sent when a previously-seen network scanner disappears from the LAN", @""), @"ScannerLost",
-			  NSLocalizedString(@"Sent when a scan job starts or finishes (experimental, via eSCL ScannerStatus polling)", @""), @"ScannerScanStatus", nil];
+			  NSLocalizedString(@"Sent when a scan job starts or finishes (experimental, via eSCL ScannerStatus polling)", @""), @"ScannerScanStatus",
+			  NSLocalizedString(@"Sent when the automatic document feeder's state changes (jam/empty/cover open, experimental, when reported by the device)", @""), @"ScannerAdfStateChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray array];

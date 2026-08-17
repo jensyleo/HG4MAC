@@ -61,10 +61,29 @@
 // not attempted here). ON by default: a low/degrading health % is a real, actionable warning.
 #define HWG_VOLUME_SHOW_SMART_KEY @"HWGVolumeShowSMARTStatus"
 
+// 13-ago-2026: FileVault/encryption status, primarily useful for EXTERNAL volumes (an
+// unencrypted external disk is a real data-at-rest risk). Pending validation against a real
+// encrypted external disk — see TODO.md. ON by default: like SMART health above, this is a
+// passive read-only field, no reason to hide it.
+#define HWG_VOLUME_SHOW_FILEVAULT_KEY @"HWGVolumeShowFileVault"
+
 // Per-device-type "Notify" toggle (Icons tab) — same mechanism as USB/Thunderbolt/Bluetooth
 // Monitor's. Gates only the MOUNT notification for that category; unmount always notifies
 // (category is read from a mount-time cache purely for icon selection, independent of this).
 #define HWG_VOLUME_NOTIFY_KEY_PREFIX @"HWGVolumeNotifyType_"
+
+// Opt-in: fired when -volumeDidUnmount: sees NO prior -volumeWillUnmount: entry for that
+// path — i.e. the volume vanished (surprise/physical removal) instead of a graceful Finder
+// eject. OFF by default: relies on this app having been running continuously since the
+// volume mounted, and is a heuristic (the willUnmount notice could theoretically be lost
+// for other reasons too), not a hardware-verified guarantee.
+#define HWG_VOLUME_NOTIFY_UNSAFE_EJECT_KEY @"HWGVolumeNotifyUnsafeEject"
+
+// Opt-in: fired when a mounted volume's free space drops at/below the configured percentage.
+// Re-arms once free space recovers 5 points above the threshold (hysteresis), same pattern
+// as Printer Monitor's toner/ink threshold.
+#define HWG_VOLUME_NOTIFY_LOW_SPACE_KEY  @"HWGVolumeNotifyLowSpace"
+#define HWG_VOLUME_LOW_SPACE_THRESHOLD_KEY @"HWGVolumeLowSpaceThresholdPercent"
 
 static BOOL HWGVolumeBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -392,6 +411,12 @@ static BOOL HWGCopyNVMeHealthForBSDName(NSString *bsdName, int *outHealthPercent
 @property (nonatomic, strong) IBOutlet NSArrayController *arrayController;
 @property (nonatomic, strong) IBOutlet NSTableView *tableView;
 
+// Low-free-space polling: tracks which mounted paths are currently "below threshold" so we
+// only notify on the CROSSING (not every tick), with hysteresis so a value hovering right at
+// the line doesn't spam repeated notices. Same pattern as Printer Monitor's toner/ink check.
+@property (nonatomic, strong) NSTimer *lowSpacePollTimer;
+@property (nonatomic, strong) NSMutableSet<NSString*> *pathsBelowSpaceThreshold;
+
 - (NSString *)wholeDiskGroupKeyForDisk:(DADiskRef)disk;
 - (void)handleDiskAppeared:(DADiskRef)disk;
 - (void)handleDiskDisappeared:(DADiskRef)disk;
@@ -420,6 +445,8 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 @synthesize prefsView;
 @synthesize arrayController;
 @synthesize tableView;
+@synthesize lowSpacePollTimer;
+@synthesize pathsBelowSpaceThreshold;
 
 -(id)init {
 	if((self = [super init])){
@@ -434,6 +461,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		self.groupDeviceCategory = [NSMutableDictionary dictionary];
 		self.groupDisplayName = [NSMutableDictionary dictionary];
 		self.pathDeviceCategory = [NSMutableDictionary dictionary];
+		self.pathsBelowSpaceThreshold = [NSMutableSet set];
 
 		NSNotificationCenter *center = [[NSWorkspace sharedWorkspace] notificationCenter];
 
@@ -453,6 +481,12 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			DARegisterDiskAppearedCallback(daSession, NULL, hwgDiskAppearedCallback, (__bridge void *)self);
 			DARegisterDiskDisappearedCallback(daSession, NULL, hwgDiskDisappearedCallback, (__bridge void *)self);
 		}
+
+		self.lowSpacePollTimer = [NSTimer scheduledTimerWithTimeInterval:300.0
+		                                                           target:self
+		                                                         selector:@selector(pollLowFreeSpace:)
+		                                                         userInfo:nil
+		                                                          repeats:YES];
 	}
 	return self;
 }
@@ -460,6 +494,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 - (void)dealloc {
 	// Keep the non-memory teardown (observer + timers); ARC frees the rest.
 	[[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
+	[lowSpacePollTimer invalidate];
 
 	[ejectCache enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
 		[[obj objectAtIndex:VolumeEjectCacheTimerIndex] invalidate];
@@ -913,6 +948,22 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	return line;
 }
 
+// 13-ago-2026: FileVault/encryption status for external volumes — pending validation against a
+// real encrypted external disk (see TODO.md). Uses NSURLVolumeIsEncryptedKey rather than
+// CoreStorage (deprecated, only relevant to old Fusion Drive/HFS+ setups) or DiskArbitration —
+// this is the modern public resource key that covers both CoreStorage and APFS encryption,
+// confirmed applicable on macOS 13+ including Tahoe. Simpler than -smartStatusLineForMountedPath:
+// above since it needs no DiskArbitration/BSD-name lookup at all, just the mounted path.
+- (NSString *)fileVaultStatusLineForMountedPath:(NSString *)path {
+	if (![path length]) return nil;
+	NSNumber *isEncrypted = nil;
+	NSError *error = nil;
+	NSURL *url = [NSURL fileURLWithPath:path];
+	if (![url getResourceValue:&isEncrypted forKey:NSURLVolumeIsEncryptedKey error:&error] || !isEncrypted) return nil;
+	return [NSString stringWithFormat:NSLocalizedString(@"Encrypted (FileVault):\t%@", @""),
+			[isEncrypted boolValue] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")];
+}
+
 - (BOOL)stringContainsCardReaderToken:(NSString *)s {
 	if (![s length]) return NO;
 	NSString *lower = [s lowercaseString];
@@ -995,6 +1046,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		BOOL showSize      = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SIZE_KEY, YES);
 		BOOL showInterface = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_INTERFACE_KEY, NO);
 		BOOL showSMART     = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SMART_KEY, YES);
+		BOOL showFileVault = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FILEVAULT_KEY, YES);
 
 		NSMutableArray<NSString*> *extraLines = [NSMutableArray array];
 		if (showPath && [volume path]) [extraLines addObject:[volume path]];
@@ -1002,6 +1054,11 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		if (showSMART) {
 			NSString *smartLine = [self smartStatusLineForMountedPath:[volume path]];
 			if (smartLine) [extraLines addObject:smartLine];
+		}
+
+		if (showFileVault) {
+			NSString *fileVaultLine = [self fileVaultStatusLineForMountedPath:[volume path]];
+			if (fileVaultLine) [extraLines addObject:fileVaultLine];
 		}
 
 		if (showInterface) {
@@ -1100,7 +1157,22 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		info = [cacheItem objectAtIndex:VolumeEjectCacheInfoIndex];
 	else
 		info = [VolumeInfo volumeInfoForUnmountWithPath:path];
-	
+
+	// No ejectCache entry means -volumeWillUnmount: never fired for this path — the volume
+	// vanished without going through the normal Finder-eject sequence (yanked cable/card,
+	// or the drive itself failed) rather than being unmounted gracefully.
+	if (!cacheItem && HWGVolumeBoolForKey(HWG_VOLUME_NOTIFY_UNSAFE_EJECT_KEY, NO)) {
+		NSString *name = info.name ?: path;
+		NSData *iconData = [HWGResolveIconNamed(@"Device-Critical") TIFFRepresentation];
+		[delegate notifyWithName:@"VolumeUnsafeEject"
+								 title:NSLocalizedString(@"Volume Ejected Unsafely", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"%@ disappeared without being ejected first.", @""), name]
+								  icon:iconData
+				  identifierString:@"HWGrowlVolumeUnsafeEject"
+					  contextString:nil
+								plugin:self];
+	}
+
 	//Send notification
 	[self sendMountNotificationForVolume:info mounted:NO];
 	
@@ -1233,6 +1305,8 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		// F5 (Fase B): internal-disk SMART Verified/Failing status — no % health available, see
 		// HWG_VOLUME_SHOW_SMART_KEY's doc comment.
 		[self checkboxWithKey:HWG_VOLUME_SHOW_SMART_KEY title:NSLocalizedString(@"Drive health % (internal disks)", @"") defaultOn:YES],
+		// 13-ago-2026: FileVault/encryption status, see HWG_VOLUME_SHOW_FILEVAULT_KEY's doc comment.
+		[self checkboxWithKey:HWG_VOLUME_SHOW_FILEVAULT_KEY title:NSLocalizedString(@"Encrypted (FileVault) status", @"") defaultOn:YES],
 	];
 	// Build top-down (cursor starts at 0, grows downward) in a FLIPPED content view — see
 	// HWGVolumeFlippedContentView above. This fixes two related problems at once:
@@ -1331,6 +1405,8 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		@[@"Critical (generic)", @"Device-Critical", [HWG_VOLUME_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other_Critical"]],
 		@[@"Mounted (generic)", @"DisksVolumes-Mounted", [HWG_VOLUME_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
 		@[@"Unmounted (generic)", @"DisksVolumes-Eject", [HWG_VOLUME_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other_Unmounted"]],
+		@[@"Ejected Unsafely", @"Device-Critical", HWG_VOLUME_NOTIFY_UNSAFE_EJECT_KEY, @NO],
+		@[@"Low Disk Space (5% free)", @"Device-Critical", HWG_VOLUME_NOTIFY_LOW_SPACE_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -1367,18 +1443,68 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 
 #pragma mark HWGrowlPluginNotifierProtocol
 
+// Checks every currently-mounted local volume's free space against the configured threshold
+// percent. Fires "crossed below" once, then re-arms only once free space recovers 5 points
+// above the threshold (hysteresis) — same shape as Printer Monitor's toner/ink check, so a
+// volume hovering right at the line can't spam repeated notices.
+-(void)pollLowFreeSpace:(NSTimer *)timer {
+	if (!HWGVolumeBoolForKey(HWG_VOLUME_NOTIFY_LOW_SPACE_KEY, NO)) return;
+
+	NSInteger thresholdPercent = [[NSUserDefaults standardUserDefaults] objectForKey:HWG_VOLUME_LOW_SPACE_THRESHOLD_KEY]
+		? [[NSUserDefaults standardUserDefaults] integerForKey:HWG_VOLUME_LOW_SPACE_THRESHOLD_KEY] : 5;
+	NSInteger recoverPercent = thresholdPercent + 5;
+
+	struct statfs *mounts = NULL;
+	int count = getmntinfo(&mounts, MNT_NOWAIT);
+	NSMutableSet<NSString*> *seenPaths = [NSMutableSet set];
+	for (int i = 0; i < count; i++) {
+		// Skip virtual/pseudo filesystems that don't represent real free space to warn about
+		// (devfs, autofs, and network shares whose "free space" is the SERVER's, not local).
+		NSString *fsType = [NSString stringWithUTF8String:mounts[i].f_fstypename];
+		if ([fsType isEqualToString:@"devfs"] || [fsType isEqualToString:@"autofs"]) continue;
+		if (!(mounts[i].f_flags & MNT_LOCAL)) continue;
+
+		NSString *path = [NSString stringWithUTF8String:mounts[i].f_mntonname];
+		[seenPaths addObject:path];
+		if (mounts[i].f_blocks == 0) continue;
+		double freePercent = 100.0 * (double)mounts[i].f_bavail / (double)mounts[i].f_blocks;
+
+		BOOL wasBelow = [self.pathsBelowSpaceThreshold containsObject:path];
+		if (!wasBelow && freePercent <= thresholdPercent) {
+			[self.pathsBelowSpaceThreshold addObject:path];
+			NSData *iconData = [HWGResolveIconNamed(@"Device-Critical") TIFFRepresentation];
+			[delegate notifyWithName:@"VolumeLowSpace"
+									 title:NSLocalizedString(@"Low Disk Space", @"")
+							 description:[NSString stringWithFormat:NSLocalizedString(@"%@ has %.0f%% free space left.", @""), path, freePercent]
+									  icon:iconData
+					  identifierString:[NSString stringWithFormat:@"HWGrowlVolumeLowSpace-%@", path]
+						  contextString:nil
+									plugin:self];
+		} else if (wasBelow && freePercent >= recoverPercent) {
+			[self.pathsBelowSpaceThreshold removeObject:path];
+		}
+	}
+	// Drop bookkeeping for anything that unmounted since the last poll, so a future re-mount
+	// of the SAME path starts fresh instead of silently staying "already reported".
+	[self.pathsBelowSpaceThreshold intersectSet:seenPaths];
+}
+
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"VolumeMounted", @"VolumeUnmounted", @"VolumeNotReadable", nil];
+	return [NSArray arrayWithObjects:@"VolumeMounted", @"VolumeUnmounted", @"VolumeNotReadable", @"VolumeUnsafeEject", @"VolumeLowSpace", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Volume Mounted", @""), @"VolumeMounted",
 			  NSLocalizedString(@"Volume Unmounted", @""), @"VolumeUnmounted",
-			  NSLocalizedString(@"Disk Not Readable", @""), @"VolumeNotReadable", nil];
+			  NSLocalizedString(@"Disk Not Readable", @""), @"VolumeNotReadable",
+			  NSLocalizedString(@"Volume Ejected Unsafely", @""), @"VolumeUnsafeEject",
+			  NSLocalizedString(@"Low Disk Space", @""), @"VolumeLowSpace", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a volume is mounted", @""), @"VolumeMounted",
 			  NSLocalizedString(@"Sent when a volume is unmounted", @""), @"VolumeUnmounted",
-			  NSLocalizedString(@"Sent when inserted media can't be read/mounted", @""), @"VolumeNotReadable", nil];
+			  NSLocalizedString(@"Sent when inserted media can't be read/mounted", @""), @"VolumeNotReadable",
+			  NSLocalizedString(@"Sent when a volume disappears without a graceful eject (surprise removal)", @""), @"VolumeUnsafeEject",
+			  NSLocalizedString(@"Sent when a mounted volume's free space drops at/below the configured threshold", @""), @"VolumeLowSpace", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"VolumeMounted", @"VolumeUnmounted", @"VolumeNotReadable", nil];

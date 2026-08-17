@@ -22,6 +22,7 @@
 #define HWG_GAMEPAD_SHOW_CATEGORY_KEY    @"HWGGamepadShowCategory"
 #define HWG_GAMEPAD_SHOW_PLAYER_INDEX_KEY @"HWGGamepadShowPlayerIndex"
 #define HWG_GAMEPAD_SHOW_BATTERY_KEY     @"HWGGamepadShowBattery"
+#define HWG_GAMEPAD_SHOW_TRIGGERS_KEY    @"HWGGamepadShowAdaptiveTriggers"
 #define HWG_GAMEPAD_NOTIFY_KEY           @"HWGGamepadNotifyConnect"
 
 static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
@@ -98,6 +99,13 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		float level = controller.battery.batteryLevel;
 		if (level >= 0) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery:\t%.0f%%", @""), level * 100.0]];
+		}
+	}
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_TRIGGERS_KEY, YES)) {
+		// Only detects the CLASS (DualSense-family gamepad) — doesn't configure/use the
+		// triggers themselves, this is a monitor, not a controller.
+		if ([controller.extendedGamepad isKindOfClass:NSClassFromString(@"GCDualSenseGamepad")]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Adaptive Triggers:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
 		}
 	}
 
@@ -193,6 +201,7 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_CATEGORY_KEY     title:NSLocalizedString(@"Controller type (DualSense/Xbox/MFi/etc.)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_PLAYER_INDEX_KEY title:NSLocalizedString(@"Player index", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_BATTERY_KEY      title:NSLocalizedString(@"Battery level", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_TRIGGERS_KEY     title:NSLocalizedString(@"Adaptive Triggers (DualSense)", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];

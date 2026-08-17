@@ -37,6 +37,8 @@
 		754E8DFEECB608EC3E6F660D /* HWGNotificationHistoryStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A7D77013944A9314A14E10F9 /* HWGNotificationHistoryStoreTests.m */; };
 		767F7955642A7B3837652587 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 47EBEED5E9D3607346F0D598 /* Cocoa.framework */; };
 		7D25EFA051FA85B2290A318C /* CoreMediaIO.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F583E88763D7AB0582931453 /* CoreMediaIO.framework */; };
+		A1B2C3D4E5F60718293A4B5C /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5D /* CoreMedia.framework */; };
+		B2C3D4E5F60718293A4B5C6D /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F60718293A4B5C6E /* AudioToolbox.framework */; };
 		80FFEC0D9781B3F2803A921B /* HWGIconOverrideStore.m in Sources */ = {isa = PBXBuildFile; fileRef = 64060E1505A9BDC1D8B47555 /* HWGIconOverrideStore.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		8151878EE05A8519BAAA260E /* HWGrowlPrinterMonitor.h in Headers */ = {isa = PBXBuildFile; fileRef = 85E96DFD670D8687C1AF1204 /* HWGrowlPrinterMonitor.h */; };
 		85FE089FE8189CFA9518ADBA /* HWGIconPickerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 32C4D07D06AAE813831A914C /* HWGIconPickerView.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
@@ -449,6 +451,8 @@
 		EB426F14785118DBA9BE209A /* CameraMonitor-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "CameraMonitor-Info.plist"; sourceTree = "<group>"; };
 		F468267F954787ECCF64416F /* AudioMonitor-Prefix.pch */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "AudioMonitor-Prefix.pch"; sourceTree = "<group>"; };
 		F583E88763D7AB0582931453 /* CoreMediaIO.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMediaIO.framework; path = System/Library/Frameworks/CoreMediaIO.framework; sourceTree = SDKROOT; };
+		A1B2C3D4E5F60718293A4B5D /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
+		B2C3D4E5F60718293A4B5C6E /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -495,6 +499,7 @@
 				B1AC66D5EF7508BCDEB1C532 /* Cocoa.framework in Frameworks */,
 				E8665A3D257B6D969E4C04F2 /* CoreAudio.framework in Frameworks */,
 				A1D10004A1D10004A1D10004 /* AVFoundation.framework in Frameworks */,
+				B2C3D4E5F60718293A4B5C6D /* AudioToolbox.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -594,6 +599,7 @@
 				C43B44AC844B6147B6EC872A /* AVFoundation.framework in Frameworks */,
 				9B0FA391925F3173D42B9601 /* CoreAudio.framework in Frameworks */,
 				7D25EFA051FA85B2290A318C /* CoreMediaIO.framework in Frameworks */,
+				A1B2C3D4E5F60718293A4B5C /* CoreMedia.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -816,6 +822,8 @@
 				3229F2ABB9D0DAB3CCBC2B5D /* AVFoundation.framework */,
 				2EBF27A41B83BDC3603D33B7 /* CoreAudio.framework */,
 				F583E88763D7AB0582931453 /* CoreMediaIO.framework */,
+				A1B2C3D4E5F60718293A4B5D /* CoreMedia.framework */,
+				B2C3D4E5F60718293A4B5C6E /* AudioToolbox.framework */,
 				4EF950D6C0CAC8689AE2564A /* Cocoa.framework */,
 				D8AAD83A132BDE2CE4CAA3EC /* GameController.framework */,
 				C7CB0835A490148B193DA7DC /* Cocoa.framework */,

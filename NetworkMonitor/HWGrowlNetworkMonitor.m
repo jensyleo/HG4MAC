@@ -84,6 +84,9 @@
 #define HWG_NET_NOTIFY_WIFI_OFF_KEY      @"HWGNetworkNotifyWifiOff"
 #define HWG_NET_NOTIFY_ETH_ON_KEY        @"HWGNetworkNotifyEthernetOn"
 #define HWG_NET_NOTIFY_ETH_OFF_KEY       @"HWGNetworkNotifyEthernetOff"
+#define HWG_NET_NOTIFY_ETH_SPEED_KEY     @"HWGNetworkNotifyEthernetSpeedChanged"
+#define HWG_NET_NOTIFY_DNS_KEY           @"HWGNetworkNotifyDNSChanged"
+#define HWG_NET_NOTIFY_PRIMARY_IF_KEY    @"HWGNetworkNotifyPrimaryInterfaceChanged"
 #define HWG_NET_NOTIFY_OTHER_ON_KEY      @"HWGNetworkNotifyOtherOn"
 #define HWG_NET_NOTIFY_OTHER_OFF_KEY     @"HWGNetworkNotifyOtherOff"
 #define HWG_NET_NOTIFY_GENERIC_ON_KEY    @"HWGNetworkNotifyGenericOn"
@@ -151,6 +154,8 @@ typedef enum {
 // across every interface and can't tell which specific interface actually changed when
 // there are several (e.g. a USB-Ethernet dock on top of Wi-Fi).
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *previousIPv4ByInterface;
+@property (nonatomic, strong) NSArray<NSString *> *lastKnownDNSServers;
+@property (nonatomic, strong) NSString *lastKnownPrimaryInterface;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *previousIPv6ByInterface;
 
 // P10 (reverted 16-jul-2026): Ethernet (wired) link up/down was briefly detected via
@@ -166,6 +171,12 @@ typedef enum {
 // so the Link-Down notification uses the same icon family as the Link-Up (the media is
 // often unreadable once the interface is gone).
 @property (nonatomic, strong) NSMutableDictionary *interfaceIsEthernet;
+
+// Ethernet link speed while the link stays up (e.g. a cable degrading from
+// 1000baseT to 100baseTX without the link ever dropping). Keyed by interface
+// name -> last-seen media string from -getMediaTypeForInterface:mode:.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *lastKnownEthernetSpeed;
+@property (nonatomic, strong) NSTimer *ethernetSpeedPollTimer;
 
 // Caches -isWiredEthernetInterface:'s result per BSD name (bsdName -> @YES/@NO). BUG FIX
 // (11-ago-2026): unplugging a USB-Ethernet adapter (or the hub/dock it's inside) tears the
@@ -188,6 +199,11 @@ typedef enum {
 // weak: the framework owns the +sharedWiFiClient singleton; we don't.
 @property (nonatomic, weak) CWWiFiClient *wifiClient;
 @property (nonatomic, strong) NSString *lastReportedSSID;
+
+// Tracks the BSSID (access point MAC) of the currently-associated network, separate from
+// lastReportedSSID, so roaming to a different AP on the same SSID (same building, different
+// room) is detected even though the SSID string never changes.
+@property (nonatomic, strong) NSData *lastReportedBSSID;
 
 // F20: track the last reported WiFi signal bar level (0–4; -1 = not connected / unknown)
 // so we notify only when the LEVEL changes, plus a cooldown to avoid threshold flapping.
@@ -218,11 +234,16 @@ typedef enum {
 @synthesize previousIPCombined;
 @synthesize previousHasIPAddresses;
 @synthesize previousIPv4ByInterface;
+@synthesize lastKnownDNSServers;
+@synthesize lastKnownPrimaryInterface;
 @synthesize previousIPv6ByInterface;
 @synthesize interfaceIsEthernet;
+@synthesize lastKnownEthernetSpeed;
+@synthesize ethernetSpeedPollTimer;
 @synthesize ethernetClassificationCache;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
+@synthesize lastReportedBSSID;
 @synthesize lastReportedWifiBars;
 @synthesize lastSignalNoteTime;
 @synthesize signalPollTimer;
@@ -238,6 +259,7 @@ typedef enum {
 		self.previousIPv6ByInterface = [NSMutableDictionary dictionary];
 		self.networkInterfaceStates = [NSMutableDictionary dictionary];
 		self.interfaceIsEthernet = [NSMutableDictionary dictionary];
+		self.lastKnownEthernetSpeed = [NSMutableDictionary dictionary];
 		self.ethernetClassificationCache = [NSMutableDictionary dictionary];
 		self.lastReportedWifiBars = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
@@ -245,6 +267,7 @@ typedef enum {
 		[self startObserving];
 		[self startWiFiMonitoring];
 		[self requestLocationForSSID];
+		[self startEthernetSpeedPolling];
 	}
 	return self;
 }
@@ -276,6 +299,7 @@ typedef enum {
 	// CF teardown, stop CoreWLAN monitoring, drop delegates).
 	[NSObject cancelPreviousPerformRequestsWithTarget:self];
 	[signalPollTimer invalidate];
+	[ethernetSpeedPollTimer invalidate];
 
 	if (rlSrc)
 		CFRunLoopRemoveSource(CFRunLoopGetMain(), rlSrc, kCFRunLoopDefaultMode);
@@ -322,6 +346,16 @@ typedef enum {
 	CWInterface *iface = [self.wifiClient interface];
 	if (iface && [iface powerOn] && [iface interfaceMode] == kCWInterfaceModeStation) {
 		self.lastReportedSSID = [iface ssid] ?: NSLocalizedString(@"Wi-Fi", @"");
+		NSString *bssidStr = [iface bssid];
+		if (bssidStr) {
+			unsigned int b[6] = {0};
+			sscanf([bssidStr UTF8String], "%x:%x:%x:%x:%x:%x",
+			       &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+			unsigned char bytes[6] = {(unsigned char)b[0], (unsigned char)b[1],
+			                          (unsigned char)b[2], (unsigned char)b[3],
+			                          (unsigned char)b[4], (unsigned char)b[5]};
+			self.lastReportedBSSID = [NSData dataWithBytes:bytes length:6];
+		}
 	}
 }
 
@@ -361,15 +395,6 @@ typedef enum {
 
 	if (connected) {
 		NSString *displayName = ssid ?: NSLocalizedString(@"Wi-Fi", @"");
-		if (lastReportedSSID && [lastReportedSSID isEqualToString:displayName])
-			return; // already reported this state
-		self.lastReportedSSID = displayName;
-		// F20: baseline the signal bar level right away instead of waiting for
-		// pollWifiSignal:'s first scheduled tick to do it — otherwise detecting any
-		// real change takes two full poll intervals (one just to baseline, one to
-		// compare) instead of one.
-		NSInteger rssiNow = [iface rssiValue];
-		self.lastReportedWifiBars = (rssiNow != 0) ? HWGWifiBarsForRSSI(rssiNow) : -1;
 		NSData *bssidData = nil;
 		if (bssidStr) {
 			unsigned int b[6] = {0};
@@ -380,6 +405,23 @@ typedef enum {
 			                          (unsigned char)b[4], (unsigned char)b[5]};
 			bssidData = [NSData dataWithBytes:bytes length:6];
 		}
+		// Roaming to a different access point on the SAME SSID never changed
+		// displayName, so the old dedup (SSID-only) silently swallowed real roam
+		// events. Only treat it as "already reported" when BOTH SSID and BSSID
+		// match — a BSSID we can't read (nil, e.g. no Location permission) never
+		// triggers a false roam notification, it just falls back to SSID-only dedup.
+		BOOL sameSSID  = lastReportedSSID && [lastReportedSSID isEqualToString:displayName];
+		BOOL sameBSSID = (bssidData == nil) || (lastReportedBSSID == nil) || [lastReportedBSSID isEqualToData:bssidData];
+		if (sameSSID && sameBSSID)
+			return; // already reported this state
+		self.lastReportedSSID = displayName;
+		self.lastReportedBSSID = bssidData;
+		// F20: baseline the signal bar level right away instead of waiting for
+		// pollWifiSignal:'s first scheduled tick to do it — otherwise detecting any
+		// real change takes two full poll intervals (one just to baseline, one to
+		// compare) instead of one.
+		NSInteger rssiNow = [iface rssiValue];
+		self.lastReportedWifiBars = (rssiNow != 0) ? HWGWifiBarsForRSSI(rssiNow) : -1;
 		[self airportConnected:displayName bssid:bssidData];
 		// IPv4 often arrives after the WiFi link comes up (DHCP completes
 		// later than IPv6 SLAAC). The SCDynamicStore IPv4 key change does
@@ -399,6 +441,7 @@ typedef enum {
 		    ? lastReportedSSID
 		    : NSLocalizedString(@"Wi-Fi", @"");
 		self.lastReportedSSID = nil;
+		self.lastReportedBSSID = nil;
 		self.lastReportedWifiBars = -1;   // re-baseline signal level on next connect (F20)
 		[self airportDisconnected:previousName];
 	}
@@ -626,7 +669,7 @@ typedef enum {
     // pattern (not a literal key, since we don't know interface names up front) — this is
     // the raw physical-link/carrier state, independent of DHCP/IP (see property comment
     // above for why NWPathMonitor was reverted).
-    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", nil];
+    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", @"State:/Network/Global/DNS", nil];
     NSArray *watchedPatterns = [NSArray arrayWithObject:@"State:/Network/Interface/[^/]+/Link"];
 	if (!SCDynamicStoreSetNotificationKeys(dynStore,
                                           (__bridge CFArrayRef)watchedKeys,
@@ -995,6 +1038,7 @@ typedef enum {
 		// unreadable once it's down). Default to the generic interface icon.
 		BOOL isEthernet = [[interfaceIsEthernet objectForKey:interfaceString] boolValue];
 		[interfaceIsEthernet removeObjectForKey:interfaceString];
+		[lastKnownEthernetSpeed removeObjectForKey:interfaceString];
 		noteName = @"NetworkLinkDown";
 		noteTitle = NSLocalizedString(@"Network Link Down", @"");
 		noteDescription = showInterface
@@ -1019,6 +1063,50 @@ typedef enum {
 						 description:noteDescription
 								  icon:iconData
 				  identifierString:@"HWGrowlNetworkLink"
+					  contextString:nil
+								plugin:self];
+	}
+}
+
+// A cable degrading (e.g. 1000baseT -> 100baseTX) doesn't drop the link, so
+// -updateLinkWithInterface: never fires again for it — that only reacts to the SCDynamicStore
+// "Link" key toggling. Polling is the only way to catch a live speed change on an already-up
+// interface. Runs on a fixed, generous interval (not user-configurable, unlike the Wi-Fi signal
+// poll) since a degraded cable is a rare, slow-changing condition, not something needing
+// near-real-time feedback.
+-(void)startEthernetSpeedPolling {
+	[ethernetSpeedPollTimer invalidate];
+	self.ethernetSpeedPollTimer = [NSTimer scheduledTimerWithTimeInterval:20.0
+	                                                                 target:self
+	                                                               selector:@selector(pollEthernetSpeed:)
+	                                                               userInfo:nil
+	                                                                repeats:YES];
+}
+
+-(void)pollEthernetSpeed:(NSTimer *)timer {
+	if (![self boolForKey:HWG_NET_NOTIFY_ETH_SPEED_KEY default:NO]) return;
+
+	for (NSString *interfaceString in [interfaceIsEthernet allKeys]) {
+		if (![[interfaceIsEthernet objectForKey:interfaceString] boolValue]) continue; // not a recognized Ethernet link
+		NSString *mode = nil;
+		NSString *speed = [self getMediaTypeForInterface:interfaceString mode:&mode];
+		if (!speed) continue; // interface went away or media unreadable this tick; the Link-down path handles disappearance
+
+		NSString *previousSpeed = [lastKnownEthernetSpeed objectForKey:interfaceString];
+		if (previousSpeed == nil) {
+			// First observation since link-up (or since app launch): baseline silently.
+			[lastKnownEthernetSpeed setObject:speed forKey:interfaceString];
+			continue;
+		}
+		if ([previousSpeed isEqualToString:speed]) continue;
+
+		[lastKnownEthernetSpeed setObject:speed forKey:interfaceString];
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Ethernet-On") TIFFRepresentation];
+		[delegate notifyWithName:@"NetworkLinkSpeedChanged"
+								 title:NSLocalizedString(@"Ethernet Speed Changed", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"%@:\t%@ → %@", @""), interfaceString, previousSpeed, speed]
+								  icon:iconData
+				  identifierString:@"HWGrowlNetworkLinkSpeed"
 					  contextString:nil
 								plugin:self];
 	}
@@ -1268,11 +1356,63 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	self.activeVPNInterfaceNames = [currentNames mutableCopy];
 }
 
+// Both DNS servers and the primary interface live in State:/Network/Global/* dicts (like the
+// gateway already read elsewhere) — a direct SCDynamicStore read, not the kernel ioctl path
+// used for per-interface addresses.
+-(void)checkDNSServersChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_DNS_KEY default:NO]) return;
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/DNS"));
+	if (!d) return;
+	NSDictionary *dict = (__bridge_transfer NSDictionary *)d;
+	NSArray<NSString *> *servers = dict[@"ServerAddresses"];
+	if (!servers) return;
+
+	if (lastKnownDNSServers && ![lastKnownDNSServers isEqualToArray:servers]) {
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Generic-On") TIFFRepresentation];
+		[delegate notifyWithName:@"DNSServersChanged"
+								 title:NSLocalizedString(@"DNS Servers Changed", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""),
+						              [lastKnownDNSServers componentsJoinedByString:@", "],
+						              [servers componentsJoinedByString:@", "]]
+								  icon:iconData
+				  identifierString:@"HWGrowlDNSServers"
+					  contextString:nil
+								plugin:self];
+	}
+	self.lastKnownDNSServers = servers;
+}
+
+-(void)checkPrimaryInterfaceChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_PRIMARY_IF_KEY default:NO]) return;
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/IPv4"));
+	if (!d) return;
+	NSDictionary *dict = (__bridge_transfer NSDictionary *)d;
+	NSString *primary = dict[@"PrimaryInterface"];
+	if (!primary) return;
+
+	if (lastKnownPrimaryInterface && ![lastKnownPrimaryInterface isEqualToString:primary]) {
+		NSDictionary *friendly = [self bsdToFriendlyNameMap];
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Generic-On") TIFFRepresentation];
+		[delegate notifyWithName:@"PrimaryInterfaceChanged"
+								 title:NSLocalizedString(@"Primary Network Interface Changed", @"")
+						 description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""),
+						              friendly[lastKnownPrimaryInterface] ?: lastKnownPrimaryInterface,
+						              friendly[primary] ?: primary]
+								  icon:iconData
+				  identifierString:@"HWGrowlPrimaryInterface"
+					  contextString:nil
+								plugin:self];
+	}
+	self.lastKnownPrimaryInterface = primary;
+}
+
 -(void)updateIP {
 	NSDictionary *friendly     = [self bsdToFriendlyNameMap];
 	NSArray  *ipv4Info         = [self collectIPv4InfoFromKernel];
 	NSArray  *ipv6Info         = [self collectIPv6InfoFromKernel];
 	[self checkVPNTransitionsWithIPv4Info:ipv4Info ipv6Info:ipv6Info];
+	[self checkDNSServersChanged];
+	[self checkPrimaryInterfaceChanged];
 	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
 	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
 
@@ -1579,6 +1719,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_WIFI_SHOW_BAND_KEY        title:NSLocalizedString(@"Band (2.4/5/6 GHz)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_GENERATION_KEY  title:NSLocalizedString(@"Generation (Wi-Fi 4–7)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_SECURITY_KEY    title:NSLocalizedString(@"Security type", @"") defaultOn:YES],
+		// Moved here from the Ethernet tab (13-ago-2026, feedback del usuario) — this controls
+		// whether Wi-Fi's OWN link/AWDL/AirDrop events get reported, so it belongs with the
+		// rest of the Wi-Fi settings, not Ethernet's (Ethernet's own real-interface filter at
+		// -isRealEthernetInterface: just READS this same key, unaffected by which tab shows it).
+		[self checkboxWithKey:HWG_ETH_SHOW_ALL_KEY          title:NSLocalizedString(@"Also report Wi-Fi's own link and AWDL/AirDrop events", @"") defaultOn:NO],
 	] inView:wifiTab belowView:wifiFieldsHeader gap:10];
 
 	NSTabViewItem *wifiItem = [[NSTabViewItem alloc] initWithIdentifier:@"wifi"];
@@ -1598,7 +1743,6 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_ETH_SHOW_INTERFACE_KEY title:NSLocalizedString(@"Interface name (en0, en5…)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_SPEED_KEY     title:NSLocalizedString(@"Speed", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_MODE_KEY      title:NSLocalizedString(@"Mode / duplex", @"") defaultOn:YES],
-		[self checkboxWithKey:HWG_ETH_SHOW_ALL_KEY       title:NSLocalizedString(@"Also report Wi-Fi's own link and AWDL/AirDrop events", @"") defaultOn:NO],
 	] inView:ethTab belowView:ethHeader gap:10];
 
 	NSTabViewItem *ethItem = [[NSTabViewItem alloc] initWithIdentifier:@"ethernet"];
@@ -1702,12 +1846,15 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Wi-Fi Off", @"Network-Wifi-Off", HWG_NET_NOTIFY_WIFI_OFF_KEY],
 		@[@"Ethernet Connected", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_ON_KEY],
 		@[@"Ethernet Disconnected", @"Network-Ethernet-Off", HWG_NET_NOTIFY_ETH_OFF_KEY],
+		@[@"Ethernet Speed Changed", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_SPEED_KEY, @NO],
 		@[@"Other Interface Connected", @"Network-Interface-On", HWG_NET_NOTIFY_OTHER_ON_KEY],
 		@[@"Other Interface Disconnected", @"Network-Interface-Off", HWG_NET_NOTIFY_OTHER_OFF_KEY],
 		@[@"Generic Connected", @"Network-Generic-On", HWG_NET_NOTIFY_GENERIC_ON_KEY],
 		@[@"Generic Disconnected", @"Network-Generic-Off", HWG_NET_NOTIFY_GENERIC_OFF_KEY],
 		@[@"VPN Connected", @"Network-VPN-On", HWG_VPN_NOTIFY_KEY],
 		@[@"VPN Disconnected", @"Network-VPN-Off", HWG_VPN_NOTIFY_KEY],
+		@[@"DNS Servers Changed", @"Network-DNS-On", HWG_NET_NOTIFY_DNS_KEY, @NO],
+		@[@"Primary Interface Changed", @"Network-PrimaryInterface-On", HWG_NET_NOTIFY_PRIMARY_IF_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -1739,27 +1886,33 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
 			  NSLocalizedString(@"Network Link Up", @""), @"NetworkLinkUp",
 			  NSLocalizedString(@"Network Link Down", @""), @"NetworkLinkDown",
+			  NSLocalizedString(@"Ethernet Speed Changed", @""), @"NetworkLinkSpeedChanged",
 			  NSLocalizedString(@"AirPort Connected", @""), @"AirportConnected",
 			  NSLocalizedString(@"AirPort Disconnected", @""), @"AirportDisconnected",
 			  NSLocalizedString(@"Wi-Fi Signal Changed", @""), @"AirportSignalChange",
 			  NSLocalizedString(@"VPN Connected", @""), @"VPNConnected",
-			  NSLocalizedString(@"VPN Disconnected", @""), @"VPNDisconnected", nil];
+			  NSLocalizedString(@"VPN Disconnected", @""), @"VPNDisconnected",
+			  NSLocalizedString(@"DNS Servers Changed", @""), @"DNSServersChanged",
+			  NSLocalizedString(@"Primary Interface Changed", @""), @"PrimaryInterfaceChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
 			  NSLocalizedString(@"Sent when an Ethernet link starts", @""), @"NetworkLinkUp",
 			  NSLocalizedString(@"Sent when an Ethernet link goes down", @""), @"NetworkLinkDown",
+			  NSLocalizedString(@"Sent when an already-up Ethernet link's negotiated speed changes (e.g. a degrading cable)", @""), @"NetworkLinkSpeedChanged",
 			  NSLocalizedString(@"Sent when AirPort connects to a network", @""), @"AirportConnected",
 			  NSLocalizedString(@"Sent when AirPort disconnects from a network", @""), @"AirportDisconnected",
 			  NSLocalizedString(@"Sent when the Wi-Fi signal strength level changes", @""), @"AirportSignalChange",
 			  NSLocalizedString(@"Sent when a VPN tunnel interface connects (F34, heuristic detection)", @""), @"VPNConnected",
-			  NSLocalizedString(@"Sent when a VPN tunnel interface disconnects (F34, heuristic detection)", @""), @"VPNDisconnected", nil];
+			  NSLocalizedString(@"Sent when a VPN tunnel interface disconnects (F34, heuristic detection)", @""), @"VPNDisconnected",
+			  NSLocalizedString(@"Sent when the system's DNS server list changes", @""), @"DNSServersChanged",
+			  NSLocalizedString(@"Sent when the primary network interface changes (e.g. Wi-Fi ↔ Ethernet)", @""), @"PrimaryInterfaceChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

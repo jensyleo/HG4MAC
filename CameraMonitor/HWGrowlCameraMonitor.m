@@ -10,6 +10,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreAudio/CoreAudio.h>       // shares its transport-type FourCharCode space with AVCaptureDevice.transportType
 #import <CoreMediaIO/CoreMediaIO.h>
+#import <CoreMedia/CoreMedia.h>
 
 // F19: same philosophy as Audio Monitor —
 //   1. Connect/disconnect — only for transports NOT already covered by USB/Bluetooth Monitor
@@ -23,6 +24,12 @@
 //      used by camera-privacy-watchdog utilities).
 
 #define HWG_CAMERA_SHOW_TRANSPORT_KEY   @"HWGCameraShowTransport"
+#define HWG_CAMERA_SHOW_RESOLUTION_KEY  @"HWGCameraShowResolution"
+// 13-ago-2026: Continuity Camera (iPhone used as a Mac's webcam, macOS 13+) and Center Stage
+// (auto-framing, macOS 12.3+) — both pending validation against real hardware (a paired iPhone),
+// see TODO.md. Written now so the fields are ready the moment that hardware is available.
+#define HWG_CAMERA_SHOW_CONTINUITY_KEY  @"HWGCameraShowContinuity"
+#define HWG_CAMERA_SHOW_CENTERSTAGE_KEY @"HWGCameraShowCenterStage"
 #define HWG_CAMERA_NOTIFY_CONNECT_KEY   @"HWGCameraNotifyConnect"
 #define HWG_CAMERA_NOTIFY_IN_USE_KEY    @"HWGCameraNotifyInUse"
 // Per-row refinement on top of HWG_CAMERA_NOTIFY_IN_USE_KEY above (the master "In Use" toggle):
@@ -185,6 +192,36 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 	NSMutableArray<NSString *> *lines = [NSMutableArray array];
 	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_TRANSPORT_KEY, YES)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Transport:\t%@", @""), [self labelForTransportType:transport]]];
+	}
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_RESOLUTION_KEY, YES)) {
+		// The device's best supported format, not necessarily what an in-progress capture
+		// session is actually using right now — this fires at connect time, before any app
+		// has necessarily opened the camera.
+		CMVideoDimensions best = {0, 0};
+		for (AVCaptureDeviceFormat *format in device.formats) {
+			CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+			if ((int64_t)dims.width * dims.height > (int64_t)best.width * best.height) best = dims;
+		}
+		if (best.width > 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Max resolution:\t%dx%d", @""), best.width, best.height]];
+		}
+	}
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_CONTINUITY_KEY, YES)) {
+		if (@available(macOS 13.0, *)) {
+			if (device.isContinuityCamera) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Continuity Camera:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
+				if (device.companionDeskViewCamera) {
+					[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Desk View companion:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
+				}
+			}
+		}
+	}
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_CENTERSTAGE_KEY, YES)) {
+		if (@available(macOS 12.3, *)) {
+			if (device.isCenterStageActive) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Center Stage:\t%@", @""), NSLocalizedString(@"Active", @"")]];
+			}
+		}
 	}
 	NSString *description = [lines count] ? [NSString stringWithFormat:@"%@\n%@", device.localizedName, [lines componentsJoinedByString:@"\n"]] : device.localizedName;
 
@@ -439,9 +476,10 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 	header.translatesAutoresizingMaskIntoConstraints = NO;
 
 	NSArray<NSButton*> *rows = @[
-		[self checkboxWithKey:HWG_CAMERA_SHOW_TRANSPORT_KEY title:NSLocalizedString(@"Transport type", @"") defaultOn:YES],
-		[self checkboxWithKey:HWG_CAMERA_NOTIFY_CONNECT_KEY title:NSLocalizedString(@"Notify on connect/disconnect (Built-in/Thunderbolt/AirPlay — USB and Bluetooth already covered by their own monitors)", @"") defaultOn:YES],
-		[self checkboxWithKey:HWG_CAMERA_NOTIFY_IN_USE_KEY  title:NSLocalizedString(@"Notify when camera starts/stops being used (privacy indicator)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_CAMERA_SHOW_TRANSPORT_KEY title:NSLocalizedString(@"Transport type (USB, Bluetooth, Thunderbolt, AirPlay/Continuity [iPhone as camera], Built-in, Virtual)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_CAMERA_SHOW_RESOLUTION_KEY title:NSLocalizedString(@"Max resolution", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_CAMERA_SHOW_CONTINUITY_KEY title:NSLocalizedString(@"Continuity Camera / Desk View companion (iPhone as webcam, macOS 13+)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_CAMERA_SHOW_CENTERSTAGE_KEY title:NSLocalizedString(@"Center Stage active (auto-framing, macOS 12.3+)", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];
@@ -469,8 +507,14 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"CameraMonitor-Icon-Module"],
-		@[@"In Use", @"CameraMonitor-Icon-InUse", HWG_CAMERA_NOTIFY_INUSE_ROW_KEY],
-		@[@"Idle", @"CameraMonitor-Icon", HWG_CAMERA_NOTIFY_IDLE_ROW_KEY],
+		// Moved here from the General tab (13-ago-2026, feedback del usuario): these are the
+		// MASTER toggles for the Connected/Disconnected and Started/Stopped notifications —
+		// per the app's convention, notification on/off toggles belong in Icons, not General
+		// (General is only for field-visibility toggles on an existing notice).
+		@[@"Connected / Disconnected", @"CameraMonitor-Icon", HWG_CAMERA_NOTIFY_CONNECT_KEY],
+		@[@"In Use", @"CameraMonitor-Icon-InUse", HWG_CAMERA_NOTIFY_IN_USE_KEY],
+		@[@"In Use — Started (icon)", @"CameraMonitor-Icon-InUse", HWG_CAMERA_NOTIFY_INUSE_ROW_KEY],
+		@[@"In Use — Stopped (icon)", @"CameraMonitor-Icon", HWG_CAMERA_NOTIFY_IDLE_ROW_KEY],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

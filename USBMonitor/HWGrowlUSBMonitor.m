@@ -28,6 +28,8 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 #define HWG_USB_SHOW_VIDPID_KEY       @"HWGUSBShowVIDPID"
 #define HWG_USB_SHOW_SPEED_KEY        @"HWGUSBShowSpeed"
 #define HWG_USB_SHOW_CLASS_KEY        @"HWGUSBShowDeviceClass"
+#define HWG_USB_SHOW_CURRENT_KEY      @"HWGUSBShowCurrentMA"
+#define HWG_USB_SHOW_MEDIUM_KEY       @"HWGUSBShowMediumType"
 
 static BOOL HWGUSBBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -385,7 +387,56 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 		}
 	}
 
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_CURRENT_KEY, YES)) {
+		int required = -1, available = -1;
+		CFTypeRef reqRef = IORegistryEntryCreateCFProperty(device, CFSTR("Current Required (mA)"), kCFAllocatorDefault, 0);
+		if (reqRef) { if (CFGetTypeID(reqRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)reqRef, kCFNumberIntType, &required); CFRelease(reqRef); }
+		CFTypeRef availRef = IORegistryEntryCreateCFProperty(device, CFSTR("Current Available (mA)"), kCFAllocatorDefault, 0);
+		if (availRef) { if (CFGetTypeID(availRef) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)availRef, kCFNumberIntType, &available); CFRelease(availRef); }
+		if (required >= 0 && available >= 0) {
+			NSString *line = [NSString stringWithFormat:NSLocalizedString(@"Power:\t%dmA / %dmA available", @""), required, available];
+			if (required > available) line = [line stringByAppendingString:NSLocalizedString(@" ⚠️ exceeds available", @"")];
+			[lines addObject:line];
+		}
+	}
+
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_MEDIUM_KEY, YES)) {
+		NSString *mediumLabel = [self usbStorageMediumLabelForDevice:device];
+		if (mediumLabel) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Medium:\t%@", @""), mediumLabel]];
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
+}
+
+// Mass-storage USB devices expose "Solid State"/"Rotational" not on the USB device node
+// itself, but on a descendant IOBlockStorageDevice's "Device Characteristics" dictionary
+// (the same public property System Information reads for "Solid State: Yes/No"). Walks down
+// a few levels of children looking for the first one that has it — nil for anything that
+// isn't storage at all (keyboards, hubs, etc. simply never have this property anywhere below them).
+-(NSString *)usbStorageMediumLabelForDevice:(io_object_t)device {
+	io_object_t current = device;
+	BOOL ownsCurrent = NO;
+	for (int depth = 0; depth < 6; depth++) {
+		CFTypeRef charsRef = IORegistryEntryCreateCFProperty(current, CFSTR("Device Characteristics"), kCFAllocatorDefault, 0);
+		if (charsRef) {
+			NSDictionary *chars = (__bridge_transfer NSDictionary *)charsRef;
+			NSString *medium = chars[@"Medium Type"];
+			if (ownsCurrent) IOObjectRelease(current);
+			if ([medium isEqualToString:@"Solid State"]) return NSLocalizedString(@"SSD / Flash", @"");
+			if ([medium isEqualToString:@"Rotational"])  return NSLocalizedString(@"HDD (rotational)", @"");
+			return nil;
+		}
+		io_object_t child = IO_OBJECT_NULL;
+		if (IORegistryEntryGetChildEntry(current, kIOServicePlane, &child) != KERN_SUCCESS || !child) {
+			if (ownsCurrent) IOObjectRelease(current);
+			return nil;
+		}
+		if (ownsCurrent) IOObjectRelease(current);
+		current = child;
+		ownsCurrent = YES;
+	}
+	if (ownsCurrent) IOObjectRelease(current);
+	return nil;
 }
 
 -(void)usbDeviceAdded:(io_iterator_t)iterator {
@@ -547,6 +598,8 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		[self checkboxWithKey:HWG_USB_SHOW_VIDPID_KEY       title:NSLocalizedString(@"Vendor/product ID (VID:PID)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_USB_SHOW_SPEED_KEY        title:NSLocalizedString(@"USB speed / generation", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_USB_SHOW_CLASS_KEY        title:NSLocalizedString(@"Device class (Mass Storage, HID, Hub…)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_USB_SHOW_CURRENT_KEY      title:NSLocalizedString(@"Power draw (mA required vs. available)", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_USB_SHOW_MEDIUM_KEY       title:NSLocalizedString(@"Storage medium (SSD/Flash vs. HDD, Mass Storage only)", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];

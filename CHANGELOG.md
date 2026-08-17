@@ -4,6 +4,66 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.16.0 — 2026-08-13
+
+### Added: full monitoring gap audit across all 13 modules, several new fields/events implemented
+
+A systematic review of every monitor (Network, Bluetooth, Volume, Power, USB, Camera, Gamepad,
+Audio, Scanner, Display) to find any remaining public-API gaps, at the same depth as the earlier
+printer supply-level work. Findings were split into "ready now", "needs specific hardware to
+verify", and "no reliable public API" — the last group intentionally left out.
+
+**Fixed:**
+- **Network Monitor — roaming Wi-Fi never notified.** The dedup for Wi-Fi state changes compared
+  only SSID, so moving between access points on the same network (same SSID, different BSSID)
+  never fired anything. Now tracks the last-reported BSSID separately and reports a roam as its
+  own event.
+
+**Added (implemented and shipping):**
+- **Network Monitor**: Ethernet link speed change (polled every 20s — no push event exists for
+  this), DNS server changed, primary interface changed (Wi-Fi↔Ethernet).
+- **Bluetooth Monitor**: signal strength (RSSI), shown as "Signal: -45 dBm (3/4)" with 5 icon
+  levels matching Wi-Fi's own bar thresholds. Off by default (continuous BLE polling has a real
+  power cost) — when off, only the plain connection is shown, no signal line.
+- **Volume Monitor**: low free space warning (5% threshold, hysteresis to re-arm only above 15%),
+  unsafe eject detection.
+- **Power Monitor**: Low Power Mode and AC adapter change now have their own dedicated icons
+  (previously reused the generic power icon) and live in the Icons tab like every other event.
+- **USB Monitor**: power draw (mA required vs. available) and storage medium (HDD/SSD/Flash)
+  display fields.
+- **Camera Monitor**: max resolution shown on connect; Transport Type field's label now spells
+  out every value it can show (USB, Bluetooth, Thunderbolt, AirPlay/Continuity, Built-in,
+  Virtual) instead of assuming the reader already knows the FourCharCode mapping.
+- **Gamepad Monitor**: DualSense Adaptive Triggers detection.
+- **Audio Monitor**: sample rate change and volume-critical-level notifications, each with a
+  dedicated icon and moved to the Icons tab (previously bare toggles in General).
+
+**Added (implemented, pending hardware to verify — off by default where relevant):**
+- **Camera Monitor**: Continuity Camera / Desk View companion detection (needs a paired iPhone),
+  Center Stage active status (needs a Center Stage–capable camera).
+- **Scanner Monitor**: automatic document feeder (ADF) state — jam/empty/cover open, via the
+  eSCL `AdfState` field. Optional in the spec, so many devices may simply never report it.
+- **Volume Monitor**: FileVault/encryption status field for mounted volumes, primarily useful
+  for external disks.
+- **Display Monitor**: documented (code comment, no behavior change) the expectation that
+  Continuity Camera/Desk View should never surface here as a "display" — it enumerates as a
+  capture device, not a `CGDirectDisplayID`.
+
+**UI/philosophy corrections found and fixed while implementing the above:**
+- A pre-existing Wi-Fi-only checkbox ("report Wi-Fi's own link/AWDL events") was living in the
+  Ethernet tab; moved to the Wi-Fi tab where it actually applies.
+- Every "Notify when X" toggle across Power, Camera, Audio, and Scanner Monitor now lives in the
+  Icons tab with its own icon, consistent with how every other event-level toggle in this app
+  works — General tab is reserved for field-visibility toggles on an existing notice, not for
+  turning whole notifications on/off.
+
+**Not implemented — no reliable public API found (audited, documented, deliberately left out):**
+what app is using the camera, Bluetooth audio codec in use, audio clipping detection, display
+HDR/Night Shift/True Tone/physical connection type, network captive-portal detection, Optimized
+Battery Charging status, and Thunderbolt link speed (values observed identical across two
+Macs with different controller generations, with no external accessory connected — not a
+reliable signal, and `IOThunderboltFamily` has no public header to confirm the mapping).
+
 ## v1.15.1 — 2026-08-12
 
 ### Added: dedicated icons for Default Printer Changed and Print Job Started/Finished

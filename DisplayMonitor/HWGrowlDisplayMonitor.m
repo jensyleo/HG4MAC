@@ -405,6 +405,12 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	for (NSNumber *displayID in added) {
 		CGDirectDisplayID cgID = [displayID unsignedIntValue];
 		NSString *name = [self nameForOnlineDisplayID:cgID] ?: NSLocalizedString(@"External Display", @"");
+		// 13-ago-2026: Continuity Camera / Desk View (see CameraMonitor) surface as an
+		// AVCaptureDevice, NOT as a CGDirectDisplayID — so an iPhone used that way is NOT
+		// expected to ever appear here as a "display". No code change needed for this case;
+		// documented as pending-hardware validation in TODO.md (how to confirm this once an
+		// iPhone is available: connect it as Continuity Camera and check whether "Display
+		// Connected" fires here — it shouldn't).
 		displayNames[displayID] = name;
 		NSString *signature = [self modeSignatureForDisplayID:cgID];
 		if (signature) displayModeSignatures[displayID] = signature;
