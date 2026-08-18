@@ -107,10 +107,32 @@
 	}];
 }
 			
+// PERFORMANCE FIX (17-ago-2026, feedback del usuario: "la app se siente lenta al iniciar") —
+// this used to run all 13 plugins' postRegistrationInit back-to-back, synchronously, on the
+// main thread, DURING -init (i.e. before the app has even returned from launching) — unlike
+// -fireOnLaunchNotes below, which already got the same "don't block on this" treatment on
+// 11-ago-2026. Some plugins' postRegistrationInit does real synchronous work here: USB/
+// Thunderbolt Monitor prime their IOKit matching notifications by walking every currently
+// attached device (when "notify on launch" is enabled), and Bluetooth Monitor registers with
+// IOBluetoothDevice (a daemon round-trip). With 13 plugins doing this one after another with
+// zero yield to the run loop, the app's menu bar icon/UI doesn't become responsive until the
+// slowest one finishes.
+//
+// Fix: same micro-stagger pattern as -fireOnLaunchNotes — dispatch_after on the MAIN queue
+// (not a background queue: IOKit notification port setup expects to attach to the calling
+// thread's run loop, so moving this off-main risks silently broken notification delivery).
+// This doesn't make any individual plugin's setup faster, but it lets the current run loop
+// tick (which shows the app's UI) finish immediately instead of waiting for all 13 in a row.
 -(void)postRegistrationInit {
+	static const NSTimeInterval kPerModuleStagger = 0.15;
 	[plugins enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-		if([[obj objectForKey:@"plugin"] respondsToSelector:@selector(postRegistrationInit)])
-			[[obj objectForKey:@"plugin"] postRegistrationInit];
+		id plugin = [obj objectForKey:@"plugin"];
+		if([plugin respondsToSelector:@selector(postRegistrationInit)]) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((NSTimeInterval)idx * kPerModuleStagger * NSEC_PER_SEC)),
+			               dispatch_get_main_queue(), ^{
+				[plugin postRegistrationInit];
+			});
+		}
 	}];
 }
 

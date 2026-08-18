@@ -6,6 +6,16 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: slow app launch
+`HWGrowlPluginController.-postRegistrationInit` ran all 13 plugins synchronously, back-to-back,
+on the main thread during `-init` — unlike `-fireOnLaunchNotes`, which already got a stagger
+fix on 11-ago-2026. Any plugin doing real work there (USB/Thunderbolt Monitor walking every
+attached device when "notify on launch" is enabled, Bluetooth Monitor's IOBluetoothDevice daemon
+registration, Printer Monitor's `cupsGetDests()`) blocked every other plugin's setup, and the
+app's own UI, in a cascading chain. Applied the same `dispatch_after` stagger pattern already
+proven for `-fireOnLaunchNotes` (0.15s per module, main queue — not background, since IOKit
+notification ports need to attach to the calling thread's run loop).
+
 ### Fixed: new checkboxes across 9 monitors were unclickable (fixed-height layout overflow)
 Same bug class already hit once in Scanner Monitor's Icons tab, this time in General tabs
 across Network, Printer, Bluetooth, USB, Audio, Camera, Display, Gamepad, and Thermal Monitor:
