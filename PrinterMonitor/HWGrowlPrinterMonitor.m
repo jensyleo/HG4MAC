@@ -36,7 +36,7 @@
 #import <cups/cups.h>
 
 #define HWG_PRINTER_NOTIFY_KEY @"HWGPrinterNotifyConnectDisconnect"
-#define HWG_PRINTER_POLL_INTERVAL 3.0
+#define HWG_PRINTER_POLL_INTERVAL 8.0
 
 // F34 follow-up (23-jul-2026, user request): 3 additions, all OFF by default —
 // #1 printer error/warning state, #2 default-printer-changed, #3 extra info fields on Connected.

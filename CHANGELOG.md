@@ -6,6 +6,13 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Performance: reduced Printer Monitor's main-thread polling cost
+`checkPrinters` calls `cupsGetDests()` (a CUPS/network round-trip) on the main thread on every
+poll tick, and that tick was firing every 3s whenever any printer notification was enabled —
+by far the shortest fixed interval of any monitor's background poll. Raised to 8s; printer
+state changes slowly enough that this trades no meaningful responsiveness for noticeably less
+background CUPS traffic.
+
 ### Fixed: "IP Addresses Updated" could land before "AirPort Disconnected"
 When losing an IP address (as opposed to gaining one), this races against the WiFi radio-off/
 disconnect sequence: `SCDynamicStore` detects the address is gone almost immediately once the
