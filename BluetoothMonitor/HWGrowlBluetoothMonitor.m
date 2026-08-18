@@ -59,7 +59,14 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // IOBluetooth.h>) — but IOBluetooth ships no documented push notification for this specific
 // state change, so it's polled, same pattern already used elsewhere in this app for hardware
 // states with no native push event (e.g. NetworkMonitor's Ethernet speed).
-#define HWG_BT_NOTIFY_RADIO_KEY @"HWGBluetoothNotifyRadioPower"
+// Split into two independent toggles/rows (18-ago-2026, feedback del usuario) — each with its
+// own dedicated icon (Bluetooth-Radio-On/-Off, NOT the existing Bluetooth-On/-Off assets, which
+// are already the defaultName for "Connected (generic)"/"Disconnected (generic)" a few rows up
+// in this same picker — this app's icon-override system keys customizations by defaultName, so
+// reusing those would mean customizing "Connected (generic)" silently also re-skins this event,
+// and vice versa).
+#define HWG_BT_NOTIFY_RADIO_ON_KEY  @"HWGBluetoothNotifyRadioOn"
+#define HWG_BT_NOTIFY_RADIO_OFF_KEY @"HWGBluetoothNotifyRadioOff"
 #define HWG_BT_RADIO_POLL_INTERVAL 5.0
 
 @interface HWGrowlBluetoothMonitor ()
@@ -116,8 +123,13 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 }
 
 -(void)pollRadioPowerState {
-	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_KEY, NO)) {
-		self.lastKnownRadioPowerState = -1;   // re-arm baseline for whenever it's turned back on
+	// Split toggles (18-ago-2026) — the poll itself always runs cheaply if EITHER is on, but
+	// each direction's notification is independently gated, matching the Connected (generic)/
+	// Disconnected (generic) precedent a few rows up in the Icons picker.
+	BOOL onEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_ON_KEY, NO);
+	BOOL offEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_OFF_KEY, NO);
+	if (!onEnabled && !offEnabled) {
+		self.lastKnownRadioPowerState = -1;   // re-arm baseline for whenever either is turned back on
 		return;
 	}
 	IOBluetoothHostController *controller = [IOBluetoothHostController defaultController];
@@ -127,8 +139,10 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	BOOL hadBaseline = (lastKnownRadioPowerState != -1);
 	self.lastKnownRadioPowerState = poweredOn;
 	if (!hadBaseline) return;   // first sighting — baseline only, no notification
+	if (poweredOn && !onEnabled) return;
+	if (!poweredOn && !offEnabled) return;
 
-	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Bluetooth-On" : @"Bluetooth-Off") TIFFRepresentation];
+	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Bluetooth-Radio-On" : @"Bluetooth-Radio-Off") TIFFRepresentation];
 	[delegate notifyWithName:poweredOn ? @"BluetoothRadioOn" : @"BluetoothRadioOff"
 							 title:poweredOn ? NSLocalizedString(@"Bluetooth Turned On", @"") : NSLocalizedString(@"Bluetooth Turned Off", @"")
 					 description:@""
@@ -624,8 +638,11 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		@[@"Connected (generic)", @"Bluetooth-On", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
 		@[@"Disconnected (generic)", @"Bluetooth-Off", HWG_BT_NOTIFY_DISCONNECT_KEY],
 		// Added 18-ago-2026 — the adapter's own power state (System Settings/Control Center
-		// toggle), distinct from any device connect/disconnect above.
-		@[@"Bluetooth Radio Turned On/Off", @"Bluetooth-On", HWG_BT_NOTIFY_RADIO_KEY, @NO],
+		// toggle), distinct from any device connect/disconnect above. Own dedicated icons
+		// (Bluetooth-Radio-On/-Off), not the "Connected/Disconnected (generic)" ones above —
+		// see the key defines' doc comment for why sharing those would be a real conflict.
+		@[@"Bluetooth Radio On", @"Bluetooth-Radio-On", HWG_BT_NOTIFY_RADIO_ON_KEY, @NO],
+		@[@"Bluetooth Radio Off", @"Bluetooth-Radio-Off", HWG_BT_NOTIFY_RADIO_OFF_KEY, @NO],
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.

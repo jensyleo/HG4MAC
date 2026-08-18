@@ -97,7 +97,10 @@
 // Added 18-ago-2026 (feedback del usuario) — Wi-Fi radio power on/off, distinct from
 // "AirportConnected/Disconnected" (network association) — CWEventTypePowerDidChange already
 // existed and already routed here, but the destination method never checked this specifically.
-#define HWG_NET_NOTIFY_WIFI_RADIO_KEY    @"HWGNetworkNotifyWifiRadioPower"
+// Split into two independent keys (same day, same feedback) matching the Connected/Disconnected
+// precedent — each direction gets its own row/icon, customizable independently.
+#define HWG_NET_NOTIFY_WIFI_RADIO_ON_KEY  @"HWGNetworkNotifyWifiRadioOn"
+#define HWG_NET_NOTIFY_WIFI_RADIO_OFF_KEY @"HWGNetworkNotifyWifiRadioOff"
 #define HWG_NET_NOTIFY_OTHER_ON_KEY      @"HWGNetworkNotifyOtherOn"
 #define HWG_NET_NOTIFY_OTHER_OFF_KEY     @"HWGNetworkNotifyOtherOff"
 #define HWG_NET_NOTIFY_GENERIC_ON_KEY    @"HWGNetworkNotifyGenericOn"
@@ -393,7 +396,13 @@ typedef enum {
 		dispatch_async(dispatch_get_main_queue(), ^{ [self checkWifiRadioPowerStateForInterface:interfaceName]; });
 		return;
 	}
-	if (![self boolForKey:HWG_NET_NOTIFY_WIFI_RADIO_KEY default:NO]) return;
+	// Split into two independent toggles/rows (18-ago-2026, feedback del usuario) — matches the
+	// Bluetooth Radio On/Off split done the same day, same reasoning: lets each direction be
+	// enabled/customized independently, same precedent as every other Connected/Disconnected
+	// pair elsewhere in this app.
+	BOOL onEnabled = [self boolForKey:HWG_NET_NOTIFY_WIFI_RADIO_ON_KEY default:NO];
+	BOOL offEnabled = [self boolForKey:HWG_NET_NOTIFY_WIFI_RADIO_OFF_KEY default:NO];
+	if (!onEnabled && !offEnabled) return;
 
 	CWInterface *iface = [self.wifiClient interfaceWithName:interfaceName];
 	if (!iface) return;
@@ -402,6 +411,8 @@ typedef enum {
 	BOOL hadBaseline = (lastReportedWifiRadioOn != -1);
 	self.lastReportedWifiRadioOn = poweredOn;
 	if (!hadBaseline) return;   // first sighting — baseline only, no notification
+	if (poweredOn && !onEnabled) return;
+	if (!poweredOn && !offEnabled) return;
 
 	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Network-Wifi-Radio-On" : @"Network-Wifi-Radio-Off") TIFFRepresentation];
 	[delegate notifyWithName:poweredOn ? @"WifiRadioOn" : @"WifiRadioOff"
@@ -1982,7 +1993,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Wi-Fi Off", @"Network-Wifi-Off", HWG_NET_NOTIFY_WIFI_OFF_KEY],
 		// Added 18-ago-2026 — the RADIO's own power state (macOS Wi-Fi toggle), distinct from
 		// "Wi-Fi Off" above (that fires when disconnected FROM A NETWORK, radio can stay on).
-		@[@"Wi-Fi Radio Turned On/Off", @"Network-Wifi-Radio-On", HWG_NET_NOTIFY_WIFI_RADIO_KEY, @NO],
+		// Own dedicated icons (Network-Wifi-Radio-On/-Off) — NOT "Network-Wifi-Off" above, which
+		// is a different asset for a different event; no name collision, but split into two
+		// rows/keys anyway to match the Connected/Disconnected precedent (independent toggles).
+		@[@"Wi-Fi Radio On", @"Network-Wifi-Radio-On", HWG_NET_NOTIFY_WIFI_RADIO_ON_KEY, @NO],
+		@[@"Wi-Fi Radio Off", @"Network-Wifi-Radio-Off", HWG_NET_NOTIFY_WIFI_RADIO_OFF_KEY, @NO],
 		@[@"Ethernet Connected", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_ON_KEY],
 		@[@"Ethernet Disconnected", @"Network-Ethernet-Off", HWG_NET_NOTIFY_ETH_OFF_KEY],
 		@[@"Ethernet Speed Changed", @"Network-Ethernet-Speed", HWG_NET_NOTIFY_ETH_SPEED_KEY, @NO],

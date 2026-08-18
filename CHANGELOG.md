@@ -6,6 +6,16 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: Bluetooth/Wi-Fi radio On and Off events shared icons with other rows
+Both radio power events initially reused existing icons (Bluetooth-On/-Off, already the
+defaultName for "Connected (generic)"/"Disconnected (generic)" a few rows up in the same
+picker) — this app's icon-override system keys customizations by defaultName, so a user
+customizing "Connected (generic)"'s icon would have silently re-skinned "Bluetooth Radio On"
+too. Gave each radio event its own dedicated icon (Bluetooth-Radio-On/-Off, Network-Wifi-Radio-
+On/-Off — the Wi-Fi ones were already distinct from "Wi-Fi Off"'s icon, no collision there, but
+split into separate rows/keys anyway for symmetry with the Connected/Disconnected precedent) and
+split each into two independent toggles (On and Off separately enable/customizable).
+
 ### Added: Bluetooth and Wi-Fi radio power on/off detection
 Both radios' on/off toggle (System Settings/Control Center) went undetected before — this
 monitor only ever reported device connect/disconnect (Bluetooth) or network association
