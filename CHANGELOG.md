@@ -17,8 +17,20 @@ Volume Monitor and Power Monitor were unaffected — both already compute their 
 dynamically from the row count.
 
 ### Added: dedicated Proxy Configuration Changed icon
-Replaced the reused Network-Generic-On placeholder with its own icon (dark slate badge +
-"PROXY" text, same visual convention as the existing DNS/Primary Interface badges).
+Replaced the reused Network-Generic-On placeholder with its own icon: dark slate badge with a
+server-rack glyph (3 status-lit blades), inspired by the "proxy server" concept the user shared
+— redrawn in this app's flat two-tone style rather than copying the 3D reference image.
+
+### Added: dedicated Ethernet Speed Changed icon
+Replaced the reused Network-Ethernet-On (plain connected) icon with an orange speedometer badge
+over the Ethernet jack — a direct visual reference to "speed changed" that the generic connected
+icon didn't carry.
+
+### Fixed: Battery Health Check used the wrong icon
+Was showing the CURRENT CHARGE LEVEL icon (e.g. 50%-charged battery), unrelated to battery
+HEALTH. Now picks by health percentage instead, reusing existing battery icons already in the
+asset catalog: Power-100 (full/healthy look) at ≥80%, Power-50 (half, visually degraded) at
+50-79%, Power-BatteryFailure (already used elsewhere for a failed battery) below 50%.
 
 ### Added: second full 13-module gap audit — "everything the system can offer"
 A deeper follow-up to v1.16.0's audit: 13 parallel research passes (one per monitor) looking

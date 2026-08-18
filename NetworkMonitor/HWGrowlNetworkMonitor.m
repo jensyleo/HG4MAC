@@ -1142,7 +1142,7 @@ typedef enum {
 		if ([previousSpeed isEqualToString:speed]) continue;
 
 		[lastKnownEthernetSpeed setObject:speed forKey:interfaceString];
-		NSData *iconData = [HWGResolveIconNamed(@"Network-Ethernet-On") TIFFRepresentation];
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Ethernet-Speed") TIFFRepresentation];
 		[delegate notifyWithName:@"NetworkLinkSpeedChanged"
 								 title:NSLocalizedString(@"Ethernet Speed Changed", @"")
 						 description:[NSString stringWithFormat:NSLocalizedString(@"%@:\t%@ → %@", @""), interfaceString, previousSpeed, speed]
@@ -1941,7 +1941,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Wi-Fi Off", @"Network-Wifi-Off", HWG_NET_NOTIFY_WIFI_OFF_KEY],
 		@[@"Ethernet Connected", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_ON_KEY],
 		@[@"Ethernet Disconnected", @"Network-Ethernet-Off", HWG_NET_NOTIFY_ETH_OFF_KEY],
-		@[@"Ethernet Speed Changed", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_SPEED_KEY, @NO],
+		@[@"Ethernet Speed Changed", @"Network-Ethernet-Speed", HWG_NET_NOTIFY_ETH_SPEED_KEY, @NO],
 		@[@"Other Interface Connected", @"Network-Interface-On", HWG_NET_NOTIFY_OTHER_ON_KEY],
 		@[@"Other Interface Disconnected", @"Network-Interface-Off", HWG_NET_NOTIFY_OTHER_OFF_KEY],
 		@[@"Generic Connected", @"Network-Generic-On", HWG_NET_NOTIFY_GENERIC_ON_KEY],

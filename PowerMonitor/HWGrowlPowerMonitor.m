@@ -763,6 +763,26 @@ static NSString *HWGCopyBatteryHealthCondition(void) {
 	}
 }
 
+// Added 17-ago-2026 (feedback del usuario) — icon for the Battery Health Check notification,
+// picked by HEALTH status rather than current charge level. Reuses existing battery-percentage
+// icons already in Assets.xcassets instead of drawing new ones: Power-100 (full/healthy look)
+// for good health, Power-50 (half, visually "degraded") for fair, Power-BatteryFailure (already
+// used elsewhere for a bad/failed battery) for poor health. Thresholds roughly follow Apple's
+// own battery-health framing (service typically recommended under ~80%, more urgent under 50%).
+-(NSData *)batteryHealthIconDataForPercent:(NSInteger)healthPercent {
+	NSString *imageName;
+	if (healthPercent < 0) {
+		imageName = @"Power-100";   // couldn't read a percent — assume fine rather than alarming
+	} else if (healthPercent >= 80) {
+		imageName = @"Power-100";
+	} else if (healthPercent >= 50) {
+		imageName = @"Power-50";
+	} else {
+		imageName = @"Power-BatteryFailure";
+	}
+	return HWGResolveIconDataNamed(imageName);
+}
+
 // Reads the CURRENT power source/percentage fresh from IOKit — used by Battery Health
 // Check, which fires on its own schedule (not from within -powerSourceChanged:) and so has
 // no already-computed currentSource/percentage lying around to reuse.
@@ -1062,7 +1082,12 @@ static void powerSourceChanged(void *context) {
 	if (![parts count]) return;
 
 	@autoreleasepool {
-		NSData *iconData = [self currentPowerStatusIconData];
+		// Added 17-ago-2026 (feedback del usuario) — was always using the CURRENT CHARGE LEVEL
+		// icon (e.g. Power-50, Power-Charging-70), unrelated to battery HEALTH. Now picks by
+		// health status instead, reusing existing battery-percentage icons already in the
+		// asset catalog rather than drawing new ones: healthy batteries get the same "full"
+		// look as a 100%-charged battery, degraded ones reuse the existing failure glyph.
+		NSData *iconData = [self batteryHealthIconDataForPercent:healthPercent];
 		[delegate notifyWithName:@"PowerBatteryHealth"
 							title:NSLocalizedString(@"Battery Health Check", @"")
 					  description:[parts componentsJoinedByString:@"\n"]
