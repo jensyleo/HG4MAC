@@ -465,9 +465,16 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		// Moved here from General (13-ago-2026, feedback del usuario) — per this app's
 		// convention, "Notify when X" toggles always live in Icons, never General (General is
 		// only for field-visibility toggles on an existing notice). Both OFF by default: neither
-		// has been verified against real hardware yet (see each feature's own doc comment above).
-		@[@"Scan Started/Finished (experimental)", @"ScannerMonitor-Icon-ScanStatus", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
-		@[@"Feeder State Changed (experimental)", @"ScannerMonitor-Icon-AdfState", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
+		// has been verified against real hardware yet (see each feature's own doc comment above,
+		// and -noteDescriptions below, which still spells out "experimental" in full).
+		//
+		// BUG FIX (17-ago-2026): labels used to say "... (experimental)" — at 249-252pt wide,
+		// that blew nameColumnWidth (shared across every row in this picker) past this fixed
+		// 560pt-wide pane's available 528pt, pushing EVERY row's notify checkbox in this tab
+		// (including Found/Lost, unrelated to these two rows) outside the clickable area.
+		// Confirmed live: no checkbox in this tab responded to clicks until this was shortened.
+		@[@"Scan Started/Finished", @"ScannerMonitor-Icon-ScanStatus", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
+		@[@"Feeder State Changed", @"ScannerMonitor-Icon-AdfState", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

@@ -6,6 +6,19 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.16.1 — 2026-08-17
 
+### Fixed: Scanner Monitor — no checkbox in the Icons tab responded to clicks
+- Found live testing right after the icon work below shipped: **every** notify checkbox in this
+  monitor's Icons tab (Found, Lost, Scan Started/Finished, Feeder State) stopped responding to
+  clicks — not just the two new rows.
+- Root cause: the new rows' labels included a `"(experimental)"` suffix, at 249-252pt wide. This
+  picker shares one `nameColumnWidth` across every row (sized to the single longest label in the
+  list), so that suffix blew the shared column width past this pane's fixed 528pt budget,
+  pushing every row's checkbox column outside the visible/clickable area — including Found/Lost,
+  which weren't touched by the icon work itself.
+- Fixed by shortening the two labels to "Scan Started/Finished" and "Feeder State Changed" (the
+  "experimental" caveat still appears in full in each event's `-noteDescriptions` entry, used by
+  the History panel). Confirmed live: all 4 checkboxes toggle and persist correctly now.
+
 ### Fixed: Printer Monitor — last "Notify" toggle moved from General to Icons
 - "Notify when a printer is added/removed" was the one remaining checkbox still living in the
   General tab after every other Printer Monitor notification toggle was already moved to Icons
