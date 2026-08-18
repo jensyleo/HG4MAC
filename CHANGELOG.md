@@ -6,6 +6,22 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: Bluetooth radio still felt slow; Wi-Fi notification order was backwards
+Bluetooth's poll was resetting its baseline to "unknown" on every tick while both toggles were
+off, so enabling a toggle in Preferences didn't take effect until the NEXT tick just to
+re-establish a baseline (no notification), and only the tick after THAT could detect a real
+change — up to a full extra poll interval of latency on top of the poll cadence itself. Now
+tracks the real adapter state unconditionally every tick and only gates the notification on the
+toggles, so a state already captured while disabled counts as a valid baseline the moment either
+toggle turns on. Poll interval also shortened 2s→1s.
+
+Wi-Fi: confirmed live (screenshot) that "AirPort Disconnected" could display before "Wi-Fi
+Turned Off" even though the radio check already runs first in code — both `notifyWithName` calls
+fire back-to-back with no delay, so the actual on-screen stacking order was left to macOS's own
+notification delivery timing rather than call order. Added a short (0.4s) delay before "AirPort
+Disconnected" specifically, so the radio notification (the actual cause, when both fire together)
+reliably reaches the notification center first — reads as cause-then-effect instead of the reverse.
+
 ### Fixed: Wi-Fi Radio Off never notified; Bluetooth radio detection felt slow
 Wi-Fi radio power detection was only hooked into the CWEventTypePowerDidChange CoreWLAN
 callback — confirmed live that turning the radio off reaches CWEventDelegate as a LINK change

@@ -517,7 +517,19 @@ typedef enum {
 		self.lastReportedSSID = nil;
 		self.lastReportedBSSID = nil;
 		self.lastReportedWifiBars = -1;   // re-baseline signal level on next connect (F20)
-		[self airportDisconnected:previousName];
+		// BUG FIX (18-ago-2026, feedback del usuario: "esto no es coherente" — screenshot showed
+		// "AirPort Disconnected" appearing before "Wi-Fi Turned Off" when the radio itself was
+		// turned off, even though this method's caller already calls the radio check FIRST in
+		// code. Both notifyWithName calls fire back-to-back with no delay, so the actual
+		// stacking order the user sees is left to macOS's own notification delivery/display
+		// timing rather than our call order. A short delay here (harmless for the far more
+		// common plain-signal-loss disconnect too) guarantees the radio notification — which
+		// is the actual CAUSE when both fire together — reaches the notification center
+		// meaningfully earlier, so it reads as cause-then-effect instead of the reverse.
+		__weak HWGrowlNetworkMonitor *blockSelf = self;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			[blockSelf airportDisconnected:previousName];
+		});
 	}
 }
 

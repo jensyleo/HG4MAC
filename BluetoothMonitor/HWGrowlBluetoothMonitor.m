@@ -67,12 +67,11 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // and vice versa).
 #define HWG_BT_NOTIFY_RADIO_ON_KEY  @"HWGBluetoothNotifyRadioOn"
 #define HWG_BT_NOTIFY_RADIO_OFF_KEY @"HWGBluetoothNotifyRadioOff"
-// BUG FIX (18-ago-2026, feedback del usuario: "tarda mucho en aparecer") — was 5.0s. Since the
-// timer only baselines on its first tick (not immediately at launch), a user enabling this
-// checkbox then toggling Bluetooth could see up to ~2 poll intervals of latency before the
-// first real notification. Shortened to 2.0s to feel responsive; still cheap (a single
-// IOBluetoothHostController property read, no I/O).
-#define HWG_BT_RADIO_POLL_INTERVAL 2.0
+// BUG FIX (18-ago-2026, feedback del usuario: "tarda mucho en aparecer" / "sigue estando muy
+// lento") — was 5.0s, then 2.0s. Combined with the always-tracking fix above (see
+// -pollRadioPowerState), 1.0s keeps this near-instant from the user's perspective while still
+// only doing a single cheap IOBluetoothHostController property read per tick (no I/O).
+#define HWG_BT_RADIO_POLL_INTERVAL 1.0
 
 @interface HWGrowlBluetoothMonitor ()
 
@@ -129,15 +128,14 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 }
 
 -(void)pollRadioPowerState {
-	// Split toggles (18-ago-2026) — the poll itself always runs cheaply if EITHER is on, but
-	// each direction's notification is independently gated, matching the Connected (generic)/
-	// Disconnected (generic) precedent a few rows up in the Icons picker.
-	BOOL onEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_ON_KEY, NO);
-	BOOL offEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_OFF_KEY, NO);
-	if (!onEnabled && !offEnabled) {
-		self.lastKnownRadioPowerState = -1;   // re-arm baseline for whenever either is turned back on
-		return;
-	}
+	// BUG FIX (18-ago-2026, feedback del usuario: "sigue estando muy lento en activarse") —
+	// used to reset the baseline to -1 on EVERY tick while both toggles were off, so enabling
+	// a toggle in Preferences didn't take effect until the NEXT tick just to (re-)establish a
+	// baseline (no notification yet), and only the tick AFTER that could detect a real change —
+	// up to one whole extra poll interval of latency on top of the poll cadence itself. Now
+	// tracks the real hardware state unconditionally every tick, and only gates the
+	// NOTIFICATION on the toggles — so a state actually captured while disabled already counts
+	// as a valid baseline the moment either toggle is turned on.
 	IOBluetoothHostController *controller = [IOBluetoothHostController defaultController];
 	if (!controller) return;   // no Bluetooth hardware present
 	BOOL poweredOn = ([controller powerState] == kBluetoothHCIPowerStateON);
@@ -145,6 +143,12 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	BOOL hadBaseline = (lastKnownRadioPowerState != -1);
 	self.lastKnownRadioPowerState = poweredOn;
 	if (!hadBaseline) return;   // first sighting — baseline only, no notification
+
+	// Split toggles (18-ago-2026) — each direction's notification is independently gated,
+	// matching the Connected (generic)/Disconnected (generic) precedent a few rows up in the
+	// Icons picker.
+	BOOL onEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_ON_KEY, NO);
+	BOOL offEnabled = HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_OFF_KEY, NO);
 	if (poweredOn && !onEnabled) return;
 	if (!poweredOn && !offEnabled) return;
 
