@@ -6,6 +6,18 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: Wi-Fi Radio Off never notified; Bluetooth radio detection felt slow
+Wi-Fi radio power detection was only hooked into the CWEventTypePowerDidChange CoreWLAN
+callback — confirmed live that turning the radio off reaches CWEventDelegate as a LINK change
+instead (or at least more reliably/promptly than the power callback): "AirPort Disconnected"
+and the IP-address update, both driven by the same underlying method, fired instantly, but the
+radio-off check never ran since it wasn't hooked to that path. Now runs from every WiFi
+state-change callback (link/mode/BSSID, not just power), plus a poll-based fallback piggybacked
+on the existing ~12s Wi-Fi signal poll, so it doesn't depend on any single CoreWLAN callback
+firing reliably. Bluetooth's poll interval shortened from 5s to 2s, and now baselines
+immediately when its checkbox is enabled instead of waiting for the first tick — could take up
+to ~10s before the first real notification previously.
+
 ### Fixed: Bluetooth/Wi-Fi radio On and Off events shared icons with other rows
 Both radio power events initially reused existing icons (Bluetooth-On/-Off, already the
 defaultName for "Connected (generic)"/"Disconnected (generic)" a few rows up in the same

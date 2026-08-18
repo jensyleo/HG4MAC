@@ -67,7 +67,12 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // and vice versa).
 #define HWG_BT_NOTIFY_RADIO_ON_KEY  @"HWGBluetoothNotifyRadioOn"
 #define HWG_BT_NOTIFY_RADIO_OFF_KEY @"HWGBluetoothNotifyRadioOff"
-#define HWG_BT_RADIO_POLL_INTERVAL 5.0
+// BUG FIX (18-ago-2026, feedback del usuario: "tarda mucho en aparecer") — was 5.0s. Since the
+// timer only baselines on its first tick (not immediately at launch), a user enabling this
+// checkbox then toggling Bluetooth could see up to ~2 poll intervals of latency before the
+// first real notification. Shortened to 2.0s to feel responsive; still cheap (a single
+// IOBluetoothHostController property read, no I/O).
+#define HWG_BT_RADIO_POLL_INTERVAL 2.0
 
 @interface HWGrowlBluetoothMonitor ()
 
@@ -120,6 +125,7 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 															   selector:@selector(pollRadioPowerState)
 															   userInfo:nil
 																repeats:YES];
+	[self pollRadioPowerState];   // baseline immediately rather than waiting for the first tick
 }
 
 -(void)pollRadioPowerState {

@@ -396,6 +396,19 @@ typedef enum {
 		dispatch_async(dispatch_get_main_queue(), ^{ [self checkWifiRadioPowerStateForInterface:interfaceName]; });
 		return;
 	}
+	CWInterface *iface = [self.wifiClient interfaceWithName:interfaceName];
+	if (!iface) return;
+	[self checkWifiRadioPowerStateWithInterface:iface];
+}
+
+// BUG FIX (18-ago-2026, feedback del usuario: "el de radio off no notifica") — pulled the actual
+// check out into its own method so it can ALSO run from -pollWifiSignal: (already scheduled
+// every ~12s) as a fallback, not just from the CWEventTypePowerDidChange callback above. Same
+// precedent as this file's own F20 comment a few lines below: some CoreWLAN CWEventDelegate
+// callbacks don't fire reliably on macOS Tahoe (confirmed there for CWEventTypeLinkQualityDidChange,
+// which is why RSSI is polled instead of push-driven) — CWEventTypePowerDidChange turning OFF
+// specifically not firing fits that same known pattern, so this no longer depends on it alone.
+-(void)checkWifiRadioPowerStateWithInterface:(CWInterface *)iface {
 	// Split into two independent toggles/rows (18-ago-2026, feedback del usuario) — matches the
 	// Bluetooth Radio On/Off split done the same day, same reasoning: lets each direction be
 	// enabled/customized independently, same precedent as every other Connected/Disconnected
@@ -404,8 +417,6 @@ typedef enum {
 	BOOL offEnabled = [self boolForKey:HWG_NET_NOTIFY_WIFI_RADIO_OFF_KEY default:NO];
 	if (!onEnabled && !offEnabled) return;
 
-	CWInterface *iface = [self.wifiClient interfaceWithName:interfaceName];
-	if (!iface) return;
 	BOOL poweredOn = [iface powerOn];
 	if (lastReportedWifiRadioOn == poweredOn) return;   // no real change, or first read this launch — baseline below
 	BOOL hadBaseline = (lastReportedWifiRadioOn != -1);
@@ -425,10 +436,12 @@ typedef enum {
 }
 
 -(void)bssidDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
+	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
 }
 
 -(void)modeDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
+	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
 }
 
@@ -509,10 +522,19 @@ typedef enum {
 }
 
 -(void)linkDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
+	// BUG FIX (18-ago-2026, feedback del usuario: "el de wifi radio off no notifica") — turning
+	// the radio off apparently reaches CWEventDelegate as a LINK change (this callback), not
+	// (or not reliably as) a CWEventTypePowerDidChange — confirmed live: AirportDisconnected
+	// (which this same method already triggers via -handleWiFiStateChangeForInterface: below)
+	// fired instantly on radio-off, but the radio check (only hooked to the power callback
+	// before this fix) never ran. Hooking the same check into every WiFi state-change callback
+	// (link/mode/BSSID, not just power) makes it robust to whichever one macOS actually fires.
+	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
 }
 
 -(void)ssidDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
+	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
 }
 
@@ -551,6 +573,11 @@ typedef enum {
 
 -(void)pollWifiSignal:(NSTimer *)timer {
 	CWInterface *iface = [self.wifiClient interface];
+	// BUG FIX (18-ago-2026) — fallback radio power-state check, see the doc comment on
+	// -checkWifiRadioPowerStateWithInterface: above. Runs every tick regardless of association
+	// state (unlike the RSSI logic below, which needs to be associated).
+	if (iface) [self checkWifiRadioPowerStateWithInterface:iface];
+
 	if (!(iface && [iface powerOn] && [iface interfaceMode] == kCWInterfaceModeStation)) {
 		self.lastReportedWifiBars = -1;   // not associated → re-baseline on reconnect
 		return;
