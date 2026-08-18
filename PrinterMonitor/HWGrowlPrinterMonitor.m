@@ -888,15 +888,14 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		[header.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
 	]];
 
-	// F34 #5: OFF by default — new monitor, off until the user opts in.
-	NSButton *row = [self checkboxWithKey:HWG_PRINTER_NOTIFY_KEY title:NSLocalizedString(@"Notify when a printer is added/removed", @"") defaultOn:NO];
-	[v addSubview:row];
-	[NSLayoutConstraint activateConstraints:@[
-		[row.topAnchor     constraintEqualToAnchor:header.bottomAnchor constant:10],
-		[row.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
-		[row.heightAnchor   constraintEqualToConstant:24],
-	]];
-
+	// Moved to Icons tab (17-ago-2026, feedback del usuario) — this was the one leftover "Notify
+	// when X" toggle still in General after the 12-ago-2026 pass below already moved every other
+	// one. Investigated first (see TODO.md): NOT redundant with HWG_PRINTER_NOTIFY_CONNECT_KEY —
+	// this key is the master gate for -updateWatcherState's poll timer (OFF by default means the
+	// timer never even starts unless some other feature enables it), while CONNECT_KEY only
+	// toggles whether the "Connected" notification's own text is shown once polling is already
+	// happening for any reason. Genuinely distinct events, so kept as its own row per the app's
+	// established pattern for that case (see TODO.md's own decision tree).
 	NSTextField *caption = [NSTextField wrappingLabelWithString:
 		NSLocalizedString(@"Detects USB, Bluetooth, and network (IPP/AirPrint/Bonjour) printers alike, by polling the system's printer list every 3s — there is no instant push notification for this (CUPS's own config file can't be watched directly without root). A network printer is only detected once it has actually been added in System Settings → Printers & Scanners, not merely discoverable on the LAN.", @"")];
 	caption.textColor = [NSColor secondaryLabelColor];
@@ -905,7 +904,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	caption.preferredMaxLayoutWidth = 380;
 	[v addSubview:caption];
 	[NSLayoutConstraint activateConstraints:@[
-		[caption.topAnchor     constraintEqualToAnchor:row.bottomAnchor constant:8],
+		[caption.topAnchor     constraintEqualToAnchor:header.bottomAnchor constant:10],
 		[caption.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
 		[caption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
 	]];
@@ -959,6 +958,10 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	// replacing the shared Connected checkmark badge they used to reuse.
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"PrinterMonitor-ModuleIcon"],
+		// Master gate for printer add/remove detection itself (starts/stops the poll timer) —
+		// distinct from "Connected" below, which only toggles that one notification's own text
+		// once detection is already running for any reason (see comment in General tab above).
+		@[@"Detect Printer Added/Removed", @"PrinterMonitor-Icon-Connected", HWG_PRINTER_NOTIFY_KEY, @NO],
 		@[@"Connected", @"PrinterMonitor-Icon-Connected", HWG_PRINTER_NOTIFY_CONNECT_KEY],
 		@[@"Needs Attention", @"PrinterMonitor-Icon-Disconnected", HWG_PRINTER_NOTIFY_ERROR_KEY, @NO],
 		@[@"Default Printer Changed", @"PrinterMonitor-Icon-DefaultChanged", HWG_PRINTER_NOTIFY_DEFAULT_KEY, @NO],

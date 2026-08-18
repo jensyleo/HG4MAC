@@ -6,6 +6,15 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.16.1 — 2026-08-17
 
+### Fixed: Printer Monitor — last "Notify" toggle moved from General to Icons
+- "Notify when a printer is added/removed" was the one remaining checkbox still living in the
+  General tab after every other Printer Monitor notification toggle was already moved to Icons
+  in a prior pass. Investigated its relationship to the existing "Connected" row first (they
+  looked possibly redundant): confirmed they gate genuinely different things — this key is the
+  master switch for whether the poll timer runs at all, while "Connected" only controls that one
+  notification's own text once polling is already active for any reason. Kept as two separate
+  rows, no logic changes; only the UI location moved.
+
 ### Fixed: Scanner Monitor — all 4 notification icons were visually identical
 - Every row in Scanner Monitor's Icons tab (Module Icon, Scanner Found/Lost, Scan Started/
   Finished, Feeder State Changed) reused the same bare `USB-TypeScanner` glyph, making the four
