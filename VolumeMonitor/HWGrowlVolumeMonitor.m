@@ -66,6 +66,12 @@
 // encrypted external disk — see TODO.md. ON by default: like SMART health above, this is a
 // passive read-only field, no reason to hide it.
 #define HWG_VOLUME_SHOW_FILEVAULT_KEY @"HWGVolumeShowFileVault"
+// Added 17-ago-2026 (feedback del usuario) — all NSURLVolumeKeys, same tier as FileVault above.
+#define HWG_VOLUME_SHOW_FORMAT_KEY        @"HWGVolumeShowFormat"
+#define HWG_VOLUME_SHOW_UUID_KEY          @"HWGVolumeShowUUID"
+#define HWG_VOLUME_SHOW_REMOVABLE_KEY     @"HWGVolumeShowRemovable"
+#define HWG_VOLUME_SHOW_READONLY_KEY      @"HWGVolumeShowReadOnly"
+#define HWG_VOLUME_SHOW_CASESENSITIVE_KEY @"HWGVolumeShowCaseSensitive"
 
 // Per-device-type "Notify" toggle (Icons tab) — same mechanism as USB/Thunderbolt/Bluetooth
 // Monitor's. Gates only the MOUNT notification for that category; unmount always notifies
@@ -964,6 +970,51 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			[isEncrypted boolValue] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")];
 }
 
+// Added 17-ago-2026 (feedback del usuario) — batch of NSURLVolumeKeys never read before,
+// all public, same "no DiskArbitration/BSD lookup needed" tier as FileVault above. Each
+// individually toggleable, all OFF by default (this monitor already has many fields; keeping
+// the default notification text unchanged for existing users).
+- (NSString *)extraVolumeAttributeLinesForMountedPath:(NSString *)path {
+	if (![path length]) return nil;
+	NSURL *url = [NSURL fileURLWithPath:path];
+	NSMutableArray<NSString*> *lines = [NSMutableArray array];
+
+	if (HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FORMAT_KEY, NO)) {
+		NSString *format = nil;
+		if ([url getResourceValue:&format forKey:NSURLVolumeLocalizedFormatDescriptionKey error:nil] && [format length]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Format:\t%@", @""), format]];
+		}
+	}
+	if (HWGVolumeBoolForKey(HWG_VOLUME_SHOW_UUID_KEY, NO)) {
+		NSString *uuid = nil;
+		if ([url getResourceValue:&uuid forKey:NSURLVolumeUUIDStringKey error:nil] && [uuid length]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Volume UUID:\t%@", @""), uuid]];
+		}
+	}
+	if (HWGVolumeBoolForKey(HWG_VOLUME_SHOW_REMOVABLE_KEY, NO)) {
+		NSNumber *removable = nil, *ejectable = nil;
+		[url getResourceValue:&removable forKey:NSURLVolumeIsRemovableKey error:nil];
+		[url getResourceValue:&ejectable forKey:NSURLVolumeIsEjectableKey error:nil];
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Removable:\t%@\tEjectable:\t%@", @""),
+			[removable boolValue] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @""),
+			[ejectable boolValue] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+	}
+	if (HWGVolumeBoolForKey(HWG_VOLUME_SHOW_READONLY_KEY, NO)) {
+		NSNumber *readOnly = nil;
+		if ([url getResourceValue:&readOnly forKey:NSURLVolumeIsReadOnlyKey error:nil] && [readOnly boolValue]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Read-only:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
+		}
+	}
+	if (HWGVolumeBoolForKey(HWG_VOLUME_SHOW_CASESENSITIVE_KEY, NO)) {
+		NSNumber *caseSensitive = nil;
+		if ([url getResourceValue:&caseSensitive forKey:NSURLVolumeSupportsCaseSensitiveNamesKey error:nil]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Case-sensitive:\t%@", @""),
+				[caseSensitive boolValue] ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+		}
+	}
+	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
+}
+
 - (BOOL)stringContainsCardReaderToken:(NSString *)s {
 	if (![s length]) return NO;
 	NSString *lower = [s lowercaseString];
@@ -1060,6 +1111,9 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			NSString *fileVaultLine = [self fileVaultStatusLineForMountedPath:[volume path]];
 			if (fileVaultLine) [extraLines addObject:fileVaultLine];
 		}
+
+		NSString *extraAttrLines = [self extraVolumeAttributeLinesForMountedPath:[volume path]];
+		if (extraAttrLines) [extraLines addObject:extraAttrLines];
 
 		if (showInterface) {
 			NSString *interface = [self interfaceDescriptionForMountedPath:[volume path]];
@@ -1307,6 +1361,13 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		[self checkboxWithKey:HWG_VOLUME_SHOW_SMART_KEY title:NSLocalizedString(@"Drive health % (internal disks)", @"") defaultOn:YES],
 		// 13-ago-2026: FileVault/encryption status, see HWG_VOLUME_SHOW_FILEVAULT_KEY's doc comment.
 		[self checkboxWithKey:HWG_VOLUME_SHOW_FILEVAULT_KEY title:NSLocalizedString(@"Encrypted (FileVault) status", @"") defaultOn:YES],
+		// Added 17-ago-2026 — all OFF by default: this monitor already shows a lot per mount,
+		// these are opt-in extras from NSURLVolumeKeys never read before.
+		[self checkboxWithKey:HWG_VOLUME_SHOW_FORMAT_KEY title:NSLocalizedString(@"Format (APFS/exFAT/MS-DOS…)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_UUID_KEY title:NSLocalizedString(@"Volume UUID", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_REMOVABLE_KEY title:NSLocalizedString(@"Removable / ejectable flags", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_READONLY_KEY title:NSLocalizedString(@"Read-only flag", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_VOLUME_SHOW_CASESENSITIVE_KEY title:NSLocalizedString(@"Case-sensitivity", @"") defaultOn:NO],
 	];
 	// Build top-down (cursor starts at 0, grows downward) in a FLIPPED content view — see
 	// HWGVolumeFlippedContentView above. This fixes two related problems at once:

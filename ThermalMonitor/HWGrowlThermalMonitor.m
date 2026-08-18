@@ -17,6 +17,7 @@
 #define HWG_THERMAL_NOTIFY_FAIR_KEY     @"HWGThermalNotifyFair"
 #define HWG_THERMAL_NOTIFY_SERIOUS_KEY  @"HWGThermalNotifySerious"
 #define HWG_THERMAL_NOTIFY_CRITICAL_KEY @"HWGThermalNotifyCritical"
+#define HWG_THERMAL_SHOW_LOWPOWER_KEY   @"HWGThermalShowLowPowerCorrelation"
 
 static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -135,6 +136,14 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	// -descriptionForThermalTransitionFrom:to:.
 	NSString *description = [self descriptionForThermalTransitionFrom:previousState to:state];
 
+	// Added 17-ago-2026 (feedback del usuario) — NSProcessInfo.isLowPowerModeEnabled, public,
+	// same class already used for thermalState above. Correlation only ("coincides in time"),
+	// not causal — Low Power Mode can also be toggled manually or triggered by low battery,
+	// independent of thermal pressure. OFF by default.
+	if (HWGThermalBoolForKey(HWG_THERMAL_SHOW_LOWPOWER_KEY, NO) && [NSProcessInfo processInfo].isLowPowerModeEnabled) {
+		description = [description stringByAppendingFormat:@"\n%@", NSLocalizedString(@"(Low Power Mode is also currently on)", @"")];
+	}
+
 	[delegate notifyWithName:@"ThermalStateChanged"
 						 title:NSLocalizedString(@"Thermal State Changed", @"")
 				   description:description
@@ -245,6 +254,17 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 		]];
 		previous = row;
 	}
+
+	// Added 17-ago-2026 (feedback del usuario) — NSProcessInfo.isLowPowerModeEnabled
+	// correlation, public API, OFF by default.
+	NSButton *lowPowerRow = [self checkboxWithKey:HWG_THERMAL_SHOW_LOWPOWER_KEY title:NSLocalizedString(@"Note if Low Power Mode is also on", @"") defaultOn:NO];
+	[v addSubview:lowPowerRow];
+	[NSLayoutConstraint activateConstraints:@[
+		[lowPowerRow.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:14],
+		[lowPowerRow.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+		[lowPowerRow.heightAnchor   constraintEqualToConstant:24],
+	]];
+	previous = lowPowerRow;
 
 	// "Simulate Test Notification" controls — see -simulateThermalTransitionForTesting:. Two
 	// popups (From/To) instead of a single fixed button so EVERY 4×4 state combination can be

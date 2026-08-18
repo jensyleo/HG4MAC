@@ -25,6 +25,12 @@
 #define HWG_DISPLAY_SHOW_REFRESH_KEY    @"HWGDisplayShowRefreshRate"
 #define HWG_DISPLAY_SHOW_ROLE_KEY       @"HWGDisplayShowRole"
 #define HWG_DISPLAY_SHOW_ROTATION_KEY   @"HWGDisplayShowRotation"
+// Added 17-ago-2026 (feedback del usuario) — all public CGDisplay/NSScreen APIs.
+#define HWG_DISPLAY_SHOW_UUID_KEY          @"HWGDisplayShowUUID"
+#define HWG_DISPLAY_SHOW_PHYSICAL_SIZE_KEY @"HWGDisplayShowPhysicalSize"
+#define HWG_DISPLAY_SHOW_COLORSPACE_KEY    @"HWGDisplayShowColorSpace"
+#define HWG_DISPLAY_SHOW_BUILTIN_KEY       @"HWGDisplayShowBuiltin"
+#define HWG_DISPLAY_SHOW_MIRROR_SOURCE_KEY @"HWGDisplayShowMirrorSource"
 
 // F34: notify when an already-connected display changes resolution or refresh rate (e.g.
 // user picks a different resolution in System Settings, or a TV renegotiates a different
@@ -289,6 +295,51 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 
 	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_ROLE_KEY, YES)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Role:\t%@", @""), [self roleForDisplayID:displayID]]];
+	}
+
+	// Added 17-ago-2026 (feedback del usuario) — all public CGDisplay/NSScreen APIs, all OFF
+	// by default (this monitor already shows several fields per display).
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_UUID_KEY, NO)) {
+		CFUUIDRef uuidRef = CGDisplayCreateUUIDFromDisplayID(displayID);
+		if (uuidRef) {
+			CFStringRef uuidStr = CFUUIDCreateString(kCFAllocatorDefault, uuidRef);
+			if (uuidStr) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Display UUID:\t%@", @""), (__bridge NSString *)uuidStr]];
+				CFRelease(uuidStr);
+			}
+			CFRelease(uuidRef);
+		}
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_PHYSICAL_SIZE_KEY, NO)) {
+		CGSize sizeMM = CGDisplayScreenSize(displayID);   // 0×0 for virtual displays/projectors, per Apple's own docs
+		if (sizeMM.width > 0 && sizeMM.height > 0) {
+			CGDisplayModeRef sizeMode = CGDisplayCopyDisplayMode(displayID);
+			NSString *ppiPart = @"";
+			if (sizeMode) {
+				double widthInches = sizeMM.width / 25.4;
+				if (widthInches > 0) {
+					double ppi = CGDisplayModeGetPixelWidth(sizeMode) / widthInches;
+					ppiPart = [NSString stringWithFormat:NSLocalizedString(@" (~%.0f PPI)", @""), ppi];
+				}
+				CGDisplayModeRelease(sizeMode);
+			}
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Physical size:\t%.0f×%.0f mm%@", @""), sizeMM.width, sizeMM.height, ppiPart]];
+		}
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_COLORSPACE_KEY, NO) && matchingScreen) {
+		NSColorSpace *colorSpace = matchingScreen.colorSpace;
+		if (colorSpace.localizedName) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Color space:\t%@", @""), colorSpace.localizedName]];
+		}
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_BUILTIN_KEY, NO)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Built-in:\t%@", @""), CGDisplayIsBuiltin(displayID) ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_MIRROR_SOURCE_KEY, NO) && CGDisplayIsInMirrorSet(displayID)) {
+		CGDirectDisplayID mirrorOf = CGDisplayMirrorsDisplay(displayID);
+		if (mirrorOf != kCGNullDirectDisplay) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Mirroring display ID:\t%u", @""), mirrorOf]];
+		}
 	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
@@ -589,6 +640,12 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_RESOLUTION_KEY title:NSLocalizedString(@"Resolution", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_REFRESH_KEY    title:NSLocalizedString(@"Refresh rate", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_ROLE_KEY       title:NSLocalizedString(@"Role (Main/Extended/Mirrored)", @"") defaultOn:YES],
+		// Added 17-ago-2026 — OFF by default.
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_UUID_KEY          title:NSLocalizedString(@"Display UUID (stable across reconnects)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_PHYSICAL_SIZE_KEY title:NSLocalizedString(@"Physical size + PPI", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_COLORSPACE_KEY    title:NSLocalizedString(@"Color space / gamut", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_BUILTIN_KEY       title:NSLocalizedString(@"Built-in flag", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_MIRROR_SOURCE_KEY title:NSLocalizedString(@"Mirror source display ID", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_ROTATION_KEY   title:NSLocalizedString(@"Rotation", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_MODE_CHANGE_KEY title:NSLocalizedString(@"Notify on resolution/refresh rate change", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_ROLE_CHANGE_KEY title:NSLocalizedString(@"Notify on role change (Main/Extended/Mirrored)", @"") defaultOn:YES],

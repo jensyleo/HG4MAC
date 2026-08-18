@@ -228,6 +228,20 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	}
 }
 
+// Known Thunderbolt-related PCI vendor IDs actually seen in dock/accessory hardware — not an
+// exhaustive USB-IF-style database, just enough to resolve the common cases.
+-(NSString *)tbVendorNameForID:(int)vendorID {
+	switch (vendorID) {
+		case 0x8086: return @"Intel";
+		case 0x1D65: return @"OWC (Other World Computing)";
+		case 0x0FD9: return @"CalDigit";
+		case 0x203A: return @"Kensington";
+		case 0x2149: return @"Belkin";
+		case 0x1AB8: return @"Elgato";
+		default:     return nil;
+	}
+}
+
 -(NSString *)tbExtraInfoForDevice:(io_object_t)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
@@ -255,6 +269,14 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 		}
 		if (vendorID >= 0 && deviceID >= 0) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"VID:PID:\t%04X:%04X", @""), vendorID, deviceID]];
+		}
+		// Added 17-ago-2026 (feedback del usuario) — client-side lookup table over the same
+		// vendor-id already read above (no new IOKit surface, purely a name mapping). Only the
+		// handful of vendors actually seen in Thunderbolt dock/accessory hardware — unrecognized
+		// IDs simply show the raw hex above, not an error.
+		if (vendorID >= 0) {
+			NSString *vendorName = [self tbVendorNameForID:vendorID];
+			if (vendorName) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Vendor:\t%@", @""), vendorName]];
 		}
 	}
 

@@ -51,6 +51,7 @@
 // is expected behavior, not a bug. Pending validation against a real ADF-equipped device (see
 // TODO.md); implemented now so it's ready once that hardware is available.
 #define HWG_SCANNER_NOTIFY_ADFSTATE_KEY @"HWGScannerNotifyAdfState"
+#define HWG_SCANNER_SHOW_JOB_REASONS_KEY @"HWGScannerShowJobStateReasons"
 
 static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -68,12 +69,25 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 // per the Mopria eSCL spec's <pwg:AdfState>. OPTIONAL in the spec: nil here just means this
 // device's firmware doesn't report it, not a parse failure.
 @property (nonatomic, copy) NSString *adfState;
+// Added 17-ago-2026 (feedback del usuario) — <pwg:JobStateReason> entries under
+// <pwg:Jobs>/<pwg:JobInfo>/<pwg:JobStateReasons>, same schema/endpoint already polled above.
+// Optional per spec, like AdfState — an empty array here just means this firmware doesn't
+// report per-job reasons, not a parse failure.
+@property (nonatomic, strong) NSMutableArray<NSString *> *jobStateReasons;
 @end
 @implementation HWGESCLStatusParser {
 	BOOL _inPwgState;
 	BOOL _inAdfState;
+	BOOL _inJobStateReason;
 	NSMutableString *_buffer;
 	NSMutableString *_adfBuffer;
+	NSMutableString *_jobReasonBuffer;
+}
+- (instancetype)init {
+	if ((self = [super init])) {
+		_jobStateReasons = [NSMutableArray array];
+	}
+	return self;
 }
 - (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
 	if ([elementName isEqualToString:@"pwg:State"]) {
@@ -82,11 +96,15 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	} else if ([elementName isEqualToString:@"pwg:AdfState"]) {
 		_inAdfState = YES;
 		_adfBuffer = [NSMutableString string];
+	} else if ([elementName isEqualToString:@"pwg:JobStateReason"]) {
+		_inJobStateReason = YES;
+		_jobReasonBuffer = [NSMutableString string];
 	}
 }
 - (void)parser:(NSXMLParser *)parser foundCharacters:(NSString *)string {
 	if (_inPwgState) [_buffer appendString:string];
 	if (_inAdfState) [_adfBuffer appendString:string];
+	if (_inJobStateReason) [_jobReasonBuffer appendString:string];
 }
 - (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
 	if ([elementName isEqualToString:@"pwg:State"] && _inPwgState) {
@@ -95,6 +113,10 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	} else if ([elementName isEqualToString:@"pwg:AdfState"] && _inAdfState) {
 		self.adfState = [_adfBuffer stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 		_inAdfState = NO;
+	} else if ([elementName isEqualToString:@"pwg:JobStateReason"] && _inJobStateReason) {
+		NSString *reason = [_jobReasonBuffer stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		if ([reason length]) [self.jobStateReasons addObject:reason];
+		_inJobStateReason = NO;
 	}
 }
 @end
@@ -212,7 +234,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		xmlParser.delegate = parser;
 		if (![xmlParser parse] || ![parser.deviceState length]) return;   // unparseable/unexpected shape — skip rather than guess
 		dispatch_async(dispatch_get_main_queue(), ^{
-			[weakSelf handleScanState:parser.deviceState forKey:key deviceName:deviceName];
+			[weakSelf handleScanState:parser.deviceState forKey:key deviceName:deviceName jobStateReasons:parser.jobStateReasons];
 			if ([parser.adfState length]) {
 				[weakSelf handleAdfState:parser.adfState forKey:key deviceName:deviceName];
 			}
@@ -225,7 +247,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 // same baseline-then-diff pattern every other monitor in this app uses. "Processing" is the
 // only in-progress value the eSCL spec defines besides Idle/Testing/Stopped; treated as
 // "scanning", everything else as "not scanning".
--(void)handleScanState:(NSString *)newState forKey:(NSString *)key deviceName:(NSString *)deviceName {
+-(void)handleScanState:(NSString *)newState forKey:(NSString *)key deviceName:(NSString *)deviceName jobStateReasons:(NSArray<NSString *> *)jobStateReasons {
 	NSString *previousState = self.lastKnownScanStateByKey[key];
 	self.lastKnownScanStateByKey[key] = newState;
 	if (!previousState) return;   // first sighting for this device — baseline only, no notification
@@ -234,10 +256,18 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	BOOL isScanning  = [newState isEqualToString:@"Processing"];
 	if (wasScanning == isScanning) return;
 
+	// Added 17-ago-2026 (feedback del usuario) — <pwg:JobStateReason> entries, same
+	// ScannerStatus poll, extending the existing parser. OFF by default like every other
+	// experimental Scanner Monitor field — optional in the spec, may never appear.
+	NSString *description = deviceName;
+	if ([jobStateReasons count] && HWGScannerBoolForKey(HWG_SCANNER_SHOW_JOB_REASONS_KEY, NO)) {
+		description = [NSString stringWithFormat:@"%@\n%@", deviceName, [jobStateReasons componentsJoinedByString:@", "]];
+	}
+
 	NSData *iconData = [[HWGrowlScannerMonitor scannerScanStatusIcon] TIFFRepresentation];
 	[delegate notifyWithName:@"ScannerScanStatus"
 							 title:isScanning ? NSLocalizedString(@"Scan Started", @"") : NSLocalizedString(@"Scan Finished", @"")
-					 description:deviceName
+					 description:description
 							  icon:iconData
 			  identifierString:[NSString stringWithFormat:@"HWGrowlScannerScanStatus-%@-%@", key, isScanning ? @"started" : @"finished"]
 				  contextString:nil
@@ -445,6 +475,17 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		[caption.topAnchor     constraintEqualToAnchor:row.bottomAnchor constant:8],
 		[caption.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
 		[caption.trailingAnchor constraintLessThanOrEqualToAnchor:v.trailingAnchor constant:-16],
+	]];
+
+	// Added 17-ago-2026 (feedback del usuario) — <pwg:JobStateReason> entries on Scan
+	// Started/Finished, same ScannerStatus poll already parsed above. OFF by default: optional
+	// field, may never appear depending on firmware.
+	NSButton *jobReasonsRow = [self checkboxWithKey:HWG_SCANNER_SHOW_JOB_REASONS_KEY title:NSLocalizedString(@"Job state reasons on Scan Started/Finished (experimental)", @"") defaultOn:NO];
+	[v addSubview:jobReasonsRow];
+	[NSLayoutConstraint activateConstraints:@[
+		[jobReasonsRow.topAnchor     constraintEqualToAnchor:caption.bottomAnchor constant:14],
+		[jobReasonsRow.leadingAnchor  constraintEqualToAnchor:v.leadingAnchor constant:16],
+		[jobReasonsRow.heightAnchor   constraintEqualToConstant:24],
 	]];
 
 	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];

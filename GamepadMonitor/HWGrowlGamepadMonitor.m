@@ -23,6 +23,10 @@
 #define HWG_GAMEPAD_SHOW_PLAYER_INDEX_KEY @"HWGGamepadShowPlayerIndex"
 #define HWG_GAMEPAD_SHOW_BATTERY_KEY     @"HWGGamepadShowBattery"
 #define HWG_GAMEPAD_SHOW_TRIGGERS_KEY    @"HWGGamepadShowAdaptiveTriggers"
+#define HWG_GAMEPAD_SHOW_BATTERY_STATE_KEY @"HWGGamepadShowBatteryState"
+#define HWG_GAMEPAD_SHOW_TOUCHPAD_KEY    @"HWGGamepadShowTouchpad"
+#define HWG_GAMEPAD_SHOW_HAPTICS_KEY     @"HWGGamepadShowHaptics"
+#define HWG_GAMEPAD_SHOW_MOTION_KEY      @"HWGGamepadShowMotion"
 #define HWG_GAMEPAD_NOTIFY_KEY           @"HWGGamepadNotifyConnect"
 
 static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
@@ -101,11 +105,46 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery:\t%.0f%%", @""), level * 100.0]];
 		}
 	}
+	// Added 17-ago-2026 (feedback del usuario) — GCDeviceBattery.batteryState, same class
+	// already used for batteryLevel above. Public, stable since iOS 14/macOS 11.
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_BATTERY_STATE_KEY, NO) && controller.battery) {
+		NSString *stateLabel = nil;
+		switch (controller.battery.batteryState) {
+			case GCDeviceBatteryStateCharging:    stateLabel = NSLocalizedString(@"Charging", @""); break;
+			case GCDeviceBatteryStateFull:        stateLabel = NSLocalizedString(@"Full", @""); break;
+			case GCDeviceBatteryStateDischarging: stateLabel = NSLocalizedString(@"Discharging", @""); break;
+			default:                              stateLabel = NSLocalizedString(@"Unknown", @""); break;
+		}
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery State:\t%@", @""), stateLabel]];
+	}
 	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_TRIGGERS_KEY, YES)) {
 		// Only detects the CLASS (DualSense-family gamepad) — doesn't configure/use the
 		// triggers themselves, this is a monitor, not a controller.
 		if ([controller.extendedGamepad isKindOfClass:NSClassFromString(@"GCDualSenseGamepad")]) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Adaptive Triggers:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
+		}
+	}
+	// Added 17-ago-2026 — GCDualSenseGamepad/GCDualShockGamepad touchpad presence, same
+	// class-check pattern already used for adaptive triggers above.
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_TOUCHPAD_KEY, NO)) {
+		BOOL hasTouchpad = [controller.extendedGamepad isKindOfClass:NSClassFromString(@"GCDualSenseGamepad")] ||
+			[controller.extendedGamepad isKindOfClass:NSClassFromString(@"GCDualShockGamepad")];
+		if (hasTouchpad) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Touchpad:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
+		}
+	}
+	// Added 17-ago-2026 — GCController.haptics (GCDeviceHaptics), public, presence-only check
+	// (doesn't create a CHHapticEngine or trigger any actual vibration).
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_HAPTICS_KEY, NO)) {
+		if (controller.haptics) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Haptics:\t%@", @""), NSLocalizedString(@"Supported", @"")]];
+		}
+	}
+	// Added 17-ago-2026 — GCController.motion (GCMotion), public, presence-only (doesn't
+	// activate sensors).
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_MOTION_KEY, NO)) {
+		if (controller.motion) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Motion Sensors:\t%@", @""), NSLocalizedString(@"Yes", @"")]];
 		}
 	}
 
@@ -202,6 +241,11 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_PLAYER_INDEX_KEY title:NSLocalizedString(@"Player index", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_BATTERY_KEY      title:NSLocalizedString(@"Battery level", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_TRIGGERS_KEY     title:NSLocalizedString(@"Adaptive Triggers (DualSense)", @"") defaultOn:YES],
+		// Added 17-ago-2026 — OFF by default.
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_BATTERY_STATE_KEY title:NSLocalizedString(@"Battery state (Charging/Full/Discharging)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_TOUCHPAD_KEY      title:NSLocalizedString(@"Touchpad presence (DualSense/DualShock)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_HAPTICS_KEY       title:NSLocalizedString(@"Haptics support", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_MOTION_KEY        title:NSLocalizedString(@"Motion sensors presence", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

@@ -25,6 +25,7 @@
 
 #define HWG_CAMERA_SHOW_TRANSPORT_KEY   @"HWGCameraShowTransport"
 #define HWG_CAMERA_SHOW_RESOLUTION_KEY  @"HWGCameraShowResolution"
+#define HWG_CAMERA_SHOW_POSITION_KEY    @"HWGCameraShowPosition"
 // 13-ago-2026: Continuity Camera (iPhone used as a Mac's webcam, macOS 13+) and Center Stage
 // (auto-framing, macOS 12.3+) — both pending validation against real hardware (a paired iPhone),
 // see TODO.md. Written now so the fields are ready the moment that hardware is available.
@@ -222,6 +223,19 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Center Stage:\t%@", @""), NSLocalizedString(@"Active", @"")]];
 			}
 		}
+	}
+	// Added 17-ago-2026 (feedback del usuario) — AVCaptureDevice.position, public, no
+	// permission needed beyond what's already required to enumerate devices. OFF by default:
+	// most Macs only have one built-in camera, so this is mostly interesting with an external
+	// webcam attached (which reports .unspecified, same as most third-party USB cameras).
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_POSITION_KEY, NO)) {
+		NSString *positionLabel = nil;
+		switch (device.position) {
+			case AVCaptureDevicePositionFront: positionLabel = NSLocalizedString(@"Front", @""); break;
+			case AVCaptureDevicePositionBack:  positionLabel = NSLocalizedString(@"Back", @""); break;
+			default:                           positionLabel = NSLocalizedString(@"Unspecified (typical for external webcams)", @""); break;
+		}
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Position:\t%@", @""), positionLabel]];
 	}
 	NSString *description = [lines count] ? [NSString stringWithFormat:@"%@\n%@", device.localizedName, [lines componentsJoinedByString:@"\n"]] : device.localizedName;
 
@@ -478,6 +492,8 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 	NSArray<NSButton*> *rows = @[
 		[self checkboxWithKey:HWG_CAMERA_SHOW_TRANSPORT_KEY title:NSLocalizedString(@"Transport type (USB, Bluetooth, Thunderbolt, AirPlay/Continuity [iPhone as camera], Built-in, Virtual)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_CAMERA_SHOW_RESOLUTION_KEY title:NSLocalizedString(@"Max resolution", @"") defaultOn:YES],
+		// Added 17-ago-2026 — AVCaptureDevice.position, OFF by default.
+		[self checkboxWithKey:HWG_CAMERA_SHOW_POSITION_KEY title:NSLocalizedString(@"Position (Front/Back/Unspecified)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_CAMERA_SHOW_CONTINUITY_KEY title:NSLocalizedString(@"Continuity Camera / Desk View companion (iPhone as webcam, macOS 13+)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_CAMERA_SHOW_CENTERSTAGE_KEY title:NSLocalizedString(@"Center Stage active (auto-framing, macOS 12.3+)", @"") defaultOn:YES],
 	];

@@ -4,6 +4,72 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.17.0 — 2026-08-17
+
+### Added: second full 13-module gap audit — "everything the system can offer"
+A deeper follow-up to v1.16.0's audit: 13 parallel research passes (one per monitor) looking
+for ANY remaining public-API data point or event not yet surfaced, this time explicitly
+including items that need specific hardware to verify live. ~15 additional findings that would
+require private/undocumented APIs (SMC fan/temperature, Night Shift, True Tone, external
+display brightness, Bluetooth audio codec, DualSense lightbar color, etc.) were investigated
+and deliberately NOT implemented, to preserve this app's public-API-only convention — each is
+documented in detail in the local TODO.md in case Apple ever publishes an equivalent API.
+
+**Network Monitor**: Wi-Fi link rate (Mbps), channel number + width, noise floor + derived SNR
+(all via `CWInterface`/`CWChannel`, no Location permission needed), proxy configuration change
+detection (HTTP/HTTPS/SOCKS/PAC via `SCDynamicStore`, same family as the existing DNS/primary-
+interface detection).
+
+**Bluetooth Monitor**: advertised SDP services list (`IOBluetoothDevice.services`), never
+surfaced before — gives a more precise "what can this device do" than the existing class-based
+type guess.
+
+**Volume Monitor**: format description (APFS/exFAT/MS-DOS…), volume UUID, removable/ejectable
+flags, read-only flag, case-sensitivity — all via `NSURLVolumeKeys` never read before.
+
+**Power Monitor**: battery health condition string (`kIOPSBatteryHealthConditionKey` —
+"Normal"/"Service Recommended"/"Replace Soon"/"Replace Now"), extra power-adapter fields
+(family/ID/serial) on Adapter Changed, and four new events via `NSWorkspace`: System Sleep,
+System Wake, Display(s) Sleep, Display(s) Wake — the last two distinguish a display-only sleep
+(screen dims/locks, Mac stays awake) from a full system sleep, something this monitor never
+distinguished before.
+
+**USB Monitor**: serial number, firmware/release number (`bcdDevice`), port location ID — all
+standard USB descriptor fields via the same `IORegistryEntryCreateCFProperty` pattern already
+used for VID/PID.
+
+**Audio Monitor**: device UID (stable identity across reconnects, unlike `AudioDeviceID` which
+macOS can reassign), mute state.
+
+**Camera Monitor**: position (Front/Back/Unspecified) via `AVCaptureDevice.position`.
+
+**Display Monitor**: stable UUID (`CGDisplayCreateUUIDFromDisplayID`, survives reconnects unlike
+`CGDirectDisplayID`), physical size + derived PPI, color space/gamut name, built-in flag,
+mirror-source display ID (which display a mirrored display is actually mirroring).
+
+**Gamepad Monitor**: battery state (Charging/Full/Discharging, not just the percentage already
+shown), touchpad presence (DualSense/DualShock), haptics support, motion sensors presence — all
+presence/capability checks via `GCController`, none activate the actual hardware.
+
+**Printer Monitor**: sharing status (`printer-is-shared`, already sitting in the same per-dest
+options dictionary every other field reads — no extra IPP round-trip).
+
+**Scanner Monitor**: extended the existing `ScannerStatus` XML parser to also capture
+`<pwg:JobStateReason>` entries — same endpoint/poll already in place for Scan Started/Finished,
+optional field like ADF state (may never appear depending on firmware).
+
+**Thermal Monitor**: notes when Low Power Mode is also currently on alongside a thermal-state
+transition (`NSProcessInfo.isLowPowerModeEnabled`) — correlation only, not causal (Low Power
+Mode can also be toggled manually or triggered by low battery independent of thermal pressure).
+
+**Thunderbolt Monitor**: vendor name lookup (Intel/OWC/CalDigit/Kensington/Belkin/Elgato) over
+the vendor-id already read for VID:PID.
+
+**Deferred to a future pass** (identified, real value, but higher engineering effort/risk —
+kept out of this round to keep it stable): Volume Monitor's second low-space warning tier
+(touches proven hysteresis logic), Printer Monitor's print-queue length, Bluetooth Monitor's
+adapter power-state (on/off) event.
+
 ## v1.16.1 — 2026-08-17
 
 ### Fixed: Scanner Monitor — no checkbox in the Icons tab responded to clicks

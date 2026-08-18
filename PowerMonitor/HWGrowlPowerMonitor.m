@@ -31,6 +31,7 @@
 // toggleable; if both are off there's nothing to say, so the check is skipped entirely.
 #define HWG_POWER_SHOW_CYCLES_KEY        @"HWGPowerShowCycleCount"
 #define HWG_POWER_SHOW_HEALTH_KEY        @"HWGPowerShowBatteryHealth"
+#define HWG_POWER_SHOW_HEALTH_CONDITION_KEY @"HWGPowerShowBatteryHealthCondition"
 #define HWG_POWER_HEALTH_VALUE_KEY       @"HWGPowerHealthCheckIntervalValue"
 #define HWG_POWER_HEALTH_UNIT_KEY        @"HWGPowerHealthCheckIntervalUnit"   // 0=days, 1=weeks, 2=months
 #define HWG_POWER_LAST_HEALTH_CHECK_KEY  @"HWGPowerLastHealthCheckDate"
@@ -57,6 +58,11 @@
 // unrelated to the delicate P20 retain area in -powerSourceChanged:. OFF by default like the
 // other opt-in additions to this monitor.
 #define HWG_POWER_ADAPTER_NOTIFY_KEY @"HWGPowerNotifyAdapterChanged"
+#define HWG_POWER_ADAPTER_SHOW_DETAILS_KEY @"HWGPowerAdapterShowDetails"
+#define HWG_POWER_NOTIFY_SYSTEM_SLEEP_KEY  @"HWGPowerNotifySystemSleep"
+#define HWG_POWER_NOTIFY_SYSTEM_WAKE_KEY   @"HWGPowerNotifySystemWake"
+#define HWG_POWER_NOTIFY_SCREENS_SLEEP_KEY @"HWGPowerNotifyScreensSleep"
+#define HWG_POWER_NOTIFY_SCREENS_WAKE_KEY  @"HWGPowerNotifyScreensWake"
 
 // Per-row "Notify?" checkbox (Icons tab) — one per battery-level/plugged icon. All battery
 // percentages funnel through ONE shared PowerChange/PowerWarning notify call (see
@@ -119,6 +125,30 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 	return gotAny;
 }
 
+// Added 17-ago-2026 (feedback del usuario) — kIOPSBatteryHealthConditionKey via
+// IOPSCopyPowerSourcesInfo/IOPSGetPowerSourceDescription, fully public IOPSKeys.h API (unlike
+// HWGCopyBatteryHealth above, which reads undocumented AppleSmartBattery IORegistry keys).
+// Cleaner/simpler alternative signal ("Normal"/"Service Recommended"/"Replace Soon"/"Replace
+// Now") — kept as an addition alongside the existing % calculation, not a replacement.
+static NSString *HWGCopyBatteryHealthCondition(void) {
+	NSString *result = nil;
+	CFTypeRef blob = IOPSCopyPowerSourcesInfo();
+	if (!blob) return nil;
+	CFArrayRef list = IOPSCopyPowerSourcesList(blob);
+	if (list) {
+		CFIndex count = CFArrayGetCount(list);
+		for (CFIndex i = 0; i < count; i++) {
+			CFDictionaryRef desc = IOPSGetPowerSourceDescription(blob, CFArrayGetValueAtIndex(list, i));
+			if (!desc) continue;
+			CFStringRef condition = CFDictionaryGetValue(desc, CFSTR(kIOPSBatteryHealthConditionKey));
+			if (condition) { result = (__bridge NSString *)condition; break; }
+		}
+		CFRelease(list);
+	}
+	CFRelease(blob);
+	return result;
+}
+
 @interface HWGrowlPowerMonitor ()
 
 +(NSInteger)batteryPercentageForPowerSourceDescription:(CFDictionaryRef)description;
@@ -135,6 +165,10 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 @property (nonatomic, assign) NSInteger remainingTime;
 
 @property (nonatomic, strong) NSString *typeString;
+// Added 17-ago-2026 (feedback del usuario) — kIOPSBatteryHealthConditionKey, public IOPSKeys.h
+// constant ("Normal"/"Service Recommended"/"Replace Soon"/"Replace Now"), cleaner than the
+// existing raw-capacity-ratio math in HWGCopyBatteryHealth (kept as-is, this is additive).
+@property (nonatomic, strong) NSString *batteryHealthCondition;
 
 -(id)initWithPowerSourceDescription:(CFDictionaryRef)description;
 
@@ -210,6 +244,9 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 		}else{
 			_remainingTime = kIOPSTimeRemainingUnknown;
 		}
+
+		CFStringRef healthCondition = CFDictionaryGetValue(description, CFSTR(kIOPSBatteryHealthConditionKey));
+		if (healthCondition) self.batteryHealthCondition = (__bridge NSString *)healthCondition;
 	}
 	return self;
 }
@@ -353,8 +390,46 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 													  name:NSProcessInfoPowerStateDidChangeNotification
 													object:nil];
 		_lastLowPowerModeEnabled = [NSProcessInfo processInfo].isLowPowerModeEnabled;
+
+		// Added 17-ago-2026 (feedback del usuario) — NSWorkspace sleep/wake notifications,
+		// fully public API. Distinguishes SYSTEM sleep/wake from DISPLAY-only sleep/wake (e.g.
+		// idle screen dimming/lock without the whole Mac actually sleeping) — something this
+		// monitor never surfaced before. All 4 OFF by default (new, potentially noisy events).
+		NSNotificationCenter *workspaceCenter = [[NSWorkspace sharedWorkspace] notificationCenter];
+		[workspaceCenter addObserver:self selector:@selector(systemWillSleep:) name:NSWorkspaceWillSleepNotification object:nil];
+		[workspaceCenter addObserver:self selector:@selector(systemDidWake:) name:NSWorkspaceDidWakeNotification object:nil];
+		[workspaceCenter addObserver:self selector:@selector(screensDidSleep:) name:NSWorkspaceScreensDidSleepNotification object:nil];
+		[workspaceCenter addObserver:self selector:@selector(screensDidWake:) name:NSWorkspaceScreensDidWakeNotification object:nil];
 	}
 	return self;
+}
+
+#pragma mark Sleep/Wake (added 17-ago-2026)
+
+-(void)postSleepWakeNotification:(NSString *)noteName title:(NSString *)title icon:(NSString *)iconName key:(NSString *)key {
+	if (!HWGPowerBoolForKey(key, NO)) return;
+	@autoreleasepool {
+		NSData *iconData = HWGResolveIconDataNamed(iconName);
+		[delegate notifyWithName:noteName
+							title:title
+					  description:@""
+							 icon:iconData
+				 identifierString:noteName
+					contextString:nil
+						   plugin:self];
+	}
+}
+-(void)systemWillSleep:(NSNotification *)note {
+	[self postSleepWakeNotification:@"PowerSystemSleep" title:NSLocalizedString(@"System Going to Sleep", @"") icon:@"Power-LowPowerMode" key:HWG_POWER_NOTIFY_SYSTEM_SLEEP_KEY];
+}
+-(void)systemDidWake:(NSNotification *)note {
+	[self postSleepWakeNotification:@"PowerSystemWake" title:NSLocalizedString(@"System Woke Up", @"") icon:@"Power-AdapterChanged" key:HWG_POWER_NOTIFY_SYSTEM_WAKE_KEY];
+}
+-(void)screensDidSleep:(NSNotification *)note {
+	[self postSleepWakeNotification:@"PowerScreensSleep" title:NSLocalizedString(@"Display(s) Went to Sleep", @"") icon:@"Power-LowPowerMode" key:HWG_POWER_NOTIFY_SCREENS_SLEEP_KEY];
+}
+-(void)screensDidWake:(NSNotification *)note {
+	[self postSleepWakeNotification:@"PowerScreensWake" title:NSLocalizedString(@"Display(s) Woke Up", @"") icon:@"Power-AdapterChanged" key:HWG_POWER_NOTIFY_SCREENS_WAKE_KEY];
 }
 
 -(void)dealloc {
@@ -806,10 +881,23 @@ static BOOL HWGCopyBatteryHealth(NSInteger *outCycleCount, NSInteger *outHealthP
 	NSString *desc = watts ? [NSString stringWithFormat:@"%@W", watts] : NSLocalizedString(@"Unknown wattage", @"");
 
 	if (lastKnownAdapterDescription && ![lastKnownAdapterDescription isEqualToString:desc]) {
+		NSMutableString *body = [NSMutableString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), lastKnownAdapterDescription, desc];
+		// Added 17-ago-2026 — same IOPSCopyExternalPowerAdapterDetails() dict already parsed
+		// above for wattage, public IOPSKeys.h constants unused until now. Enriches the
+		// description only (doesn't affect the wattage-based change-detection above, to avoid
+		// changing when this notification fires).
+		if (HWGPowerBoolForKey(HWG_POWER_ADAPTER_SHOW_DETAILS_KEY, NO)) {
+			NSString *adapterID = details[@kIOPSPowerAdapterIDKey];
+			NSString *family    = details[@kIOPSPowerAdapterFamilyKey];
+			NSString *serial    = details[@kIOPSPowerAdapterSerialNumberKey];
+			if ([family length])  [body appendFormat:@"\n%@", [NSString stringWithFormat:NSLocalizedString(@"Family: %@", @""), family]];
+			if ([adapterID length]) [body appendFormat:@"\n%@", [NSString stringWithFormat:NSLocalizedString(@"Adapter ID: %@", @""), adapterID]];
+			if ([serial length]) [body appendFormat:@"\n%@", [NSString stringWithFormat:NSLocalizedString(@"Serial: %@", @""), serial]];
+		}
 		NSData *iconData = HWGResolveIconDataNamed(@"Power-AdapterChanged");
 		[delegate notifyWithName:@"PowerAdapterChanged"
 							title:NSLocalizedString(@"Power Adapter Changed", @"")
-						description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), lastKnownAdapterDescription, desc]
+						description:body
 							 icon:iconData
 				 identifierString:@"HWGrowlPowerAdapter"
 					contextString:nil
@@ -965,6 +1053,12 @@ static void powerSourceChanged(void *context) {
 	if (showHealth && healthPercent >= 0) {
 		[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery health: %ld%%", @""), (long)healthPercent]];
 	}
+	if (HWGPowerBoolForKey(HWG_POWER_SHOW_HEALTH_CONDITION_KEY, NO)) {
+		NSString *condition = HWGCopyBatteryHealthCondition();
+		if ([condition length]) {
+			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Condition: %@", @""), condition]];
+		}
+	}
 	if (![parts count]) return;
 
 	@autoreleasepool {
@@ -1084,6 +1178,12 @@ static void powerSourceChanged(void *context) {
 	NSArray<NSButton*> *healthRows = @[
 		[self checkboxWithKey:HWG_POWER_SHOW_CYCLES_KEY title:NSLocalizedString(@"Cycle count", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_HEALTH_KEY title:NSLocalizedString(@"Battery health %", @"") defaultOn:YES],
+		// Added 17-ago-2026 — kIOPSBatteryHealthConditionKey, public IOPSKeys.h. OFF by
+		// default: mostly redundant with the % above for most users, opt-in extra.
+		[self checkboxWithKey:HWG_POWER_SHOW_HEALTH_CONDITION_KEY title:NSLocalizedString(@"Battery condition (Normal/Service Recommended…)", @"") defaultOn:NO],
+		// Added 17-ago-2026 — extra fields on "Power Adapter Changed" (Family/Adapter ID/Serial),
+		// same IOPSCopyExternalPowerAdapterDetails() dict already read for wattage.
+		[self checkboxWithKey:HWG_POWER_ADAPTER_SHOW_DETAILS_KEY title:NSLocalizedString(@"Adapter details (family/ID/serial) on change", @"") defaultOn:NO],
 	];
 	CGFloat healthControlRowH = 30;
 	CGFloat healthSectionHeight = 10 + headerH + 10
@@ -1289,6 +1389,11 @@ static void powerSourceChanged(void *context) {
 	// the app's convention they belong in Icons — same as every other monitor's own events.
 	[iconSpecs addObject:@[NSLocalizedString(@"Low Power Mode", @""), @"Power-LowPowerMode", HWG_POWER_LOWPOWER_NOTIFY_KEY, @NO]];
 	[iconSpecs addObject:@[NSLocalizedString(@"Adapter Changed", @""), @"Power-AdapterChanged", HWG_POWER_ADAPTER_NOTIFY_KEY, @NO]];
+	// Added 17-ago-2026 (feedback del usuario) — NSWorkspace sleep/wake, public API.
+	[iconSpecs addObject:@[NSLocalizedString(@"System Sleep", @""), @"Power-LowPowerMode", HWG_POWER_NOTIFY_SYSTEM_SLEEP_KEY, @NO]];
+	[iconSpecs addObject:@[NSLocalizedString(@"System Wake", @""), @"Power-AdapterChanged", HWG_POWER_NOTIFY_SYSTEM_WAKE_KEY, @NO]];
+	[iconSpecs addObject:@[NSLocalizedString(@"Display(s) Sleep", @""), @"Power-LowPowerMode", HWG_POWER_NOTIFY_SCREENS_SLEEP_KEY, @NO]];
+	[iconSpecs addObject:@[NSLocalizedString(@"Display(s) Wake", @""), @"Power-AdapterChanged", HWG_POWER_NOTIFY_SCREENS_WAKE_KEY, @NO]];
 
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:iconSpecs];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
@@ -1336,17 +1441,25 @@ static void powerSourceChanged(void *context) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", @"PowerAdapterChanged", nil];
+	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", @"PowerAdapterChanged", @"PowerSystemSleep", @"PowerSystemWake", @"PowerScreensSleep", @"PowerScreensWake", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Power Changed", @""), @"PowerChange",
 			  NSLocalizedString(@"Power Warning", @""), @"PowerWarning",
-			  NSLocalizedString(@"Power Adapter Changed", @""), @"PowerAdapterChanged", nil];
+			  NSLocalizedString(@"Power Adapter Changed", @""), @"PowerAdapterChanged",
+			  NSLocalizedString(@"System Sleep", @""), @"PowerSystemSleep",
+			  NSLocalizedString(@"System Wake", @""), @"PowerSystemWake",
+			  NSLocalizedString(@"Display(s) Sleep", @""), @"PowerScreensSleep",
+			  NSLocalizedString(@"Display(s) Wake", @""), @"PowerScreensWake", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the type or status of power changed", @""), @"PowerChange",
 			  NSLocalizedString(@"Sent when the battery is getting low", @""), @"PowerWarning",
-			  NSLocalizedString(@"Sent when the connected AC adapter's wattage/type changes", @""), @"PowerAdapterChanged", nil];
+			  NSLocalizedString(@"Sent when the connected AC adapter's wattage/type changes", @""), @"PowerAdapterChanged",
+			  NSLocalizedString(@"Sent when the whole system is about to sleep (NSWorkspaceWillSleepNotification)", @""), @"PowerSystemSleep",
+			  NSLocalizedString(@"Sent when the whole system wakes from sleep (NSWorkspaceDidWakeNotification)", @""), @"PowerSystemWake",
+			  NSLocalizedString(@"Sent when only the display(s) sleep, system stays awake (NSWorkspaceScreensDidSleepNotification)", @""), @"PowerScreensSleep",
+			  NSLocalizedString(@"Sent when the display(s) wake without a full system wake (NSWorkspaceScreensDidWakeNotification)", @""), @"PowerScreensWake", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"PowerChange", @"PowerWarning", nil];

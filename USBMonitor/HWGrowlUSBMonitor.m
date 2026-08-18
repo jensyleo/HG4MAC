@@ -30,6 +30,9 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 #define HWG_USB_SHOW_CLASS_KEY        @"HWGUSBShowDeviceClass"
 #define HWG_USB_SHOW_CURRENT_KEY      @"HWGUSBShowCurrentMA"
 #define HWG_USB_SHOW_MEDIUM_KEY       @"HWGUSBShowMediumType"
+#define HWG_USB_SHOW_SERIAL_KEY       @"HWGUSBShowSerialNumber"
+#define HWG_USB_SHOW_FIRMWARE_KEY     @"HWGUSBShowFirmwareVersion"
+#define HWG_USB_SHOW_LOCATION_KEY     @"HWGUSBShowLocationID"
 
 static BOOL HWGUSBBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -405,6 +408,42 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 		if (mediumLabel) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Medium:\t%@", @""), mediumLabel]];
 	}
 
+	// Added 17-ago-2026 (feedback del usuario) — 3 more standard USB descriptor properties,
+	// same IORegistryEntryCreateCFProperty pattern already used above for idVendor/idProduct.
+	// All OFF by default: this monitor already shows a lot per device.
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_SERIAL_KEY, NO)) {
+		CFTypeRef serialRef = IORegistryEntryCreateCFProperty(device, CFSTR("USB Serial Number"), kCFAllocatorDefault, 0);
+		if (serialRef) {
+			if (CFGetTypeID(serialRef) == CFStringGetTypeID()) {
+				NSString *serial = (__bridge NSString *)serialRef;
+				if ([serial length]) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Serial:\t%@", @""), serial]];
+			}
+			CFRelease(serialRef);
+		}
+	}
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_FIRMWARE_KEY, NO)) {
+		CFTypeRef bcdRef = IORegistryEntryCreateCFProperty(device, CFSTR("bcdDevice"), kCFAllocatorDefault, 0);
+		if (bcdRef) {
+			if (CFGetTypeID(bcdRef) == CFNumberGetTypeID()) {
+				int bcd = 0;
+				CFNumberGetValue((CFNumberRef)bcdRef, kCFNumberIntType, &bcd);
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Firmware/Release:\t%d.%02d", @""), (bcd >> 8) & 0xFF, bcd & 0xFF]];
+			}
+			CFRelease(bcdRef);
+		}
+	}
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_LOCATION_KEY, NO)) {
+		CFTypeRef locRef = IORegistryEntryCreateCFProperty(device, CFSTR("locationID"), kCFAllocatorDefault, 0);
+		if (locRef) {
+			if (CFGetTypeID(locRef) == CFNumberGetTypeID()) {
+				long location = 0;
+				CFNumberGetValue((CFNumberRef)locRef, kCFNumberLongType, &location);
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Port Location:\t0x%08lX", @""), location]];
+			}
+			CFRelease(locRef);
+		}
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -600,6 +639,10 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		[self checkboxWithKey:HWG_USB_SHOW_CLASS_KEY        title:NSLocalizedString(@"Device class (Mass Storage, HID, Hub…)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_USB_SHOW_CURRENT_KEY      title:NSLocalizedString(@"Power draw (mA required vs. available)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_USB_SHOW_MEDIUM_KEY       title:NSLocalizedString(@"Storage medium (SSD/Flash vs. HDD, Mass Storage only)", @"") defaultOn:YES],
+		// Added 17-ago-2026 — standard USB descriptor fields, OFF by default.
+		[self checkboxWithKey:HWG_USB_SHOW_SERIAL_KEY       title:NSLocalizedString(@"Serial number", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_USB_SHOW_FIRMWARE_KEY     title:NSLocalizedString(@"Firmware/release number", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_USB_SHOW_LOCATION_KEY     title:NSLocalizedString(@"Port location ID", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

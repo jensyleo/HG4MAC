@@ -46,6 +46,7 @@
 #define HWG_PRINTER_SHOW_LOCATION_KEY   @"HWGPrinterShowLocation"
 #define HWG_PRINTER_SHOW_MAKEMODEL_KEY  @"HWGPrinterShowMakeModel"
 #define HWG_PRINTER_SHOW_CONNECTION_KEY @"HWGPrinterShowConnectionType"
+#define HWG_PRINTER_SHOW_SHARED_KEY     @"HWGPrinterShowShared"
 
 // #6 (Fase B, 04-ago-2026): print job started/finished. Investigated first: CUPS has no true
 // push mechanism usable in-process (IPP job subscriptions only invoke external rss:/mailto:
@@ -93,6 +94,9 @@ static BOOL HWGPrinterBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, copy) NSString *location;
 @property (nonatomic, copy) NSString *makeModel;
 @property (nonatomic, copy) NSString *connectionType;   // "USB" / "Network" / "Bluetooth" / raw scheme
+// Added 17-ago-2026 (feedback del usuario) — printer-is-shared, already sitting in the same
+// per-dest options dict every other field above reads, no extra IPP round-trip needed.
+@property (nonatomic, assign) BOOL isShared;
 @end
 @implementation HWGPrinterInfo
 @end
@@ -135,6 +139,9 @@ static NSDictionary<NSString*, HWGPrinterInfo*> *HWGCollectPrinterInfo(void) {
 
 		const char *deviceURI = cupsGetOption("device-uri", dest->num_options, dest->options);
 		info.connectionType = deviceURI ? HWGConnectionTypeForDeviceURI([NSString stringWithUTF8String:deviceURI]) : nil;
+
+		const char *isShared = cupsGetOption("printer-is-shared", dest->num_options, dest->options);
+		info.isShared = (isShared && strcmp(isShared, "true") == 0);
 
 		result[info.name] = info;
 	}
@@ -412,6 +419,11 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 			}
 			if (showConnection && [info.connectionType length]) {
 				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Connection: %@", @""), info.connectionType]];
+			}
+			// Added 17-ago-2026 (feedback del usuario) — printer-is-shared, same options dict
+			// already read above, no extra IPP round-trip.
+			if (HWGPrinterBoolForKey(HWG_PRINTER_SHOW_SHARED_KEY, NO)) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Shared: %@", @""), info.isShared ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
 			}
 
 			if (HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_CONNECT_KEY, YES)) {
@@ -923,9 +935,11 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	NSButton *locationRow  = [self checkboxWithKey:HWG_PRINTER_SHOW_LOCATION_KEY   title:NSLocalizedString(@"Location", @"") defaultOn:NO];
 	NSButton *makeModelRow = [self checkboxWithKey:HWG_PRINTER_SHOW_MAKEMODEL_KEY  title:NSLocalizedString(@"Make/model", @"") defaultOn:NO];
 	NSButton *connRow      = [self checkboxWithKey:HWG_PRINTER_SHOW_CONNECTION_KEY title:NSLocalizedString(@"Connection type (USB/Network/Bluetooth)", @"") defaultOn:NO];
+	// Added 17-ago-2026 — printer-is-shared, same options dict already read.
+	NSButton *sharedRow    = [self checkboxWithKey:HWG_PRINTER_SHOW_SHARED_KEY title:NSLocalizedString(@"Sharing status", @"") defaultOn:NO];
 	NSView *previous = infoHeader;
 	CGFloat gap = 10;
-	for (NSButton *r in @[locationRow, makeModelRow, connRow]) {
+	for (NSButton *r in @[locationRow, makeModelRow, connRow, sharedRow]) {
 		[v addSubview:r];
 		[NSLayoutConstraint activateConstraints:@[
 			[r.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:gap],

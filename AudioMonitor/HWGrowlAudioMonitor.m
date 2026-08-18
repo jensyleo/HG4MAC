@@ -34,6 +34,8 @@
 #define HWG_AUDIO_SHOW_TRANSPORT_KEY         @"HWGAudioShowTransport"
 #define HWG_AUDIO_SHOW_CHANNELS_KEY          @"HWGAudioShowChannels"
 #define HWG_AUDIO_SHOW_SAMPLERATE_KEY        @"HWGAudioShowSampleRate"
+#define HWG_AUDIO_SHOW_UID_KEY               @"HWGAudioShowDeviceUID"
+#define HWG_AUDIO_SHOW_MUTE_KEY              @"HWGAudioShowMuteState"
 // #9-adjacent (05-ago-2026): "Label:\told → new" line for default output/input device
 // changes, same optional-field pattern as Display Monitor's per-field toggles — ON by
 // default. extraInfoForDeviceID (transport/channels/sample rate) stays unconditional.
@@ -364,6 +366,31 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_SAMPLERATE_KEY, YES)) {
 		double rate = [self sampleRateForDeviceID:deviceID];
 		if (rate > 0) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Sample rate:\t%.0f Hz", @""), rate]];
+	}
+	// Added 17-ago-2026 (feedback del usuario) — kAudioDevicePropertyDeviceUID, public,
+	// stable across reconnects (unlike AudioDeviceID, which macOS can reassign). OFF by
+	// default: mostly useful for power users tracking a specific external device.
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_UID_KEY, NO)) {
+		AudioObjectPropertyAddress uidAddress = { kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+		CFStringRef uid = NULL;
+		UInt32 uidSize = sizeof(uid);
+		if (AudioObjectGetPropertyData(deviceID, &uidAddress, 0, NULL, &uidSize, &uid) == noErr && uid) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Device UID:\t%@", @""), (__bridge NSString *)uid]];
+			CFRelease(uid);
+		}
+	}
+	// Added 17-ago-2026 — kAudioDevicePropertyMute, public, standard scalar on virtually every
+	// device with a volume control. Read-only display here (not a change listener) — showing
+	// current state on connect/default-change, same tier as the other fields above.
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_MUTE_KEY, NO)) {
+		AudioObjectPropertyAddress muteAddress = { kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain };
+		if (AudioObjectHasProperty(deviceID, &muteAddress)) {
+			UInt32 muted = 0;
+			UInt32 muteSize = sizeof(muted);
+			if (AudioObjectGetPropertyData(deviceID, &muteAddress, 0, NULL, &muteSize, &muted) == noErr) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Muted:\t%@", @""), muted ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+			}
+		}
 	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
@@ -874,6 +901,9 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		[self checkboxWithKey:HWG_AUDIO_SHOW_TRANSPORT_KEY        title:NSLocalizedString(@"Transport type (USB/Bluetooth/HDMI/etc.)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_SHOW_CHANNELS_KEY         title:NSLocalizedString(@"Channel count", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_SHOW_SAMPLERATE_KEY       title:NSLocalizedString(@"Sample rate", @"") defaultOn:YES],
+		// Added 17-ago-2026 — OFF by default.
+		[self checkboxWithKey:HWG_AUDIO_SHOW_UID_KEY              title:NSLocalizedString(@"Device UID (stable identity)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_SHOW_MUTE_KEY             title:NSLocalizedString(@"Mute state", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_AUDIO_SHOW_DEVICE_CHANGE_ARROW_KEY title:NSLocalizedString(@"Show old → new device when the default changes", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEFAULT_OUTPUT_KEY title:NSLocalizedString(@"Notify on default output change", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEFAULT_INPUT_KEY  title:NSLocalizedString(@"Notify on default input change", @"") defaultOn:YES],

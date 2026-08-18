@@ -51,6 +51,12 @@
 #define HWG_WIFI_SHOW_BAND_KEY       @"HWGWifiShowBand"
 #define HWG_WIFI_SHOW_GENERATION_KEY @"HWGWifiShowGeneration"
 #define HWG_WIFI_SHOW_SECURITY_KEY   @"HWGWifiShowSecurity"
+// Added 17-ago-2026 (feedback del usuario: "agregar todo lo posible") — all 3 read from
+// CWInterface, same as Band/Generation/Security above; none require Location permission
+// (they describe the radio link itself, not the network's identity).
+#define HWG_WIFI_SHOW_RATE_KEY       @"HWGWifiShowTransmitRate"
+#define HWG_WIFI_SHOW_CHANNEL_KEY    @"HWGWifiShowChannel"
+#define HWG_WIFI_SHOW_SNR_KEY        @"HWGWifiShowNoiseSNR"
 
 #define HWG_ETH_SHOW_INTERFACE_KEY   @"HWGEthernetShowInterface"
 #define HWG_ETH_SHOW_SPEED_KEY       @"HWGEthernetShowSpeed"
@@ -87,6 +93,7 @@
 #define HWG_NET_NOTIFY_ETH_SPEED_KEY     @"HWGNetworkNotifyEthernetSpeedChanged"
 #define HWG_NET_NOTIFY_DNS_KEY           @"HWGNetworkNotifyDNSChanged"
 #define HWG_NET_NOTIFY_PRIMARY_IF_KEY    @"HWGNetworkNotifyPrimaryInterfaceChanged"
+#define HWG_NET_NOTIFY_PROXY_KEY         @"HWGNetworkNotifyProxyChanged"
 #define HWG_NET_NOTIFY_OTHER_ON_KEY      @"HWGNetworkNotifyOtherOn"
 #define HWG_NET_NOTIFY_OTHER_OFF_KEY     @"HWGNetworkNotifyOtherOff"
 #define HWG_NET_NOTIFY_GENERIC_ON_KEY    @"HWGNetworkNotifyGenericOn"
@@ -155,6 +162,7 @@ typedef enum {
 // there are several (e.g. a USB-Ethernet dock on top of Wi-Fi).
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *previousIPv4ByInterface;
 @property (nonatomic, strong) NSArray<NSString *> *lastKnownDNSServers;
+@property (nonatomic, copy) NSString *lastKnownProxySummary;
 @property (nonatomic, strong) NSString *lastKnownPrimaryInterface;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *previousIPv6ByInterface;
 
@@ -235,6 +243,7 @@ typedef enum {
 @synthesize previousHasIPAddresses;
 @synthesize previousIPv4ByInterface;
 @synthesize lastKnownDNSServers;
+@synthesize lastKnownProxySummary;
 @synthesize lastKnownPrimaryInterface;
 @synthesize previousIPv6ByInterface;
 @synthesize interfaceIsEthernet;
@@ -939,10 +948,13 @@ typedef enum {
 // otherwise each gets its own line. Returns nil if nothing is enabled or the interface
 // isn't associated.
 -(NSString*)wifiExtraInfoLines {
-	BOOL showBand = [self boolForKey:HWG_WIFI_SHOW_BAND_KEY default:YES];
-	BOOL showGen  = [self boolForKey:HWG_WIFI_SHOW_GENERATION_KEY default:YES];
-	BOOL showSec  = [self boolForKey:HWG_WIFI_SHOW_SECURITY_KEY default:YES];
-	if (!showBand && !showGen && !showSec) return nil;
+	BOOL showBand    = [self boolForKey:HWG_WIFI_SHOW_BAND_KEY default:YES];
+	BOOL showGen     = [self boolForKey:HWG_WIFI_SHOW_GENERATION_KEY default:YES];
+	BOOL showSec     = [self boolForKey:HWG_WIFI_SHOW_SECURITY_KEY default:YES];
+	BOOL showRate    = [self boolForKey:HWG_WIFI_SHOW_RATE_KEY default:NO];
+	BOOL showChannel = [self boolForKey:HWG_WIFI_SHOW_CHANNEL_KEY default:NO];
+	BOOL showSNR     = [self boolForKey:HWG_WIFI_SHOW_SNR_KEY default:NO];
+	if (!showBand && !showGen && !showSec && !showRate && !showChannel && !showSNR) return nil;
 
 	CWInterface *iface = [self.wifiClient interface];
 	if (!iface) return nil;
@@ -964,6 +976,35 @@ typedef enum {
 	}
 	if (showSec) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Security:\t%@", ""), sec]];
+	}
+	// Transmit rate (Mbps) — CWInterface.transmitRate, public, no Location permission needed.
+	if (showRate) {
+		double rate = [iface transmitRate];
+		if (rate > 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Link Rate:\t%.0f Mbps", ""), rate]];
+		}
+	}
+	// Channel number + width — CWChannel.channelNumber/channelWidth, same object already read for band.
+	if (showChannel) {
+		NSString *widthStr;
+		switch ([channel channelWidth]) {
+			case kCWChannelWidth20MHz:  widthStr = @"20 MHz"; break;
+			case kCWChannelWidth40MHz:  widthStr = @"40 MHz"; break;
+			case kCWChannelWidth80MHz:  widthStr = @"80 MHz"; break;
+			case kCWChannelWidth160MHz: widthStr = @"160 MHz"; break;
+			default:                    widthStr = NSLocalizedString(@"Unknown", @""); break;
+		}
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Channel:\t%ld (%@)", "First %ld = channel number, %@ = width e.g. '80 MHz'"), (long)[channel channelNumber], widthStr]];
+	}
+	// Noise floor (dBm) + derived SNR — CWInterface.noiseMeasurement, public, combined with the
+	// RSSI this monitor already reads elsewhere for a real signal-to-noise ratio (a materially
+	// better quality indicator than RSSI alone).
+	if (showSNR) {
+		NSInteger noise = [iface noiseMeasurement];
+		NSInteger rssi = [iface rssiValue];
+		if (noise != 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Noise:\t%ld dBm (SNR: %ld dB)", "First %ld = noise floor in dBm, second %ld = signal-to-noise ratio in dB"), (long)noise, (long)(rssi - noise)]];
+		}
 	}
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
@@ -1406,6 +1447,47 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	self.lastKnownPrimaryInterface = primary;
 }
 
+// Added 17-ago-2026 (feedback del usuario) — proxy configuration (HTTP/HTTPS/SOCKS/PAC),
+// same SCDynamicStore family already used for DNS/primary-interface above
+// (State:/Network/Global/Proxies is the public key SCDynamicStoreCopyProxies()/System
+// Settings → Network → Proxies itself is built on). Reports only whether ANY proxy got
+// turned on/off/changed, not a full per-protocol diff — matches this monitor's existing
+// "one line, what changed" style for DNS/primary-interface.
+-(void)checkProxyConfigChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_PROXY_KEY default:NO]) return;
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/Proxies"));
+	if (!d) return;
+	NSDictionary *dict = (__bridge_transfer NSDictionary *)d;
+
+	BOOL httpEnabled  = [dict[@"HTTPEnable"] boolValue];
+	BOOL httpsEnabled = [dict[@"HTTPSEnable"] boolValue];
+	BOOL socksEnabled = [dict[@"SOCKSEnable"] boolValue];
+	BOOL pacEnabled   = [dict[@"ProxyAutoConfigEnable"] boolValue];
+	NSString *summary = [NSString stringWithFormat:@"%d|%d|%d|%d|%@|%@",
+		httpEnabled, httpsEnabled, socksEnabled, pacEnabled,
+		dict[@"HTTPProxy"] ?: @"", dict[@"ProxyAutoConfigURLString"] ?: @""];
+
+	if (lastKnownProxySummary && ![lastKnownProxySummary isEqualToString:summary]) {
+		NSMutableArray<NSString *> *active = [NSMutableArray array];
+		if (httpEnabled)  [active addObject:@"HTTP"];
+		if (httpsEnabled) [active addObject:@"HTTPS"];
+		if (socksEnabled) [active addObject:@"SOCKS"];
+		if (pacEnabled)   [active addObject:@"Auto-Config (PAC)"];
+		NSString *desc = [active count]
+			? [NSString stringWithFormat:NSLocalizedString(@"Active: %@", @""), [active componentsJoinedByString:@", "]]
+			: NSLocalizedString(@"No proxy configured", @"");
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Generic-On") TIFFRepresentation];
+		[delegate notifyWithName:@"ProxyConfigChanged"
+								 title:NSLocalizedString(@"Proxy Configuration Changed", @"")
+						 description:desc
+								  icon:iconData
+				  identifierString:@"HWGrowlProxyConfig"
+					  contextString:nil
+								plugin:self];
+	}
+	self.lastKnownProxySummary = summary;
+}
+
 -(void)updateIP {
 	NSDictionary *friendly     = [self bsdToFriendlyNameMap];
 	NSArray  *ipv4Info         = [self collectIPv4InfoFromKernel];
@@ -1413,6 +1495,7 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	[self checkVPNTransitionsWithIPv4Info:ipv4Info ipv6Info:ipv6Info];
 	[self checkDNSServersChanged];
 	[self checkPrimaryInterfaceChanged];
+	[self checkProxyConfigChanged];
 	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
 	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
 
@@ -1719,6 +1802,12 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_WIFI_SHOW_BAND_KEY        title:NSLocalizedString(@"Band (2.4/5/6 GHz)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_GENERATION_KEY  title:NSLocalizedString(@"Generation (Wi-Fi 4–7)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_SECURITY_KEY    title:NSLocalizedString(@"Security type", @"") defaultOn:YES],
+		// Added 17-ago-2026 — OFF by default (unlike the 5 fields above, on since v1.0): keeps
+		// the default notification text as compact as it's always been, opt-in for users who
+		// want the extra radio-link detail.
+		[self checkboxWithKey:HWG_WIFI_SHOW_RATE_KEY        title:NSLocalizedString(@"Link rate (Mbps)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_WIFI_SHOW_CHANNEL_KEY     title:NSLocalizedString(@"Channel number + width", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_WIFI_SHOW_SNR_KEY         title:NSLocalizedString(@"Noise floor + SNR", @"") defaultOn:NO],
 		// Moved here from the Ethernet tab (13-ago-2026, feedback del usuario) — this controls
 		// whether Wi-Fi's OWN link/AWDL/AirDrop events get reported, so it belongs with the
 		// rest of the Wi-Fi settings, not Ethernet's (Ethernet's own real-interface filter at
@@ -1855,6 +1944,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"VPN Disconnected", @"Network-VPN-Off", HWG_VPN_NOTIFY_KEY],
 		@[@"DNS Servers Changed", @"Network-DNS-On", HWG_NET_NOTIFY_DNS_KEY, @NO],
 		@[@"Primary Interface Changed", @"Network-PrimaryInterface-On", HWG_NET_NOTIFY_PRIMARY_IF_KEY, @NO],
+		@[@"Proxy Configuration Changed", @"Network-Generic-On", HWG_NET_NOTIFY_PROXY_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -1886,7 +1976,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -1899,7 +1989,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"VPN Connected", @""), @"VPNConnected",
 			  NSLocalizedString(@"VPN Disconnected", @""), @"VPNDisconnected",
 			  NSLocalizedString(@"DNS Servers Changed", @""), @"DNSServersChanged",
-			  NSLocalizedString(@"Primary Interface Changed", @""), @"PrimaryInterfaceChanged", nil];
+			  NSLocalizedString(@"Primary Interface Changed", @""), @"PrimaryInterfaceChanged",
+			  NSLocalizedString(@"Proxy Configuration Changed", @""), @"ProxyConfigChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -1912,7 +2003,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when a VPN tunnel interface connects (F34, heuristic detection)", @""), @"VPNConnected",
 			  NSLocalizedString(@"Sent when a VPN tunnel interface disconnects (F34, heuristic detection)", @""), @"VPNDisconnected",
 			  NSLocalizedString(@"Sent when the system's DNS server list changes", @""), @"DNSServersChanged",
-			  NSLocalizedString(@"Sent when the primary network interface changes (e.g. Wi-Fi ↔ Ethernet)", @""), @"PrimaryInterfaceChanged", nil];
+			  NSLocalizedString(@"Sent when the primary network interface changes (e.g. Wi-Fi ↔ Ethernet)", @""), @"PrimaryInterfaceChanged",
+			  NSLocalizedString(@"Sent when HTTP/HTTPS/SOCKS/PAC proxy settings change", @""), @"ProxyConfigChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

@@ -27,6 +27,7 @@
 // Service) is a separate, not-yet-implemented rope — see TODO.md, blocked on hardware to test.
 #define HWG_BT_SHOW_BATTERY_KEY @"HWGBluetoothShowBattery"
 #define HWG_BT_SHOW_RSSI_KEY    @"HWGBluetoothShowRSSI"
+#define HWG_BT_SHOW_SERVICES_KEY @"HWGBluetoothShowServices"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -377,6 +378,23 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		if (batteryInfo) [lines addObject:batteryInfo];
 	}
 
+	// Added 17-ago-2026 (feedback del usuario) — SDP service records, public API
+	// (IOBluetoothDevice.services), never surfaced before. Gives a more precise "what can this
+	// device do" than the class-major/minor guess already shown as Type above.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_SERVICES_KEY, NO)) {
+		NSArray *services = [device services];
+		if ([services count]) {
+			NSMutableArray<NSString*> *names = [NSMutableArray array];
+			for (IOBluetoothSDPServiceRecord *record in services) {
+				NSString *name = [record getServiceName];
+				if (name) [names addObject:name];
+			}
+			if ([names count]) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Services:\t%@", @""), [names componentsJoinedByString:@", "]]];
+			}
+		}
+	}
+
 	if (HWGBTBoolForKey(HWG_BT_SHOW_RSSI_KEY, YES)) {
 		// rawRSSI()/RSSI() only return a meaningful value while CONNECTED (public API,
 		// IOBluetoothDevice) — not during discovery/pairing, which this monitor doesn't do.
@@ -497,6 +515,10 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[self checkboxWithKey:HWG_BT_SHOW_ADDRESS_KEY title:NSLocalizedString(@"MAC address", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_BATTERY_KEY title:NSLocalizedString(@"Battery level (Apple accessories: AirPods, Magic Mouse/Keyboard/Trackpad)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_RSSI_KEY    title:NSLocalizedString(@"Signal strength (RSSI, while connected)", @"") defaultOn:NO],
+		// Added 17-ago-2026 — OFF by default: SDP service names are often verbose/technical
+		// (e.g. "AVRCP Target", "Handsfree Audio Gateway"), not something every user wants
+		// cluttering the notification by default.
+		[self checkboxWithKey:HWG_BT_SHOW_SERVICES_KEY title:NSLocalizedString(@"Advertised services (SDP)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
