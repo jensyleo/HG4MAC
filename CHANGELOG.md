@@ -4,6 +4,19 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.16.1 — 2026-08-17
+
+### Fixed: Scanner Monitor — all 4 notification icons were visually identical
+- Every row in Scanner Monitor's Icons tab (Module Icon, Scanner Found/Lost, Scan Started/
+  Finished, Feeder State Changed) reused the same bare `USB-TypeScanner` glyph, making the four
+  rows indistinguishable from one another.
+- Added 4 dedicated icons, following the same badge convention already used elsewhere in this
+  app: a green check for Found, a red X for Lost, a blue document+scan-beam badge for Scan
+  Started/Finished, and an amber "!" badge for Feeder (ADF) State.
+- Found/Lost was originally a single shared toggle/icon; split into two independent checkboxes
+  and icon rows (one event can't be represented by one icon covering two opposite states),
+  matching the precedent Printer Monitor already set for Connected/Needs Attention.
+
 ## v1.16.0 — 2026-08-13
 
 ### Added: full monitoring gap audit across all 13 modules, several new fields/events implemented

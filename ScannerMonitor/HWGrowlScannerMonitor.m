@@ -20,8 +20,12 @@
 
 #define HWG_SCANNER_NOTIFY_KEY @"HWGScannerNotifyEnabled"
 // Independent from HWG_SCANNER_NOTIFY_KEY above (which also controls whether browsing runs at
-// all) — this only silences the notification itself while detection/state-tracking continues.
-#define HWG_SCANNER_NOTIFY_FOUNDLOST_KEY @"HWGScannerNotifyFoundLost"
+// all) — these only silence the notification itself while detection/state-tracking continues.
+// Split into two separate keys (17-ago-2026, feedback del usuario) — each now has its own icon
+// (green check for Found, red X for Lost), so a single shared toggle no longer made sense; this
+// also matches Printer Monitor's Connected/Needs Attention precedent of one key per icon row.
+#define HWG_SCANNER_NOTIFY_FOUND_KEY @"HWGScannerNotifyFound"
+#define HWG_SCANNER_NOTIFY_LOST_KEY @"HWGScannerNotifyLost"
 
 // #6 (05-ago-2026): scan job start/finish, via eSCL/AirScan's GET /eSCL/ScannerStatus — the
 // same protocol _uscan._tcp already advertises (Mopria eSCL Technical Specification, publicly
@@ -230,7 +234,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	BOOL isScanning  = [newState isEqualToString:@"Processing"];
 	if (wasScanning == isScanning) return;
 
-	NSData *iconData = [[HWGrowlScannerMonitor scannerIcon] TIFFRepresentation];
+	NSData *iconData = [[HWGrowlScannerMonitor scannerScanStatusIcon] TIFFRepresentation];
 	[delegate notifyWithName:@"ScannerScanStatus"
 							 title:isScanning ? NSLocalizedString(@"Scan Started", @"") : NSLocalizedString(@"Scan Finished", @"")
 					 description:deviceName
@@ -251,7 +255,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	if (!previousState) return;   // first sighting for this device — baseline only, no notification
 	if ([previousState isEqualToString:newState]) return;
 
-	NSData *iconData = [[HWGrowlScannerMonitor scannerIcon] TIFFRepresentation];
+	NSData *iconData = [[HWGrowlScannerMonitor scannerAdfStateIcon] TIFFRepresentation];
 	[delegate notifyWithName:@"ScannerAdfStateChanged"
 							 title:NSLocalizedString(@"Scanner Feeder State Changed", @"")
 					 description:[NSString stringWithFormat:@"%@\n%@", deviceName, newState]
@@ -295,8 +299,8 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	service.delegate = self;
 	[service resolveWithTimeout:5.0];
 
-	if (!HWGScannerBoolForKey(HWG_SCANNER_NOTIFY_FOUNDLOST_KEY, YES)) return;
-	NSData *iconData = [[HWGrowlScannerMonitor scannerIcon] TIFFRepresentation];
+	if (!HWGScannerBoolForKey(HWG_SCANNER_NOTIFY_FOUND_KEY, YES)) return;
+	NSData *iconData = [[HWGrowlScannerMonitor scannerFoundIcon] TIFFRepresentation];
 	[delegate notifyWithName:@"ScannerFound"
 							 title:NSLocalizedString(@"Network Scanner Found", @"")
 					 description:service.name
@@ -312,8 +316,8 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	[self.resolvedHostPortByKey removeObjectForKey:key];
 	[self.lastKnownScanStateByKey removeObjectForKey:key];
 
-	if (!HWGScannerBoolForKey(HWG_SCANNER_NOTIFY_FOUNDLOST_KEY, YES)) return;
-	NSData *iconData = [[HWGrowlScannerMonitor scannerIcon] TIFFRepresentation];
+	if (!HWGScannerBoolForKey(HWG_SCANNER_NOTIFY_LOST_KEY, YES)) return;
+	NSData *iconData = [[HWGrowlScannerMonitor scannerLostIcon] TIFFRepresentation];
 	[delegate notifyWithName:@"ScannerLost"
 							 title:NSLocalizedString(@"Network Scanner Lost", @"")
 					 description:service.name
@@ -351,6 +355,29 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 +(NSImage *)scannerIcon {
 	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"USB-TypeScanner"];
 	return override ?: [NSImage imageNamed:@"USB-TypeScanner"];
+}
+
+// Dedicated per-event icons (17-ago-2026, feedback del usuario) — the module icon above reused
+// the same bare glyph for every event, which read as "all four rows are identical" in the Icons
+// tab. Each of these follows the badge convention already established elsewhere in this app
+// (green check/red X for Found/Lost, matching Printer Monitor's Connected/Disconnected; blue
+// document+scan-beam for Scan Started/Finished; amber "!" for ADF State, since jam/empty/cover-
+// open are attention-worthy but not necessarily critical).
++(NSImage *)scannerFoundIcon {
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"ScannerMonitor-Icon-Found"];
+	return override ?: [NSImage imageNamed:@"ScannerMonitor-Icon-Found"];
+}
++(NSImage *)scannerLostIcon {
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"ScannerMonitor-Icon-Lost"];
+	return override ?: [NSImage imageNamed:@"ScannerMonitor-Icon-Lost"];
+}
++(NSImage *)scannerScanStatusIcon {
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"ScannerMonitor-Icon-ScanStatus"];
+	return override ?: [NSImage imageNamed:@"ScannerMonitor-Icon-ScanStatus"];
+}
++(NSImage *)scannerAdfStateIcon {
+	NSImage *override = [[HWGIconOverrideStore sharedStore] overrideImageForDefaultName:@"ScannerMonitor-Icon-AdfState"];
+	return override ?: [NSImage imageNamed:@"ScannerMonitor-Icon-AdfState"];
 }
 
 #pragma mark HWGrowlPluginProtocol
@@ -428,15 +455,19 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	// --- Tab: Icons ---
 	CGFloat iconsPad = 16;
 	CGFloat iconsWidth = 560 - 2 * iconsPad;
+	// Each row now has its own dedicated icon instead of all four sharing the bare module glyph
+	// (17-ago-2026, feedback del usuario) — Found/Lost also split into two independent toggles,
+	// matching Printer Monitor's Connected/Needs Attention precedent (one key per icon row).
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"USB-TypeScanner"],
-		@[@"Scanner Found/Lost", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_FOUNDLOST_KEY],
+		@[@"Scanner Found", @"ScannerMonitor-Icon-Found", HWG_SCANNER_NOTIFY_FOUND_KEY],
+		@[@"Scanner Lost", @"ScannerMonitor-Icon-Lost", HWG_SCANNER_NOTIFY_LOST_KEY],
 		// Moved here from General (13-ago-2026, feedback del usuario) — per this app's
 		// convention, "Notify when X" toggles always live in Icons, never General (General is
 		// only for field-visibility toggles on an existing notice). Both OFF by default: neither
 		// has been verified against real hardware yet (see each feature's own doc comment above).
-		@[@"Scan Started/Finished (experimental)", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
-		@[@"Feeder State Changed (experimental)", @"USB-TypeScanner", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
+		@[@"Scan Started/Finished (experimental)", @"ScannerMonitor-Icon-ScanStatus", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
+		@[@"Feeder State Changed (experimental)", @"ScannerMonitor-Icon-AdfState", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
