@@ -94,6 +94,10 @@
 #define HWG_NET_NOTIFY_DNS_KEY           @"HWGNetworkNotifyDNSChanged"
 #define HWG_NET_NOTIFY_PRIMARY_IF_KEY    @"HWGNetworkNotifyPrimaryInterfaceChanged"
 #define HWG_NET_NOTIFY_PROXY_KEY         @"HWGNetworkNotifyProxyChanged"
+// Added 18-ago-2026 (feedback del usuario) — Wi-Fi radio power on/off, distinct from
+// "AirportConnected/Disconnected" (network association) — CWEventTypePowerDidChange already
+// existed and already routed here, but the destination method never checked this specifically.
+#define HWG_NET_NOTIFY_WIFI_RADIO_KEY    @"HWGNetworkNotifyWifiRadioPower"
 #define HWG_NET_NOTIFY_OTHER_ON_KEY      @"HWGNetworkNotifyOtherOn"
 #define HWG_NET_NOTIFY_OTHER_OFF_KEY     @"HWGNetworkNotifyOtherOff"
 #define HWG_NET_NOTIFY_GENERIC_ON_KEY    @"HWGNetworkNotifyGenericOn"
@@ -216,6 +220,8 @@ typedef enum {
 // F20: track the last reported WiFi signal bar level (0–4; -1 = not connected / unknown)
 // so we notify only when the LEVEL changes, plus a cooldown to avoid threshold flapping.
 @property (nonatomic, assign) NSInteger lastReportedWifiBars;
+// -1 = no baseline read yet this launch, 0/1 = last known radio power state (off/on).
+@property (nonatomic, assign) NSInteger lastReportedWifiRadioOn;
 @property (nonatomic, strong) NSDate *lastSignalNoteTime;
 @property (nonatomic, strong) NSTimer *signalPollTimer;
 
@@ -254,6 +260,7 @@ typedef enum {
 @synthesize lastReportedSSID;
 @synthesize lastReportedBSSID;
 @synthesize lastReportedWifiBars;
+@synthesize lastReportedWifiRadioOn;
 @synthesize lastSignalNoteTime;
 @synthesize signalPollTimer;
 @synthesize prefsView;
@@ -271,6 +278,7 @@ typedef enum {
 		self.lastKnownEthernetSpeed = [NSMutableDictionary dictionary];
 		self.ethernetClassificationCache = [NSMutableDictionary dictionary];
 		self.lastReportedWifiBars = -1;
+		self.lastReportedWifiRadioOn = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
 
 		[self startObserving];
@@ -369,7 +377,40 @@ typedef enum {
 }
 
 -(void)powerStateDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
+	// Added 18-ago-2026 (feedback del usuario: "cuando prendo y apago el WiFi no lo detecta") —
+	// this callback (CWEventTypePowerDidChange) already existed and already routed into
+	// -handleWiFiStateChangeForInterface: below, but that method only distinguishes "connected
+	// to a network" vs "not connected" — turning the Wi-Fi radio off entirely and merely losing
+	// network association both looked identical to it (both fire "AirportDisconnected"). Added
+	// a genuinely separate check here for the radio's own power state, independent of whether
+	// it's associated to a network.
+	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
+}
+
+-(void)checkWifiRadioPowerStateForInterface:(NSString *)interfaceName {
+	if (![NSThread isMainThread]) {
+		dispatch_async(dispatch_get_main_queue(), ^{ [self checkWifiRadioPowerStateForInterface:interfaceName]; });
+		return;
+	}
+	if (![self boolForKey:HWG_NET_NOTIFY_WIFI_RADIO_KEY default:NO]) return;
+
+	CWInterface *iface = [self.wifiClient interfaceWithName:interfaceName];
+	if (!iface) return;
+	BOOL poweredOn = [iface powerOn];
+	if (lastReportedWifiRadioOn == poweredOn) return;   // no real change, or first read this launch — baseline below
+	BOOL hadBaseline = (lastReportedWifiRadioOn != -1);
+	self.lastReportedWifiRadioOn = poweredOn;
+	if (!hadBaseline) return;   // first sighting — baseline only, no notification
+
+	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Network-Wifi-Radio-On" : @"Network-Wifi-Radio-Off") TIFFRepresentation];
+	[delegate notifyWithName:poweredOn ? @"WifiRadioOn" : @"WifiRadioOff"
+							 title:poweredOn ? NSLocalizedString(@"Wi-Fi Turned On", @"") : NSLocalizedString(@"Wi-Fi Turned Off", @"")
+					 description:@""
+							  icon:iconData
+			  identifierString:@"HWGrowlWifiRadioPower"
+				  contextString:nil
+							plugin:self];
 }
 
 -(void)bssidDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
@@ -1939,6 +1980,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Wi-Fi — Good", @"Network-Wifi-3", [HWG_NET_NOTIFY_WIFI_BAR_PREFIX stringByAppendingString:@"3"]],
 		@[@"Wi-Fi — Excellent", @"Network-Wifi-4", [HWG_NET_NOTIFY_WIFI_BAR_PREFIX stringByAppendingString:@"4"]],
 		@[@"Wi-Fi Off", @"Network-Wifi-Off", HWG_NET_NOTIFY_WIFI_OFF_KEY],
+		// Added 18-ago-2026 — the RADIO's own power state (macOS Wi-Fi toggle), distinct from
+		// "Wi-Fi Off" above (that fires when disconnected FROM A NETWORK, radio can stay on).
+		@[@"Wi-Fi Radio Turned On/Off", @"Network-Wifi-Radio-On", HWG_NET_NOTIFY_WIFI_RADIO_KEY, @NO],
 		@[@"Ethernet Connected", @"Network-Ethernet-On", HWG_NET_NOTIFY_ETH_ON_KEY],
 		@[@"Ethernet Disconnected", @"Network-Ethernet-Off", HWG_NET_NOTIFY_ETH_OFF_KEY],
 		@[@"Ethernet Speed Changed", @"Network-Ethernet-Speed", HWG_NET_NOTIFY_ETH_SPEED_KEY, @NO],
@@ -1982,7 +2026,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -1996,7 +2040,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"VPN Disconnected", @""), @"VPNDisconnected",
 			  NSLocalizedString(@"DNS Servers Changed", @""), @"DNSServersChanged",
 			  NSLocalizedString(@"Primary Interface Changed", @""), @"PrimaryInterfaceChanged",
-			  NSLocalizedString(@"Proxy Configuration Changed", @""), @"ProxyConfigChanged", nil];
+			  NSLocalizedString(@"Proxy Configuration Changed", @""), @"ProxyConfigChanged",
+			  NSLocalizedString(@"Wi-Fi Radio On", @""), @"WifiRadioOn",
+			  NSLocalizedString(@"Wi-Fi Radio Off", @""), @"WifiRadioOff", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -2010,7 +2056,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when a VPN tunnel interface disconnects (F34, heuristic detection)", @""), @"VPNDisconnected",
 			  NSLocalizedString(@"Sent when the system's DNS server list changes", @""), @"DNSServersChanged",
 			  NSLocalizedString(@"Sent when the primary network interface changes (e.g. Wi-Fi ↔ Ethernet)", @""), @"PrimaryInterfaceChanged",
-			  NSLocalizedString(@"Sent when HTTP/HTTPS/SOCKS/PAC proxy settings change", @""), @"ProxyConfigChanged", nil];
+			  NSLocalizedString(@"Sent when HTTP/HTTPS/SOCKS/PAC proxy settings change", @""), @"ProxyConfigChanged",
+			  NSLocalizedString(@"Sent when the Wi-Fi radio itself is turned on (regardless of whether it then connects to a network)", @""), @"WifiRadioOn",
+			  NSLocalizedString(@"Sent when the Wi-Fi radio itself is turned off", @""), @"WifiRadioOff", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

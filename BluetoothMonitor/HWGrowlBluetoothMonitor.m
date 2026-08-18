@@ -52,6 +52,16 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 #define HWG_BT_NOTIFY_KEY_PREFIX @"HWGBluetoothNotifyType_"
 #define HWG_BT_NOTIFY_DISCONNECT_KEY @"HWGBluetoothNotifyDisconnect"
 
+// Added 18-ago-2026 (feedback del usuario: "cuando prendo y apago el BT no lo detecta") — the
+// Bluetooth RADIO's own power state (System Settings/Control Center toggle), distinct from any
+// device connect/disconnect. IOBluetoothHostController.powerState is public API (declared in
+// IOBluetoothHostController.h, the same header this app already imports via <IOBluetooth/
+// IOBluetooth.h>) — but IOBluetooth ships no documented push notification for this specific
+// state change, so it's polled, same pattern already used elsewhere in this app for hardware
+// states with no native push event (e.g. NetworkMonitor's Ethernet speed).
+#define HWG_BT_NOTIFY_RADIO_KEY @"HWGBluetoothNotifyRadioPower"
+#define HWG_BT_RADIO_POLL_INTERVAL 5.0
+
 @interface HWGrowlBluetoothMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
@@ -61,6 +71,9 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // strong: we keep this object to call -unregister on it later, so the monitor
 // must own it.
 @property (nonatomic, strong) IOBluetoothUserNotification *connectionNotification;
+@property (nonatomic, strong) NSTimer *radioPowerPollTimer;
+// -1 = no baseline read yet this launch, 0/1 = last known adapter power state (off/on).
+@property (nonatomic, assign) NSInteger lastKnownRadioPowerState;
 
 @end
 
@@ -70,9 +83,12 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @synthesize starting;
 @synthesize connectionNotification;
 @synthesize prefsView;
+@synthesize radioPowerPollTimer;
+@synthesize lastKnownRadioPowerState;
 
 -(void)dealloc {
 	[connectionNotification unregister];
+	[radioPowerPollTimer invalidate];
 	// ARC handles the release; no [super dealloc].
 }
 
@@ -80,11 +96,51 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	// Legacy 10.7-10.7.2 incompatibility check removed: the app's deployment
 	// target is 13.0, so that range is unreachable.
 	self = [super init];
+	self.lastKnownRadioPowerState = -1;
 	return self;
+}
+
+// Added 18-ago-2026 — see HWG_BT_NOTIFY_RADIO_KEY's doc comment above. The timer always runs
+// (cheap — a single IOBluetoothHostController property read every 5s) and the toggle is
+// checked first thing inside -pollRadioPowerState, same "always-scheduled, checks its own flag"
+// pattern NetworkMonitor's Ethernet-speed poll already uses — this Icons-tab checkbox has no
+// direct hook into starting/stopping a timer the way a General-tab checkbox's own action would,
+// so gating inside the poll itself is simpler and matches an existing precedent in this app.
+-(void)updateRadioPowerPollState {
+	if (radioPowerPollTimer) return;
+	self.radioPowerPollTimer = [NSTimer scheduledTimerWithTimeInterval:HWG_BT_RADIO_POLL_INTERVAL
+																 target:self
+															   selector:@selector(pollRadioPowerState)
+															   userInfo:nil
+																repeats:YES];
+}
+
+-(void)pollRadioPowerState {
+	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_RADIO_KEY, NO)) {
+		self.lastKnownRadioPowerState = -1;   // re-arm baseline for whenever it's turned back on
+		return;
+	}
+	IOBluetoothHostController *controller = [IOBluetoothHostController defaultController];
+	if (!controller) return;   // no Bluetooth hardware present
+	BOOL poweredOn = ([controller powerState] == kBluetoothHCIPowerStateON);
+	if (lastKnownRadioPowerState == poweredOn) return;
+	BOOL hadBaseline = (lastKnownRadioPowerState != -1);
+	self.lastKnownRadioPowerState = poweredOn;
+	if (!hadBaseline) return;   // first sighting — baseline only, no notification
+
+	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Bluetooth-On" : @"Bluetooth-Off") TIFFRepresentation];
+	[delegate notifyWithName:poweredOn ? @"BluetoothRadioOn" : @"BluetoothRadioOff"
+							 title:poweredOn ? NSLocalizedString(@"Bluetooth Turned On", @"") : NSLocalizedString(@"Bluetooth Turned Off", @"")
+					 description:@""
+							  icon:iconData
+			  identifierString:@"HWGrowlBluetoothRadioPower"
+				  contextString:nil
+							plugin:self];
 }
 
 -(void)postRegistrationInit {
 	self.starting = YES;
+	[self updateRadioPowerPollState];
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
 	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
@@ -567,6 +623,9 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		@[@"Headphones", @"BT-TypeHeadphones", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Headphones"]],
 		@[@"Connected (generic)", @"Bluetooth-On", [HWG_BT_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
 		@[@"Disconnected (generic)", @"Bluetooth-Off", HWG_BT_NOTIFY_DISCONNECT_KEY],
+		// Added 18-ago-2026 — the adapter's own power state (System Settings/Control Center
+		// toggle), distinct from any device connect/disconnect above.
+		@[@"Bluetooth Radio Turned On/Off", @"Bluetooth-On", HWG_BT_NOTIFY_RADIO_KEY, @NO],
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.
@@ -627,15 +686,19 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];
+	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Bluetooth Connected", @""), @"BluetoothConnected",
-			  NSLocalizedString(@"Bluetooth Disconnected", @""), @"BluetoothDisconnected", nil];
+			  NSLocalizedString(@"Bluetooth Disconnected", @""), @"BluetoothDisconnected",
+			  NSLocalizedString(@"Bluetooth Radio On", @""), @"BluetoothRadioOn",
+			  NSLocalizedString(@"Bluetooth Radio Off", @""), @"BluetoothRadioOff", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a Bluetooth Device is connected", @""), @"BluetoothConnected",
-			  NSLocalizedString(@"Sent when a Bluetooth Device is disconnected", @""), @"BluetoothDisconnected", nil];
+			  NSLocalizedString(@"Sent when a Bluetooth Device is disconnected", @""), @"BluetoothDisconnected",
+			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned on (System Settings/Control Center toggle)", @""), @"BluetoothRadioOn",
+			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned off", @""), @"BluetoothRadioOff", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];

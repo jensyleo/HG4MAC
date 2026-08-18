@@ -6,6 +6,19 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Added: Bluetooth and Wi-Fi radio power on/off detection
+Both radios' on/off toggle (System Settings/Control Center) went undetected before — this
+monitor only ever reported device connect/disconnect (Bluetooth) or network association
+(Wi-Fi's existing "AirPort Connected/Disconnected"), neither of which fires when the radio
+itself is switched off while nothing was connected, or switched on with nothing yet associated.
+Both new events, OFF by default, in the Icons tab with dedicated icons:
+- **Bluetooth**: `IOBluetoothHostController.powerState` (public API), polled every 5s — no
+  documented push notification exists for this specific state.
+- **Wi-Fi**: reuses the existing `CWEventTypePowerDidChange` CoreWLAN callback (was already
+  wired up but never checked for this independently of network association) — new dedicated
+  "Wi-Fi Radio Turned On/Off" icon (green/gray power-button badge) to visually distinguish it
+  from the existing "Wi-Fi Off" (disconnected-from-network) icon.
+
 ### Fixed: slow app launch
 `HWGrowlPluginController.-postRegistrationInit` ran all 13 plugins synchronously, back-to-back,
 on the main thread during `-init` — unlike `-fireOnLaunchNotes`, which already got a stagger
