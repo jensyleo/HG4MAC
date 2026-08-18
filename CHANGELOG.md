@@ -6,6 +6,15 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: "IP Addresses Updated" could land before "AirPort Disconnected"
+When losing an IP address (as opposed to gaining one), this races against the WiFi radio-off/
+disconnect sequence: `SCDynamicStore` detects the address is gone almost immediately once the
+link drops, while the CoreWLAN-driven pair now has its own 0.4s delay (see the entry below).
+That let "IP Addresses Updated" win the race and land before "AirPort Disconnected" — backwards
+from radio → network → address, the order that actually reflects cause and effect. Delayed only
+the release case (a fresh address assignment has no such ordering concern) by 0.8s, landing it
+reliably last.
+
 ### Fixed: Bluetooth radio still felt slow; Wi-Fi notification order was backwards
 Bluetooth's poll was resetting its baseline to "unknown" on every tick while both toggles were
 off, so enabling a toggle in Preferences didn't take effect until the NEXT tick just to

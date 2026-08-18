@@ -1684,13 +1684,33 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	if (![self boolForKey:genericRowKey default:YES]) return;
 
 	NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
-	[delegate notifyWithName:@"IPAddressChange"
-							 title:NSLocalizedString(@"IP Addresses Updated", @"")
-					 description:description
-							  icon:iconData
-			  identifierString:@"HWGrowlIPAddressChange"
-				  contextString:nil
-							plugin:self];
+	NSString *description2 = description;
+	NSData *iconData2 = iconData;
+	__weak HWGrowlNetworkMonitor *blockSelf = self;
+	void (^fireIPNote)(void) = ^{
+		[blockSelf.delegate notifyWithName:@"IPAddressChange"
+									  title:NSLocalizedString(@"IP Addresses Updated", @"")
+								description:description2
+									   icon:iconData2
+						   identifierString:@"HWGrowlIPAddressChange"
+							  contextString:nil
+									 plugin:blockSelf];
+	};
+	if (!hasAddressesNow) {
+		// BUG FIX (18-ago-2026, feedback del usuario) — when the address is being RELEASED
+		// (as opposed to newly assigned), this races against the WiFi radio-off/AirPort
+		// Disconnected sequence above: SCDynamicStore detects the address is gone almost
+		// immediately once the link drops, while the CoreWLAN-driven pair now has its own
+		// 0.4s delay (see -handleWiFiStateChangeForInterface: doc comment) — meaning "IP
+		// Addresses Updated" could win the race and land BEFORE "AirPort Disconnected", which
+		// reads backwards (you lose the network, THEN lose the address on it, not the other
+		// way around). Delaying only the release case (a fresh address assignment has no such
+		// ordering expectation to protect) keeps it reliably last in the sequence: radio →
+		// network → address.
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), fireIPNote);
+	} else {
+		fireIPNote();
+	}
 }
 
 - (void) interateInterfaces
