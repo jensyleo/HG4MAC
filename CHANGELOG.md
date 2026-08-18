@@ -16,6 +16,13 @@ app's own UI, in a cascading chain. Applied the same `dispatch_after` stagger pa
 proven for `-fireOnLaunchNotes` (0.15s per module, main queue — not background, since IOKit
 notification ports need to attach to the calling thread's run loop).
 
+### Fixed: Scanner Monitor's eSCL poll could pile up overlapping requests
+`NSURLSession`'s default request timeout (60s) is longer than this poll's own interval (5-60s,
+10s default) — a scanner that's asleep/unreachable could accumulate overlapping HTTP requests
+faster than they time out. Added an explicit 5s request timeout plus a per-device in-flight
+guard, so a new poll tick skips a device still waiting on its previous request instead of
+piling another one on top.
+
 ### Fixed: new checkboxes across 9 monitors were unclickable (fixed-height layout overflow)
 Same bug class already hit once in Scanner Monitor's Icons tab, this time in General tabs
 across Network, Printer, Bluetooth, USB, Audio, Camera, Display, Gamepad, and Thermal Monitor:

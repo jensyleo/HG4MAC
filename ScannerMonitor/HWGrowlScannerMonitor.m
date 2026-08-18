@@ -146,6 +146,10 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, strong) NSTimer *scanStatusPollTimer;
 // Same baseline-then-diff pattern as lastKnownScanStateByKey above, for <pwg:AdfState>.
 @property (nonatomic, strong) NSMutableDictionary<NSString*, NSString*> *lastKnownAdfStateByKey;
+// Added 18-ago-2026 (performance fix) — devices with a ScannerStatus request currently in
+// flight, so a new poll tick skips them instead of piling another request on top of one that
+// hasn't timed out yet.
+@property (nonatomic, strong) NSMutableSet<NSString*> *scanStatusRequestsInFlight;
 
 @end
 
@@ -160,6 +164,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		self.resolvedHostPortByKey = [NSMutableDictionary dictionary];
 		self.lastKnownScanStateByKey = [NSMutableDictionary dictionary];
 		self.lastKnownAdfStateByKey = [NSMutableDictionary dictionary];
+		self.scanStatusRequestsInFlight = [NSMutableSet set];
 		[self updateBrowsingState];
 	}
 	return self;
@@ -212,6 +217,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	[self.scanStatusPollTimer invalidate];
 	self.scanStatusPollTimer = nil;
 	[self.lastKnownScanStateByKey removeAllObjects];
+	[self.scanStatusRequestsInFlight removeAllObjects];
 }
 
 -(void)pollAllScanStatuses {
@@ -223,12 +229,31 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	}
 }
 
+// PERFORMANCE FIX (18-ago-2026, feedback del usuario tras la auditoría de rendimiento) —
+// `NSURLSession sharedSession`'s default request timeout is 60s, far longer than this poll's
+// own interval (5-60s, default 10s per HWG_SCANNER_SCANSTATUS_POLL_DEFAULT). Without an
+// explicit shorter timeout AND a guard against a still-in-flight request, a scanner that's
+// asleep/unreachable could accumulate overlapping HTTP requests faster than they time out —
+// each new poll tick firing another one before the last one gives up. Fixed with (1) an
+// explicit 5s timeout, well under the shortest possible poll interval, and (2) a per-device
+// in-flight set so a new tick skips a device that's still waiting on its previous request
+// instead of piling another one on top.
 -(void)pollScanStatusForKey:(NSString *)key hostPort:(NSString *)hostPort deviceName:(NSString *)deviceName {
+	if ([self.scanStatusRequestsInFlight containsObject:key]) return;   // previous poll for this device hasn't completed/timed out yet
+
 	NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@/eSCL/ScannerStatus", hostPort]];
 	if (!url) return;
+
+	NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+	request.timeoutInterval = 5.0;
+
+	[self.scanStatusRequestsInFlight addObject:key];
 	__weak typeof(self) weakSelf = self;
-	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-		if (!data || error) return;   // device offline/unreachable this tick — silently skip, try again next poll
+	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[weakSelf.scanStatusRequestsInFlight removeObject:key];
+		});
+		if (!data || error) return;   // device offline/unreachable/timed out this tick — silently skip, try again next poll
 		HWGESCLStatusParser *parser = [HWGESCLStatusParser new];
 		NSXMLParser *xmlParser = [[NSXMLParser alloc] initWithData:data];
 		xmlParser.delegate = parser;
