@@ -32,9 +32,12 @@
 // hand-picking each monitor in the Modules tab every time).
 #define HWG_PERFORMANCE_MODE_KEY @"HWGPerformanceMode"
 typedef NS_ENUM(NSInteger, HWGPerformanceMode) {
-	HWGPerformanceModeMinimal = 0,
-	HWGPerformanceModeAll     = 1,
-	HWGPerformanceModeCustom  = 2,
+	HWGPerformanceModeMinimal     = 0,
+	HWGPerformanceModeAll         = 1,
+	HWGPerformanceModeCustom      = 2,
+	// Added later (18-ago-2026) — kept as a new tag rather than renumbering the others so
+	// anyone's already-saved HWGPerformanceMode default keeps meaning what it always meant.
+	HWGPerformanceModeRecommended = 3,
 };
 // Default is "All" (not "Minimal") so this new control never silently disables monitors an
 // existing user already had running before this feature existed.
@@ -63,6 +66,25 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 			[prefix stringByAppendingString:@"PowerMonitor"],
 			[prefix stringByAppendingString:@"NetworkMonitor"],
 		]];
+	});
+	return ids;
+}
+
+// "Recommended": Minimal's set plus the monitors most people actually want day-to-day —
+// Display (external monitor connect/disconnect) and Audio (device switching) — while still
+// skipping the heavier-polling or more niche ones (Printer's CUPS polling, Scanner's network
+// ESCL polling, Gamepad, Thermal). Camera is left out too: its notifications matter mostly to
+// people who care about being recorded, not "most common" usage. The idea is performance-first
+// coverage of what's common, not everything that's common.
+static NSSet<NSString*> *HWGRecommendedPluginBundleIdentifiers(void) {
+	static NSSet<NSString*> *ids = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		NSMutableSet<NSString*> *set = [HWGMinimalPluginBundleIdentifiers() mutableCopy];
+		NSString *prefix = @"com.jensyleo.hg4mac.";
+		[set addObject:[prefix stringByAppendingString:@"DisplayMonitor"]];
+		[set addObject:[prefix stringByAppendingString:@"AudioMonitor"]];
+		ids = set;
 	});
 	return ids;
 }
@@ -922,6 +944,9 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 	NSButton *minimalRadio = [self performanceRadioWithTitle:NSLocalizedString(@"Minimal elements", @"")
 													  tooltip:NSLocalizedString(@"Only the original monitors: Volume, USB, Thunderbolt, Bluetooth, Power, Network. Lightest on resources.", @"")
 														  tag:HWGPerformanceModeMinimal];
+	NSButton *recommendedRadio = [self performanceRadioWithTitle:NSLocalizedString(@"Recommended", @"")
+														  tooltip:NSLocalizedString(@"Minimal's monitors plus Display and Audio — the ones most people actually want — without the heavier-polling or niche monitors (Printer, Scanner, Gamepad, Thermal, Camera).", @"")
+															  tag:HWGPerformanceModeRecommended];
 	NSButton *allRadio = [self performanceRadioWithTitle:NSLocalizedString(@"All elements", @"")
 												  tooltip:NSLocalizedString(@"Every monitor, including Audio/Camera/Gamepad/Printer/Thermal/Display. Default.", @"")
 													  tag:HWGPerformanceModeAll];
@@ -929,11 +954,13 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 													 tooltip:NSLocalizedString(@"Choose exactly which monitors run below.", @"")
 														 tag:HWGPerformanceModeCustom];
 
-	minimalRadio.state = (storedMode == HWGPerformanceModeMinimal) ? NSControlStateValueOn : NSControlStateValueOff;
-	allRadio.state     = (storedMode == HWGPerformanceModeAll)     ? NSControlStateValueOn : NSControlStateValueOff;
-	customRadio.state  = (storedMode == HWGPerformanceModeCustom)  ? NSControlStateValueOn : NSControlStateValueOff;
+	minimalRadio.state     = (storedMode == HWGPerformanceModeMinimal)     ? NSControlStateValueOn : NSControlStateValueOff;
+	recommendedRadio.state = (storedMode == HWGPerformanceModeRecommended) ? NSControlStateValueOn : NSControlStateValueOff;
+	allRadio.state         = (storedMode == HWGPerformanceModeAll)         ? NSControlStateValueOn : NSControlStateValueOff;
+	customRadio.state      = (storedMode == HWGPerformanceModeCustom)      ? NSControlStateValueOn : NSControlStateValueOff;
 
 	[modulesView addSubview:minimalRadio];
+	[modulesView addSubview:recommendedRadio];
 	[modulesView addSubview:allRadio];
 	[modulesView addSubview:customRadio];
 
@@ -946,8 +973,11 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 		[minimalRadio.topAnchor     constraintEqualToAnchor:header.bottomAnchor constant:8],
 		[minimalRadio.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
 
+		[recommendedRadio.topAnchor     constraintEqualToAnchor:minimalRadio.topAnchor],
+		[recommendedRadio.leadingAnchor constraintEqualToAnchor:minimalRadio.trailingAnchor constant:16],
+
 		[allRadio.topAnchor      constraintEqualToAnchor:minimalRadio.topAnchor],
-		[allRadio.leadingAnchor  constraintEqualToAnchor:minimalRadio.trailingAnchor constant:16],
+		[allRadio.leadingAnchor  constraintEqualToAnchor:recommendedRadio.trailingAnchor constant:16],
 
 		[customRadio.topAnchor     constraintEqualToAnchor:minimalRadio.topAnchor],
 		[customRadio.leadingAnchor constraintEqualToAnchor:allRadio.trailingAnchor constant:16],
@@ -968,6 +998,7 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 	]];
 
 	performanceMinimalRadio = minimalRadio;
+	performanceRecommendedRadio = recommendedRadio;
 	performanceAllRadio = allRadio;
 	performanceCustomRadio = customRadio;
 }
@@ -980,6 +1011,7 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 - (void)markPerformanceModeAsCustom {
 	[[NSUserDefaults standardUserDefaults] setInteger:HWGPerformanceModeCustom forKey:HWG_PERFORMANCE_MODE_KEY];
 	performanceMinimalRadio.state = NSControlStateValueOff;
+	performanceRecommendedRadio.state = NSControlStateValueOff;
 	performanceAllRadio.state = NSControlStateValueOff;
 	performanceCustomRadio.state = NSControlStateValueOn;
 }
@@ -1421,8 +1453,13 @@ static NSSet<NSString*> *HWGMinimalPluginBundleIdentifiers(void) {
 
 - (void)applyPerformancePresetMode:(HWGPerformanceMode)mode {
 	NSSet<NSString*> *minimalSet = HWGMinimalPluginBundleIdentifiers();
+	NSSet<NSString*> *recommendedSet = HWGRecommendedPluginBundleIdentifiers();
 	[self applyDisabledStateWithResolver:^BOOL(NSString *bundleID) {
-		return (mode == HWGPerformanceModeMinimal) ? ![minimalSet containsObject:bundleID] : NO;
+		switch (mode) {
+			case HWGPerformanceModeMinimal:     return ![minimalSet containsObject:bundleID];
+			case HWGPerformanceModeRecommended: return ![recommendedSet containsObject:bundleID];
+			default:                             return NO;
+		}
 	}];
 }
 

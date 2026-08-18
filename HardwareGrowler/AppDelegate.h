@@ -33,6 +33,7 @@ typedef enum : NSInteger {
 	// "Custom" when the user manually changes a monitor's enabled state or any setting
 	// INSIDE a monitor's own preferences pane.
 	__weak NSButton *performanceMinimalRadio;
+	__weak NSButton *performanceRecommendedRadio;
 	__weak NSButton *performanceAllRadio;
 	__weak NSButton *performanceCustomRadio;
 

@@ -6,6 +6,14 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Added: "Recommended" Performance preset
+The Modules tab's Performance selector only offered Minimal / All / Custom. Added a fourth
+option, "Recommended" — Minimal's set (Volume, USB, Thunderbolt, Bluetooth, Power, Network)
+plus Display and Audio, the two monitors most people actually want day-to-day, while still
+skipping the heavier-polling or more niche ones (Printer's CUPS polling, Scanner's network
+ESCL polling, Gamepad, Thermal, Camera). Performance-first coverage of what's common, not
+everything that's common.
+
 ### Performance: reduced Printer Monitor's main-thread polling cost
 `checkPrinters` calls `cupsGetDests()` (a CUPS/network round-trip) on the main thread on every
 poll tick, and that tick was firing every 3s whenever any printer notification was enabled —
