@@ -18,6 +18,10 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 - Fixed by shortening the two labels to "Scan Started/Finished" and "Feeder State Changed" (the
   "experimental" caveat still appears in full in each event's `-noteDescriptions` entry, used by
   the History panel). Confirmed live: all 4 checkboxes toggle and persist correctly now.
+- Added a visible caption below the Icons picker itself, explaining which two rows are
+  experimental and why — the label shortening above made that caveat disappear from the row
+  title, so it's now surfaced as plain body text instead (doesn't affect the shared column
+  width, so it can't reintroduce the click bug above).
 
 ### Fixed: Printer Monitor — last "Notify" toggle moved from General to Icons
 - "Notify when a printer is added/removed" was the one remaining checkbox still living in the

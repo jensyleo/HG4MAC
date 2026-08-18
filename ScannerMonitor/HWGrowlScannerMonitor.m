@@ -487,11 +487,27 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
 	CGFloat iconsGap = 12;
 
-	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + 2 * iconsPad)];
+	// Visible caveat for "Scan Started/Finished" and "Feeder State Changed" (17-ago-2026,
+	// feedback del usuario) — their row labels themselves must stay short (see the BUG FIX
+	// comment above: a longer "(experimental)" suffix broke every checkbox in this tab by
+	// blowing the shared column width), so the "not yet verified against real hardware" caveat
+	// is surfaced here instead, as a plain caption below the picker — same information, safe
+	// from that layout bug since this caption doesn't affect nameColumnWidth at all.
+	NSTextField *experimentalNote = [NSTextField wrappingLabelWithString:
+		NSLocalizedString(@"\"Scan Started/Finished\" and \"Feeder State Changed\" are experimental: implemented and enabled by these checkboxes, but not yet confirmed against a real network scanner. \"Feeder State Changed\" may also simply never fire on some devices — that field is optional in the eSCL spec many scanners don't implement it.", @"")];
+	experimentalNote.textColor = [NSColor secondaryLabelColor];
+	experimentalNote.font = [NSFont systemFontOfSize:11];
+	experimentalNote.translatesAutoresizingMaskIntoConstraints = YES;
+	experimentalNote.frame = NSMakeRect(0, 0, iconsWidth, 0);
+	CGFloat experimentalNoteH = ceil([experimentalNote.cell cellSizeForBounds:NSMakeRect(0, 0, iconsWidth, CGFLOAT_MAX)].height);
+
+	NSView *iconsContent = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, 560, iconsHeaderH + iconsGap + iconPickerH + iconsGap + experimentalNoteH + 2 * iconsPad)];
 	iconsHeader.frame = NSMakeRect(iconsPad, iconsPad, iconsWidth, iconsHeaderH);
 	[iconsContent addSubview:iconsHeader];
 	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
 	[iconsContent addSubview:iconPicker];
+	experimentalNote.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap + iconPickerH + iconsGap, iconsWidth, experimentalNoteH);
+	[iconsContent addSubview:experimentalNote];
 
 	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 120)];
 	iconsScroll.hasVerticalScroller = YES;
