@@ -887,10 +887,13 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 264)];
+	// BUG FIX (17-ago-2026): was 264 — same fixed-constant risk class confirmed live in Network
+	// Monitor's Wi-Fi tab (a checkbox added without growing this renders but doesn't respond to
+	// clicks). Bumped with margin after adding 2 rows (Device UID/Mute state).
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 264)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

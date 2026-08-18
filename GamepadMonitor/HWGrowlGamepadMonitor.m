@@ -226,10 +226,13 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 160)];
+	// BUG FIX (17-ago-2026): was 160 — same fixed-constant risk class confirmed live in Network
+	// Monitor's Wi-Fi tab. Bumped with margin after adding 4 rows (Battery state/Touchpad/
+	// Haptics/Motion sensors).
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 300)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 160)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 300)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

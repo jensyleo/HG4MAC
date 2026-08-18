@@ -1476,7 +1476,7 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 		NSString *desc = [active count]
 			? [NSString stringWithFormat:NSLocalizedString(@"Active: %@", @""), [active componentsJoinedByString:@", "]]
 			: NSLocalizedString(@"No proxy configured", @"");
-		NSData *iconData = [HWGResolveIconNamed(@"Network-Generic-On") TIFFRepresentation];
+		NSData *iconData = [HWGResolveIconNamed(@"Network-Proxy-On") TIFFRepresentation];
 		[delegate notifyWithName:@"ProxyConfigChanged"
 								 title:NSLocalizedString(@"Proxy Configuration Changed", @"")
 						 description:desc
@@ -1721,7 +1721,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// --- Tab: Wi-Fi (also hosts the pre-existing signal-poll-interval slider) ---
-	NSView *wifiTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 420)];
+	// BUG FIX (17-ago-2026): was 420 — fixed at the old row count (5 fields). Adding 3 more
+	// checkboxes (Link rate/Channel/Noise+SNR) below without growing this pushed them past the
+	// document view's own bounds — confirmed live: rows near/past the cutoff render but don't
+	// respond to clicks (NSClipView only hit-tests within the document's own frame height,
+	// regardless of what Auto Layout draws beyond it). Bumped to fit all 8 rows + the existing
+	// slider/cooldown controls above them, with margin.
+	NSView *wifiTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 560)];
 	NSTimeInterval cur = [self signalPollInterval];
 
 	NSTextField *title = [NSTextField labelWithString:NSLocalizedString(@"Wi-Fi signal check interval", @"")];
@@ -1817,7 +1823,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 
 	NSTabViewItem *wifiItem = [[NSTabViewItem alloc] initWithIdentifier:@"wifi"];
 	wifiItem.label = NSLocalizedString(@"Wi-Fi", @"");
-	wifiItem.view = [self scrollWrapping:wifiTab height:420];
+	wifiItem.view = [self scrollWrapping:wifiTab height:560];
 	[tabs addTabViewItem:wifiItem];
 
 	// --- Tab: Ethernet ---
@@ -1944,7 +1950,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"VPN Disconnected", @"Network-VPN-Off", HWG_VPN_NOTIFY_KEY],
 		@[@"DNS Servers Changed", @"Network-DNS-On", HWG_NET_NOTIFY_DNS_KEY, @NO],
 		@[@"Primary Interface Changed", @"Network-PrimaryInterface-On", HWG_NET_NOTIFY_PRIMARY_IF_KEY, @NO],
-		@[@"Proxy Configuration Changed", @"Network-Generic-On", HWG_NET_NOTIFY_PROXY_KEY, @NO],
+		@[@"Proxy Configuration Changed", @"Network-Proxy-On", HWG_NET_NOTIFY_PROXY_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

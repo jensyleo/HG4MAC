@@ -438,10 +438,13 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	// Bumped 17-ago-2026 with margin (340→380) after adding the "Job state reasons" row —
+	// same fixed-height risk class confirmed live in Network Monitor's Wi-Fi tab; this one's
+	// margin was likely still sufficient but bumped defensively rather than trust the estimate.
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 380)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 380)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

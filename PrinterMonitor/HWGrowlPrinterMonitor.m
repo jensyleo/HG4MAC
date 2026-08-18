@@ -960,7 +960,11 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 
 	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
 	generalItem.label = NSLocalizedString(@"General", @"");
-	generalItem.view = [self scrollWrapping:v height:420];
+	// BUG FIX (17-ago-2026): was 420, a hand-guessed constant not tied to the actual row count —
+	// same risk class already confirmed live in Network Monitor's Wi-Fi tab (adding a row here
+	// without growing this pushes it past the document view's own bounds, where it renders but
+	// doesn't respond to clicks). Bumped with margin after adding the "Sharing status" row.
+	generalItem.view = [self scrollWrapping:v height:460];
 	[tabs addTabViewItem:generalItem];
 
 	// --- Tab: Icons ---

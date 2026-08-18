@@ -6,6 +6,20 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 
 ## v1.17.0 — 2026-08-17
 
+### Fixed: new checkboxes across 9 monitors were unclickable (fixed-height layout overflow)
+Same bug class already hit once in Scanner Monitor's Icons tab, this time in General tabs
+across Network, Printer, Bluetooth, USB, Audio, Camera, Display, Gamepad, and Thermal Monitor:
+each uses a hardcoded content-view height rather than computing it from the actual row count.
+Adding new checkboxes (this release) without growing that constant pushed the new rows past
+the view's own bounds — AppKit doesn't hit-test subviews outside their parent's bounds, so the
+checkbox renders but never responds to a click. Bumped every affected height with margin.
+Volume Monitor and Power Monitor were unaffected — both already compute their height
+dynamically from the row count.
+
+### Added: dedicated Proxy Configuration Changed icon
+Replaced the reused Network-Generic-On placeholder with its own icon (dark slate badge +
+"PROXY" text, same visual convention as the existing DNS/Primary Interface badges).
+
 ### Added: second full 13-module gap audit — "everything the system can offer"
 A deeper follow-up to v1.16.0's audit: 13 parallel research passes (one per monitor) looking
 for ANY remaining public-API data point or event not yet surfaced, this time explicitly

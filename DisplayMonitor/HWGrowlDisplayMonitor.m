@@ -626,10 +626,13 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 485)];
+	// BUG FIX (17-ago-2026): was 485 — same fixed-constant risk class confirmed live in Network
+	// Monitor's Wi-Fi tab. Bumped with generous margin after adding 5 rows (UUID/Physical
+	// size+PPI/Color space/Built-in/Mirror source).
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 660)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 485)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 660)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

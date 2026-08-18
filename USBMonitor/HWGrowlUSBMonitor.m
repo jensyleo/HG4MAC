@@ -625,7 +625,9 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// --- Tab: General (pre-existing "Notification fields" content) ---
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 200)];
+	// BUG FIX (17-ago-2026): was 200 — same fixed-constant risk class confirmed live in Network
+	// Monitor's Wi-Fi tab. Bumped with margin after adding 3 rows (Serial/Firmware/Location ID).
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 310)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

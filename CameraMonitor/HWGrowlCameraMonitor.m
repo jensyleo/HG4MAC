@@ -479,10 +479,12 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 190)];
+	// BUG FIX (17-ago-2026): was 190 — same fixed-constant risk class confirmed live in Network
+	// Monitor's Wi-Fi tab. Bumped with margin after adding 1 row (Position).
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 230)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 190)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 230)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];

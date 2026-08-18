@@ -502,7 +502,12 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// --- Tab: General (pre-existing "Notification fields" content) ---
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 190)];
+	// BUG FIX (17-ago-2026): was 190 — a fixed constant not tied to row count. Same risk class
+	// confirmed live in Network Monitor's Wi-Fi tab (a row added without growing this renders
+	// but doesn't respond to clicks, since this view's declared frame height is what actually
+	// determines its on-screen size — it's never auto-resized to fit content later). Bumped
+	// with margin after adding the "Advertised services (SDP)" row.
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 230)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
