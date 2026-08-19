@@ -49,6 +49,14 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Network Monitor — batch 1/N of 32 audit candidates (cross-platform)
+General Internet reachability (`SCNetworkReachability`), DHCP lease renewed/rebound (new
+per-interface `SCDynamicStore` key pattern), computer name changed, and Network Location
+changed. All off by default, added as Icons-tab notify toggles reusing the module icon. This is
+the first of several planned batches for this module's remaining ~28 candidates — see `TODO.md`
+for the full remaining list and scope notes (incl. a possible real API limit on VPN protocol
+detail via `NEVPNManager`, to investigate before that batch).
+
 ### Added: Audio Monitor — 8 remaining audit candidates (cross-platform, no Intel-only content)
 Jack connect/disconnect, active data source change (built-in speakers vs. headphones vs. line
 out), device-stopped-responding, microphone mode (class-level KVO, same technique as Camera

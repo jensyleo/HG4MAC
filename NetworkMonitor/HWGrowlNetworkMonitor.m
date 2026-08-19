@@ -81,6 +81,15 @@
 // interface-name prefix macOS gives virtual tunnel interfaces.
 #define HWG_VPN_NOTIFY_KEY @"HWGNetworkNotifyVPN"
 
+// Final API audit (18-ago-2026), batch 1 of the 32-candidate NetworkMonitor pass — 4 items:
+// general Internet reachability, DHCP lease renewal, hostname/computer-name change, and
+// Network Location change. All OFF by default (new notification categories, not visibility
+// toggles on an existing one — same convention as HWG_VPN_NOTIFY_KEY above).
+#define HWG_NET_NOTIFY_REACHABILITY_KEY @"HWGNetworkNotifyReachability"
+#define HWG_NET_NOTIFY_DHCP_RENEWED_KEY @"HWGNetworkNotifyDHCPRenewed"
+#define HWG_NET_NOTIFY_HOSTNAME_KEY      @"HWGNetworkNotifyHostnameChanged"
+#define HWG_NET_NOTIFY_LOCATION_KEY      @"HWGNetworkNotifyLocationChanged"
+
 // Per-row "Notify?" checkboxes (Icons tab) — one per icon row, matching the USB/Thunderbolt/
 // Bluetooth/Volume Monitor pattern. Several rows share one underlying notifyWithName call
 // (5 Wi-Fi signal-level rows share AirportSignalChange; Ethernet/Other Interface share
@@ -240,6 +249,14 @@ typedef enum {
 // believed active, so we notify only on the connect/disconnect TRANSITION.
 @property (nonatomic, strong) NSMutableSet<NSString*> *activeVPNInterfaceNames;
 
+// Final API audit (18-ago-2026), batch 1.
+@property (nonatomic, assign) SCNetworkReachabilityRef reachabilityRef;
+@property (nonatomic, assign) SCNetworkReachabilityFlags lastReachabilityFlags;
+@property (nonatomic, assign) BOOL haveLastReachabilityFlags;
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSDate*> *lastKnownDHCPLeaseStartByInterface;
+@property (nonatomic, strong) NSString *lastKnownComputerName;
+@property (nonatomic, strong) NSString *lastKnownLocationName;
+
 @end
 
 @implementation HWGrowlNetworkMonitor
@@ -258,6 +275,12 @@ typedef enum {
 @synthesize interfaceIsEthernet;
 @synthesize lastKnownEthernetSpeed;
 @synthesize ethernetSpeedPollTimer;
+@synthesize reachabilityRef;
+@synthesize lastReachabilityFlags;
+@synthesize haveLastReachabilityFlags;
+@synthesize lastKnownDHCPLeaseStartByInterface;
+@synthesize lastKnownComputerName;
+@synthesize lastKnownLocationName;
 @synthesize ethernetClassificationCache;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
@@ -283,11 +306,14 @@ typedef enum {
 		self.lastReportedWifiBars = -1;
 		self.lastReportedWifiRadioOn = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
+		self.lastKnownDHCPLeaseStartByInterface = [NSMutableDictionary dictionary];
 
 		[self startObserving];
 		[self startWiFiMonitoring];
 		[self requestLocationForSSID];
 		[self startEthernetSpeedPolling];
+		[self startReachabilityMonitoring];
+		[self primeHostnameAndLocationState];
 	}
 	return self;
 }
@@ -332,6 +358,11 @@ typedef enum {
 	}
 
 	locationManager.delegate = nil;
+
+	if (reachabilityRef) {
+		SCNetworkReachabilityUnscheduleFromRunLoop(reachabilityRef, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+		CFRelease(reachabilityRef);
+	}
 }
 
 #pragma mark CoreWLAN — WiFi event monitoring (replaces deprecated SCDynamicStore AirPort keys)
@@ -769,8 +800,13 @@ typedef enum {
     // pattern (not a literal key, since we don't know interface names up front) — this is
     // the raw physical-link/carrier state, independent of DHCP/IP (see property comment
     // above for why NWPathMonitor was reverted).
-    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", @"State:/Network/Global/DNS", nil];
-    NSArray *watchedPatterns = [NSArray arrayWithObject:@"State:/Network/Interface/[^/]+/Link"];
+    // Final API audit (18-ago-2026), batch 1 — "Setup:/System" (ComputerName, changed in
+    // Sharing preferences) and "Setup:" itself (root Setup dict, whose CurrentSet property
+    // changes when the user switches Network Location — kSCPrefCurrentSet/
+    // kSCDynamicStorePropSetupCurrentSet) added as literal keys; DHCP lease detail added as a
+    // per-interface pattern, same shape as the existing Link pattern below.
+    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", @"State:/Network/Global/DNS", @"Setup:/System", @"Setup:", nil];
+    NSArray *watchedPatterns = [NSArray arrayWithObjects:@"State:/Network/Interface/[^/]+/Link", @"State:/Network/Interface/[^/]+/DHCP", nil];
 	if (!SCDynamicStoreSetNotificationKeys(dynStore,
                                           (__bridge CFArrayRef)watchedKeys,
                                           (__bridge CFArrayRef)watchedPatterns))
@@ -899,6 +935,171 @@ typedef enum {
 	if (!ifname || ![self isWiredEthernetInterface:ifname]) return;
 	BOOL active = [self readLinkActiveForKey:key];
 	[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @(active)}];
+}
+
+#pragma mark DHCP lease / Hostname / Location (final API audit, 18-ago-2026, batch 1)
+
+// "State:/Network/Interface/<bsd>/DHCP" holds a dict with LeaseStartTime (an NSDate) whenever
+// the interface actually holds a DHCP-assigned address. A changed LeaseStartTime for an
+// interface we'd already seen a start time for is exactly "renewed/rebound" — the audit's
+// candidate — as distinct from the FIRST time we see a lease (which is just the normal DHCP
+// completion already implied by the existing IP-address-changed notification).
+-(void)handleDHCPKeyChanged:(NSString *)key {
+	if (![self boolForKey:HWG_NET_NOTIFY_DHCP_RENEWED_KEY default:NO]) return;
+	NSArray<NSString *> *parts = [key componentsSeparatedByString:@"/"];
+	if (parts.count < 4) return;
+	NSString *ifname = parts[3];
+
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)key);
+	if (!d) return;
+	NSDate *leaseStart = [(__bridge NSDictionary *)d objectForKey:@"LeaseStartTime"];
+	CFRelease(d);
+	if (![leaseStart isKindOfClass:[NSDate class]]) return;
+
+	NSDate *previous = self.lastKnownDHCPLeaseStartByInterface[ifname];
+	self.lastKnownDHCPLeaseStartByInterface[ifname] = leaseStart;
+	// First time seeing a lease for this interface (previous == nil) is the normal initial
+	// DHCP completion, not a renewal — only a DIFFERENT start time on a KNOWN interface counts.
+	if (!previous || [previous isEqualToDate:leaseStart]) return;
+
+	[delegate notifyWithName:@"NetworkDHCPLeaseRenewed"
+						 title:NSLocalizedString(@"DHCP Lease Renewed", @"")
+					   description:[NSString stringWithFormat:NSLocalizedString(@"%@\nRenewed at %@", @""), ifname, leaseStart]
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:[NSString stringWithFormat:@"HWGrowlDHCPRenewed-%@", ifname]
+				 contextString:nil
+						plugin:self];
+}
+
+// "Setup:/System" holds the ComputerName the user sets in System Settings → General → Sharing.
+-(void)checkComputerNameChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_HOSTNAME_KEY default:NO]) return;
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("Setup:/System"));
+	if (!d) return;
+	NSString *name = [(__bridge NSDictionary *)d objectForKey:(__bridge NSString *)kSCPropSystemComputerName];
+	CFRelease(d);
+	if (![name isKindOfClass:[NSString class]]) return;
+
+	NSString *previous = self.lastKnownComputerName;
+	self.lastKnownComputerName = name;
+	if (!previous || [previous isEqualToString:name]) return;
+
+	[delegate notifyWithName:@"NetworkHostnameChanged"
+						 title:NSLocalizedString(@"Computer Name Changed", @"")
+					   description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), previous, name]
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:@"HWGrowlHostnameChanged"
+				 contextString:nil
+						plugin:self];
+}
+
+// "Setup:" (root Setup dict) holds CurrentSet — a path like "/Sets/4E3E9EA5-..." identifying
+// which named Network Location (Home/Work/Automatic/etc.) is active. The human-readable name
+// lives in the Setup dict at that same path, under kSCPropUserDefinedName.
+-(void)checkLocationChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_LOCATION_KEY default:NO]) return;
+	CFDictionaryRef setupDict = SCDynamicStoreCopyValue(dynStore, CFSTR("Setup:"));
+	if (!setupDict) return;
+	NSString *currentSetPath = [(__bridge NSDictionary *)setupDict objectForKey:(__bridge NSString *)kSCPrefCurrentSet];
+	CFRelease(setupDict);
+	if (![currentSetPath isKindOfClass:[NSString class]]) return;
+
+	NSString *name = currentSetPath.lastPathComponent;   // fallback: the Set's UUID
+	CFDictionaryRef setDict = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)currentSetPath);
+	if (setDict) {
+		NSString *userDefinedName = [(__bridge NSDictionary *)setDict objectForKey:(__bridge NSString *)kSCPropUserDefinedName];
+		if ([userDefinedName isKindOfClass:[NSString class]]) name = userDefinedName;
+		CFRelease(setDict);
+	}
+
+	NSString *previous = self.lastKnownLocationName;
+	self.lastKnownLocationName = name;
+	if (!previous || [previous isEqualToString:name]) return;
+
+	[delegate notifyWithName:@"NetworkLocationChanged"
+						 title:NSLocalizedString(@"Network Location Changed", @"")
+					   description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), previous, name]
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:@"HWGrowlLocationChanged"
+				 contextString:nil
+						plugin:self];
+}
+
+-(void)primeHostnameAndLocationState {
+	// Silent baseline — same "no notification for the pre-existing state" convention every
+	// other monitor follows — reuses the same read logic, just seeds the ivars first so the
+	// first REAL change (not this priming call) is what gets compared and reported.
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("Setup:/System"));
+	if (d) {
+		NSString *name = [(__bridge NSDictionary *)d objectForKey:(__bridge NSString *)kSCPropSystemComputerName];
+		if ([name isKindOfClass:[NSString class]]) self.lastKnownComputerName = name;
+		CFRelease(d);
+	}
+	CFDictionaryRef setupDict = SCDynamicStoreCopyValue(dynStore, CFSTR("Setup:"));
+	if (setupDict) {
+		NSString *currentSetPath = [(__bridge NSDictionary *)setupDict objectForKey:(__bridge NSString *)kSCPrefCurrentSet];
+		CFRelease(setupDict);
+		if ([currentSetPath isKindOfClass:[NSString class]]) {
+			NSString *name = currentSetPath.lastPathComponent;
+			CFDictionaryRef setDict = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)currentSetPath);
+			if (setDict) {
+				NSString *userDefinedName = [(__bridge NSDictionary *)setDict objectForKey:(__bridge NSString *)kSCPropUserDefinedName];
+				if ([userDefinedName isKindOfClass:[NSString class]]) name = userDefinedName;
+				CFRelease(setDict);
+			}
+			self.lastKnownLocationName = name;
+		}
+	}
+}
+
+#pragma mark General Internet reachability (SCNetworkReachability, final API audit, 18-ago-2026)
+
+static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags flags, void *info) {
+	HWGrowlNetworkMonitor *observer = (__bridge HWGrowlNetworkMonitor *)info;
+	[observer reachabilityFlagsChanged:flags];
+}
+
+-(void)startReachabilityMonitoring {
+	// A zero address ("0.0.0.0") is the standard SCNetworkReachability idiom for "general
+	// Internet reachability" — not a specific host, matching the audit's "Reachability
+	// perdida/recuperada" (general, not per-destination) candidate.
+	struct sockaddr_in zeroAddress;
+	bzero(&zeroAddress, sizeof(zeroAddress));
+	zeroAddress.sin_len = sizeof(zeroAddress);
+	zeroAddress.sin_family = AF_INET;
+
+	reachabilityRef = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (const struct sockaddr *)&zeroAddress);
+	if (!reachabilityRef) return;
+
+	SCNetworkReachabilityContext context = {0, (__bridge void *)self, NULL, NULL, NULL};
+	if (SCNetworkReachabilitySetCallback(reachabilityRef, HWGReachabilityCallback, &context)) {
+		SCNetworkReachabilityScheduleWithRunLoop(reachabilityRef, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
+	}
+	// Silent baseline — same convention as every other feature's initial priming.
+	SCNetworkReachabilityFlags flags;
+	if (SCNetworkReachabilityGetFlags(reachabilityRef, &flags)) {
+		lastReachabilityFlags = flags;
+		haveLastReachabilityFlags = YES;
+	}
+}
+
+-(void)reachabilityFlagsChanged:(SCNetworkReachabilityFlags)flags {
+	BOOL wasReachable = haveLastReachabilityFlags && (lastReachabilityFlags & kSCNetworkReachabilityFlagsReachable);
+	BOOL nowReachable = (flags & kSCNetworkReachabilityFlagsReachable) != 0;
+	BOOL hadPrevious = haveLastReachabilityFlags;
+	lastReachabilityFlags = flags;
+	haveLastReachabilityFlags = YES;
+
+	if (!hadPrevious || wasReachable == nowReachable) return;
+	if (![self boolForKey:HWG_NET_NOTIFY_REACHABILITY_KEY default:NO]) return;
+
+	[delegate notifyWithName:@"NetworkReachabilityChanged"
+						 title:nowReachable ? NSLocalizedString(@"Internet Reachable", @"") : NSLocalizedString(@"Internet Unreachable", @"")
+					   description:nowReachable ? NSLocalizedString(@"General Internet connectivity was restored", @"") : NSLocalizedString(@"General Internet connectivity was lost", @"")
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:@"HWGrowlReachabilityChanged"
+				 contextString:nil
+						plugin:self];
 }
 
 -(void)updateInterface:(NSString*)interface forType:(NetworkInterfaceType)type withStatus:(NSDictionary*)status {
@@ -1730,6 +1931,12 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
                 [observer updateIP];
             else if ([key hasSuffix:@"/Link"])
                 [observer handleLinkKeyChanged:key];
+            else if ([key hasSuffix:@"/DHCP"])
+                [observer handleDHCPKeyChanged:key];
+            else if ([key isEqualToString:@"Setup:/System"])
+                [observer checkComputerNameChanged];
+            else if ([key isEqualToString:@"Setup:"])
+                [observer checkLocationChanged];
         }];
     }
 }
@@ -2069,6 +2276,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"DNS Servers Changed", @"Network-DNS-On", HWG_NET_NOTIFY_DNS_KEY, @NO],
 		@[@"Primary Interface Changed", @"Network-PrimaryInterface-On", HWG_NET_NOTIFY_PRIMARY_IF_KEY, @NO],
 		@[@"Proxy Configuration Changed", @"Network-Proxy-On", HWG_NET_NOTIFY_PROXY_KEY, @NO],
+		// Final API audit (18-ago-2026), batch 1 — no dedicated icon assets yet, reusing the
+		// module icon (same "reuse rather than collide" approach as Gamepad Monitor's
+		// Keyboard/Mouse/Racing Wheel rows this same audit pass — each still gets its own key).
+		@[@"Internet Reachability Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_REACHABILITY_KEY, @NO],
+		@[@"DHCP Lease Renewed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_DHCP_RENEWED_KEY, @NO],
+		@[@"Computer Name Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_HOSTNAME_KEY, @NO],
+		@[@"Network Location Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_LOCATION_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -2100,7 +2314,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -2116,7 +2330,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Primary Interface Changed", @""), @"PrimaryInterfaceChanged",
 			  NSLocalizedString(@"Proxy Configuration Changed", @""), @"ProxyConfigChanged",
 			  NSLocalizedString(@"Wi-Fi Radio On", @""), @"WifiRadioOn",
-			  NSLocalizedString(@"Wi-Fi Radio Off", @""), @"WifiRadioOff", nil];
+			  NSLocalizedString(@"Wi-Fi Radio Off", @""), @"WifiRadioOff",
+			  NSLocalizedString(@"Internet Reachability Changed", @""), @"NetworkReachabilityChanged",
+			  NSLocalizedString(@"DHCP Lease Renewed", @""), @"NetworkDHCPLeaseRenewed",
+			  NSLocalizedString(@"Computer Name Changed", @""), @"NetworkHostnameChanged",
+			  NSLocalizedString(@"Network Location Changed", @""), @"NetworkLocationChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -2132,7 +2350,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when the primary network interface changes (e.g. Wi-Fi ↔ Ethernet)", @""), @"PrimaryInterfaceChanged",
 			  NSLocalizedString(@"Sent when HTTP/HTTPS/SOCKS/PAC proxy settings change", @""), @"ProxyConfigChanged",
 			  NSLocalizedString(@"Sent when the Wi-Fi radio itself is turned on (regardless of whether it then connects to a network)", @""), @"WifiRadioOn",
-			  NSLocalizedString(@"Sent when the Wi-Fi radio itself is turned off", @""), @"WifiRadioOff", nil];
+			  NSLocalizedString(@"Sent when the Wi-Fi radio itself is turned off", @""), @"WifiRadioOff",
+			  NSLocalizedString(@"Sent when general Internet reachability (not tied to Wi-Fi/Ethernet specifically) is lost or restored — off by default", @""), @"NetworkReachabilityChanged",
+			  NSLocalizedString(@"Sent when an interface's DHCP lease is renewed/rebound while it stays connected — off by default", @""), @"NetworkDHCPLeaseRenewed",
+			  NSLocalizedString(@"Sent when the computer's name (Sharing preferences) changes — off by default", @""), @"NetworkHostnameChanged",
+			  NSLocalizedString(@"Sent when the active Network Location changes (e.g. Home/Work/Automatic) — off by default", @""), @"NetworkLocationChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];
