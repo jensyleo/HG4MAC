@@ -4,6 +4,19 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.18.0 — 2026-08-18 (in progress)
+
+Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
+comments throughout the code). Adding one confirmed, tested feature at a time.
+
+### Added: Thermal Monitor — Dark Wake Thermal Emergency
+`kIOPMMessageDarkWakeThermalEmergency`, delivered via `IOServiceAddInterestNotification` on
+`IOPMrootDomain` (public API, `IOKit/pwr_mgt/IOPMLib.h` + `IOMessage.h`). Fires specifically when
+the Mac overheats during a brief maintenance wake (network/backup wake while the lid is closed or
+the display is off) — a scenario the existing `NSProcessInfo.thermalState` polling might not catch
+before the Mac goes back to sleep. New dedicated icon (crescent moon + warning badge). ON by
+default.
+
 ## v1.17.0 — 2026-08-17
 
 ### Added: "Recommended" Performance preset

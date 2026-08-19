@@ -7,6 +7,9 @@
 #import "HWGrowlThermalMonitor.h"
 #import "HWGIconOverrideStore.h"
 #import "HWGIconPickerView.h"
+#import <IOKit/pwr_mgt/IOPMLib.h>
+#import <IOKit/pwr_mgt/IOPM.h>
+#import <IOKit/IOMessage.h>
 
 // F34 candidate #3: per-level configurable thermal-state notifications. Each key gates
 // whether ENTERING that level (in either direction) fires a notification. All levels are
@@ -18,6 +21,15 @@
 #define HWG_THERMAL_NOTIFY_SERIOUS_KEY  @"HWGThermalNotifySerious"
 #define HWG_THERMAL_NOTIFY_CRITICAL_KEY @"HWGThermalNotifyCritical"
 #define HWG_THERMAL_SHOW_LOWPOWER_KEY   @"HWGThermalShowLowPowerCorrelation"
+
+// Final API audit (18-ago-2026) — kIOPMMessageDarkWakeThermalEmergency, delivered to any
+// IOServiceAddInterestNotification observer on the IOPMrootDomain service (public,
+// IOKit/pwr_mgt/IOPMLib.h + IOMessage.h). Distinct from the NSProcessInfo.thermalState levels
+// above: this fires specifically when the Mac overheats DURING a brief dark wake (network/
+// maintenance wake while the lid is closed or display is off), a scenario the thermalState
+// polling wouldn't necessarily catch since the Mac may go straight back to sleep afterward.
+// ON by default — rare and always actionable when it happens.
+#define HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY @"HWGThermalNotifyDarkWakeEmergency"
 
 static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -32,8 +44,23 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 // "Simulate Test Notification" popups — see -simulateThermalTransitionForTesting:.
 @property (nonatomic, strong) NSPopUpButton *simulateFromPopup;
 @property (nonatomic, strong) NSPopUpButton *simulateToPopup;
+@property (nonatomic, assign) IONotificationPortRef rootDomainNotifyPort;
+@property (nonatomic, assign) io_object_t rootDomainNotifier;
+
+-(void)darkWakeThermalEmergencyFired;
 
 @end
+
+// C callback required by IOServiceAddInterestNotification's function-pointer signature (not
+// a selector/block) — refcon carries the plugin instance across the bridge. Only messageType
+// kIOPMMessageDarkWakeThermalEmergency is handled; every other IOPMrootDomain interest message
+// (sleep/wake/etc.) is already covered by Power Monitor's NSWorkspace-based observing, so
+// those are ignored here rather than duplicated.
+static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uint32_t messageType, void *messageArgument) {
+	if (messageType != kIOPMMessageDarkWakeThermalEmergency) return;
+	HWGrowlThermalMonitor *monitor = (__bridge HWGrowlThermalMonitor *)refcon;
+	[monitor darkWakeThermalEmergencyFired];
+}
 
 @implementation HWGrowlThermalMonitor
 
@@ -51,12 +78,37 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 												  selector:@selector(thermalStateChanged:)
 													  name:NSProcessInfoThermalStateDidChangeNotification
 													object:nil];
+
+		// Final API audit (18-ago-2026) — kIOPMMessageDarkWakeThermalEmergency via
+		// IOServiceAddInterestNotification on IOPMrootDomain. Public API (IOPMLib.h/IOMessage.h),
+		// no entitlement required (confirmed: this target has no CODE_SIGN_ENTITLEMENTS).
+		io_service_t rootDomain = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"));
+		if (rootDomain) {
+			self.rootDomainNotifyPort = IONotificationPortCreate(kIOMainPortDefault);
+			CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(self.rootDomainNotifyPort), kCFRunLoopDefaultMode);
+			IOServiceAddInterestNotification(self.rootDomainNotifyPort, rootDomain, kIOGeneralInterest,
+											  HWGThermalRootDomainCallback, (__bridge void *)self, &_rootDomainNotifier);
+			IOObjectRelease(rootDomain);
+		}
 	}
 	return self;
 }
 
 -(void)dealloc {
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
+	if (_rootDomainNotifier) IOObjectRelease(_rootDomainNotifier);
+	if (_rootDomainNotifyPort) IONotificationPortDestroy(_rootDomainNotifyPort);
+}
+
+-(void)darkWakeThermalEmergencyFired {
+	if (!HWGThermalBoolForKey(HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, YES)) return;
+	[delegate notifyWithName:@"DarkWakeThermalEmergency"
+						 title:NSLocalizedString(@"Dark Wake Thermal Emergency", @"")
+				   description:NSLocalizedString(@"The Mac overheated during a brief maintenance wake and may sleep again immediately to cool down.", @"")
+						  icon:HWGResolveIconDataNamed(@"Thermal-DarkWakeEmergency")
+			  identifierString:@"HWGrowlDarkWakeThermalEmergency"
+				 contextString:nil
+						plugin:self];
 }
 
 // Description phrase ONLY (no level name prefix) — the level name is shown separately via
@@ -347,6 +399,7 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 		@[@"Fair", @"Thermal-Fair", HWG_THERMAL_NOTIFY_FAIR_KEY, @NO],
 		@[@"Serious", @"Thermal-Serious", HWG_THERMAL_NOTIFY_SERIOUS_KEY, @YES],
 		@[@"Critical", @"Thermal-Critical", HWG_THERMAL_NOTIFY_CRITICAL_KEY, @YES],
+		@[@"Dark Wake Thermal Emergency", @"Thermal-DarkWakeEmergency", HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, @YES],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -384,16 +437,22 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObject:@"ThermalStateChanged"];
+	return @[@"ThermalStateChanged", @"DarkWakeThermalEmergency"];
 }
 -(NSDictionary*)localizedNames {
-	return [NSDictionary dictionaryWithObject:NSLocalizedString(@"Thermal State Changed", @"") forKey:@"ThermalStateChanged"];
+	return @{
+		@"ThermalStateChanged": NSLocalizedString(@"Thermal State Changed", @""),
+		@"DarkWakeThermalEmergency": NSLocalizedString(@"Dark Wake Thermal Emergency", @""),
+	};
 }
 -(NSDictionary*)noteDescriptions {
-	return [NSDictionary dictionaryWithObject:NSLocalizedString(@"Sent when the Mac's thermal state changes (throttling level)", @"") forKey:@"ThermalStateChanged"];
+	return @{
+		@"ThermalStateChanged": NSLocalizedString(@"Sent when the Mac's thermal state changes (throttling level)", @""),
+		@"DarkWakeThermalEmergency": NSLocalizedString(@"Sent when the Mac overheats during a brief maintenance wake", @""),
+	};
 }
 -(NSArray*)defaultNotifications {
-	return [NSArray arrayWithObject:@"ThermalStateChanged"];
+	return @[@"ThermalStateChanged", @"DarkWakeThermalEmergency"];
 }
 
 @end

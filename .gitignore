@@ -38,3 +38,4 @@ Icon?
 
 # Local-only pending-tasks list (never published — see todo-tracking policy)
 TODO.md
+AUDIT-*.md
