@@ -9,6 +9,27 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Removed: 3 Intel-only features pulled from this build (documented for HG4MAC-INTEL)
+Thermal Monitor's CPU Power Limited and Hardware Thermal Warning Level, and Thunderbolt
+Monitor's real GPU identity/location/VRAM in eGPU notifications, were all implemented and
+verified working — then confirmed LIVE that their underlying APIs (`IOPMCopyCPUPowerStatus`,
+`IOPMGetThermalWarningLevel`) always return `kIOReturnNotFound` on Apple Silicon, and that eGPUs
+aren't supported on Apple Silicon at all. Kept the risk (these 3 rows repeatedly triggered a
+real layout bug in the shared icon-picker component) with zero payoff on this hardware, so they
+were pulled from the Apple Silicon build. Full working code preserved in git history
+(`770c430`, `db84c66`) and documented in detail in `TODO.md`'s "PENDIENTE — SOLO PARA
+HG4MAC-INTEL" section for direct porting when that fork resumes.
+
+### Fixed (properly, this time): Icons tab checkbox layout bug
+The zero-width and zero-margin fixes below were both real and are still in place. A third
+attempt to ALSO make long labels wrap instead of truncate (so "(Intel only)" style qualifiers
+stayed visible) introduced a new regression affecting more checkboxes than the wrapping was
+meant to fix, and was reverted — `HWGIconPickerView` is back to the simpler single-line +
+240pt-cap-and-truncate approach, which was independently confirmed working via
+`AXUIElementCopyElementAtPosition` hit-testing before the wrapping attempt. Removing the two
+Intel-only Thermal rows (above) also means no label in the app is currently long enough to need
+wrapping in the first place.
+
 ### Added: Printer Monitor — Rejecting Jobs event + Capabilities field
 Both read from the same `printer-type` `CUPS_PRINTER_*` bitmask CUPS already returns (no extra
 IPP round-trip): `CUPS_PRINTER_REJECTING` (a printer can start/stop accepting jobs at any time —

@@ -10,7 +10,6 @@
 #import "HWGIconOverrideStore.h"
 #import "HWGIconPickerView.h"
 #include <IOKit/IOKitLib.h>
-#import <Metal/Metal.h>
 
 // kIOMainPortDefault is available since macOS 12 (deployment target is 13).
 // (Note: it's a const, not a macro, so a #ifndef fallback would wrongly
@@ -27,14 +26,14 @@
 // toggle on an already-firing notice.
 #define HWG_TB_NOTIFY_EGPU_KEY @"HWGThunderboltNotifyEGPU"
 
-// Final API audit (18-ago-2026) — MTLDevice.location/isRemovable/recommendedMaxWorkingSetSize
-// (Metal.framework, public, macOS 10.11+). Complements the existing PCI class-code eGPU
-// detection above (which only sees vendor/device ID and the raw "Display Controller" PCI
-// class) with the actual GPU identity and VRAM budget Metal already knows about. Only makes
-// sense on CONNECT — Metal's device list has already dropped the card by the time a PCI
-// removal notification fires, same "unreadable from a terminating entry" limitation already
-// documented on the class-code check itself.
-#define HWG_TB_SHOW_EGPU_DETAILS_KEY @"HWGThunderboltShowEGPUDetails"
+// REMOVED from this build (19-ago-2026) — GPU identity/location/VRAM via
+// MTLDevice.location/isRemovable/recommendedMaxWorkingSetSize (Metal.framework, public, macOS
+// 10.11+) was implemented and verified working, but eGPUs are not supported on Apple Silicon
+// at all (Apple removed eGPU support starting with M1 — no MTLDevice ever reports
+// isRemovable==YES on this hardware, so the enrichment never had anything to show). Pulled
+// from the Apple Silicon build for the same reason as Thermal Monitor's Intel-only rows: zero
+// benefit here, only added UI/code surface. Full working implementation preserved in git
+// history — see TODO.md → "PENDIENTE — SOLO PARA HG4MAC-INTEL".
 
 static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -341,25 +340,6 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 // F34 #2: eGPU-specific notification — a Display Controller PCI function hot-plugged after
 // launch is, in practice, an external GPU attached via Thunderbolt (internal GPUs on Apple
 // Silicon don't enumerate as a post-launch IOPCIDevice add/remove). OFF by default.
-// Final API audit (18-ago-2026) — the first MTLDevice reporting isRemovable==YES. On a Mac
-// with a single eGPU attached (the only configuration this app can test), that's an
-// unambiguous match; a Mac Pro with multiple removable MPX/eGPU cards would need to match by
-// something more specific than "first removable", but there's no public API tying a
-// specific IOPCIDevice registry entry to a specific MTLDevice to disambiguate further.
--(NSString *)metalEGPUDetailDescription {
-	NSArray<id<MTLDevice>> *devices = MTLCopyAllDevices();
-	for (id<MTLDevice> gpu in devices) {
-		if (!gpu.removable) continue;
-		NSString *locationName = @"External";
-		if (gpu.location == MTLDeviceLocationSlot) locationName = NSLocalizedString(@"Slot", @"");
-		else if (gpu.location == MTLDeviceLocationExternal) locationName = NSLocalizedString(@"External", @"");
-		unsigned long long vramMB = gpu.recommendedMaxWorkingSetSize / (1024 * 1024);
-		return [NSString stringWithFormat:NSLocalizedString(@"GPU:\t%@\nLocation:\t%@\nVRAM:\t%llu MB", @""),
-				gpu.name, locationName, vramMB];
-	}
-	return nil;
-}
-
 -(void)tbNotifyEGPUIfNeeded:(io_object_t)device deviceName:(NSString *)deviceName added:(BOOL)added {
 	if (!HWGTBBoolForKey(HWG_TB_NOTIFY_EGPU_KEY, NO)) return;
 	if (![self isDisplayControllerDevice:device]) return;
@@ -368,15 +348,9 @@ static BOOL HWGTBBoolForKey(NSString *key, BOOL def) {
 	NSString *imageName = added ? @"TB-TypeEGPU" : @"Thunderbolt-Off";
 	NSData *iconData = [HWGResolveIconNamed(imageName) TIFFRepresentation];
 
-	NSString *description = deviceName ?: @"";
-	if (added && HWGTBBoolForKey(HWG_TB_SHOW_EGPU_DETAILS_KEY, YES)) {
-		NSString *metalDetail = [self metalEGPUDetailDescription];
-		if (metalDetail) description = [description stringByAppendingFormat:@"\n%@", metalDetail];
-	}
-
 	[delegate notifyWithName:added ? @"ThunderboltEGPUConnected" : @"ThunderboltEGPUDisconnected"
 							 title:title
-					 description:description
+					 description:deviceName ?: @""
 							  icon:iconData
 			  identifierString:[NSString stringWithFormat:@"eGPU-%@", deviceName]
 				  contextString:nil
@@ -543,7 +517,6 @@ static void tbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		[self checkboxWithKey:HWG_TB_SHOW_TYPE_KEY    title:NSLocalizedString(@"Device type (Storage, Display, Bridge/Dock…)", @"") defaultOn:YES],
 		// F34 #2: OFF by default — new behavior, extra notification on top of the generic one.
 		[self checkboxWithKey:HWG_TB_NOTIFY_EGPU_KEY  title:NSLocalizedString(@"Notify separately when an eGPU is connected", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_TB_SHOW_EGPU_DETAILS_KEY title:NSLocalizedString(@"Show GPU name, location and VRAM in the eGPU notification", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];

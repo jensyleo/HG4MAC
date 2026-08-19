@@ -10,7 +10,6 @@
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <IOKit/pwr_mgt/IOPM.h>
 #import <IOKit/IOMessage.h>
-#import <notify.h>
 
 // F34 candidate #3: per-level configurable thermal-state notifications. Each key gates
 // whether ENTERING that level (in either direction) fires a notification. All levels are
@@ -32,18 +31,16 @@
 // ON by default — rare and always actionable when it happens.
 #define HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY @"HWGThermalNotifyDarkWakeEmergency"
 
-// Final API audit (18-ago-2026) — IOPMGetThermalWarningLevel() and IOPMCopyCPUPowerStatus()
-// (both IOKit/pwr_mgt/IOPMLib.h, public). CONFIRMED LIVE on this M4 (Apple Silicon): both
-// return kIOReturnNotFound — Apple Silicon simply never publishes these two values. They are
-// real on Intel Macs, which this app still targets (ARCHS = arm64 x86_64) — so this is not
-// dead code, just silent no-ops here. Each has a documented BSD notify(3) push key
-// (kIOPMThermalWarningNotificationKey / kIOPMCPUPowerNotificationKey in IOPMLib.h) instead of
-// requiring a poll timer. Both OFF by default: unlike Dark Wake Emergency (rare, unambiguous),
-// these can be noisy under sustained load on the Intel Macs where they DO fire, and this app's
-// own performance-tuning pass this session already prioritized fewer background timers/events
-// over completeness by default.
-#define HWG_THERMAL_NOTIFY_CPU_THROTTLE_KEY @"HWGThermalNotifyCPUThrottle"
-#define HWG_THERMAL_NOTIFY_WARNING_LEVEL_KEY @"HWGThermalNotifyWarningLevel"
+// REMOVED from this build (19-ago-2026) — CPU Power Limited and Hardware Thermal Warning
+// Level (IOPMCopyCPUPowerStatus()/IOPMGetThermalWarningLevel()) were implemented and verified
+// working, but CONFIRMED LIVE on this M4 (Apple Silicon) that both always return
+// kIOReturnNotFound — Apple Silicon never publishes either value, only Intel does. Since this
+// app's checkbox layout bugs kept resurfacing around these two Intel-only, permanently-inert
+// (on this hardware) rows, they were pulled from the Apple Silicon build entirely rather than
+// keep carrying dead-here code and UI risk for zero benefit to this app's actual users.
+// Full implementation (working code, icons, notify(3) push registration) is preserved in git
+// history — see TODO.md → "PENDIENTE — SOLO PARA HG4MAC-INTEL" for the exact commits, API
+// details, and everything needed to port this into the Intel fork.
 
 static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -60,15 +57,8 @@ static BOOL HWGThermalBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, strong) NSPopUpButton *simulateToPopup;
 @property (nonatomic, assign) IONotificationPortRef rootDomainNotifyPort;
 @property (nonatomic, assign) io_object_t rootDomainNotifier;
-@property (nonatomic, assign) int cpuPowerNotifyToken;
-@property (nonatomic, assign) int thermalWarningNotifyToken;
-@property (nonatomic, assign) uint32_t lastReportedThermalWarningLevel;
-@property (nonatomic, assign) BOOL lastReportedCPUThrottled;
-@property (nonatomic, assign) BOOL hasCPUThrottleBaseline;
 
 -(void)darkWakeThermalEmergencyFired;
--(void)cpuPowerStatusNotifyFired;
--(void)thermalWarningLevelNotifyFired;
 
 @end
 
@@ -88,9 +78,6 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 @synthesize delegate;
 @synthesize lastReportedThermalState;
 @synthesize prefsView;
-@synthesize lastReportedThermalWarningLevel;
-@synthesize lastReportedCPUThrottled;
-@synthesize hasCPUThrottleBaseline;
 
 -(id)init {
 	self = [super init];
@@ -114,24 +101,6 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 											  HWGThermalRootDomainCallback, (__bridge void *)self, &_rootDomainNotifier);
 			IOObjectRelease(rootDomain);
 		}
-
-		// Final API audit (18-ago-2026) — push registration via BSD notify(3), no poll timer.
-		// Baseline silently first (matches the WiFi/USB/Bluetooth/thermalState convention) so
-		// only a REAL subsequent change notifies, not the registration-time initial read.
-		lastReportedThermalWarningLevel = kIOPMThermalLevelUnknown;
-		lastReportedCPUThrottled = NO;
-		[self thermalWarningLevelNotifyFired];
-		[self cpuPowerStatusNotifyFired];
-
-		__weak HWGrowlThermalMonitor *weakSelf = self;
-		notify_register_dispatch(kIOPMThermalWarningNotificationKey, &_thermalWarningNotifyToken,
-								  dispatch_get_main_queue(), ^(int token) {
-			[weakSelf thermalWarningLevelNotifyFired];
-		});
-		notify_register_dispatch(kIOPMCPUPowerNotificationKey, &_cpuPowerNotifyToken,
-								  dispatch_get_main_queue(), ^(int token) {
-			[weakSelf cpuPowerStatusNotifyFired];
-		});
 	}
 	return self;
 }
@@ -140,68 +109,6 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	if (_rootDomainNotifier) IOObjectRelease(_rootDomainNotifier);
 	if (_rootDomainNotifyPort) IONotificationPortDestroy(_rootDomainNotifyPort);
-	if (_thermalWarningNotifyToken) notify_cancel(_thermalWarningNotifyToken);
-	if (_cpuPowerNotifyToken) notify_cancel(_cpuPowerNotifyToken);
-}
-
-// Silent no-op on Apple Silicon (IOPMGetThermalWarningLevel returns kIOReturnNotFound, confirmed
-// live) — real on Intel Macs. kIOPMThermalWarningLevelNormal/Danger/Crisis are the documented
-// 3 levels (aliases of kIOPMThermalLevelNormal/Warning/Critical in IOPM.h).
--(void)thermalWarningLevelNotifyFired {
-	uint32_t level = kIOPMThermalLevelUnknown;
-	if (IOPMGetThermalWarningLevel(&level) != kIOReturnSuccess) return;
-	if (level == lastReportedThermalWarningLevel) return;
-	BOOL hadBaseline = (lastReportedThermalWarningLevel != kIOPMThermalLevelUnknown);
-	self.lastReportedThermalWarningLevel = level;
-	if (!hadBaseline) return;
-	if (!HWGThermalBoolForKey(HWG_THERMAL_NOTIFY_WARNING_LEVEL_KEY, NO)) return;
-
-	NSString *levelName;
-	switch (level) {
-		case kIOPMThermalWarningLevelNormal: levelName = NSLocalizedString(@"Normal", @""); break;
-		case kIOPMThermalWarningLevelDanger: levelName = NSLocalizedString(@"Danger", @""); break;
-		case kIOPMThermalWarningLevelCrisis: levelName = NSLocalizedString(@"Crisis", @""); break;
-		default: levelName = NSLocalizedString(@"Unknown", @""); break;
-	}
-	[delegate notifyWithName:@"ThermalWarningLevelChanged"
-						 title:NSLocalizedString(@"Hardware Thermal Warning Level Changed", @"")
-				   description:[NSString stringWithFormat:NSLocalizedString(@"Level: %@", @""), levelName]
-						  icon:HWGResolveIconDataNamed(@"Thermal-WarningLevel")
-			  identifierString:@"HWGrowlThermalWarningLevel"
-				 contextString:nil
-						plugin:self];
-}
-
-// Silent no-op on Apple Silicon (IOPMCopyCPUPowerStatus returns kIOReturnNotFound, confirmed
-// live) — real on Intel Macs under sustained thermal/power duress.
--(void)cpuPowerStatusNotifyFired {
-	CFDictionaryRef status = NULL;
-	if (IOPMCopyCPUPowerStatus(&status) != kIOReturnSuccess || !status) return;
-	NSDictionary *dict = CFBridgingRelease(status);
-
-	NSNumber *speedLimit = dict[@kIOPMCPUPowerLimitProcessorSpeedKey];
-	NSNumber *cpuLimit = dict[@kIOPMCPUPowerLimitProcessorCountKey];
-	BOOL throttled = (speedLimit && speedLimit.integerValue < 100) || (cpuLimit && cpuLimit.integerValue < 100);
-	BOOL hadBaseline = hasCPUThrottleBaseline;
-	self.hasCPUThrottleBaseline = YES;
-	if (throttled == lastReportedCPUThrottled) return;
-	self.lastReportedCPUThrottled = throttled;
-	if (!hadBaseline) return; // first read ever: record silently, don't notify on launch
-	if (!throttled) return;   // only notify on entering throttled state, not on recovery
-	if (!HWGThermalBoolForKey(HWG_THERMAL_NOTIFY_CPU_THROTTLE_KEY, NO)) return;
-
-	NSMutableArray<NSString*> *parts = [NSMutableArray array];
-	if (speedLimit) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"CPU speed limited to %@%%", @""), speedLimit]];
-	if (cpuLimit) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"%@%% of cores available", @""), cpuLimit]];
-	NSString *description = parts.count ? [parts componentsJoinedByString:@"\n"] : NSLocalizedString(@"CPU power/speed is being limited by the hardware", @"");
-
-	[delegate notifyWithName:@"CPUPowerLimited"
-						 title:NSLocalizedString(@"CPU Power Limited", @"")
-				   description:description
-						  icon:HWGResolveIconDataNamed(@"Thermal-CPUThrottled")
-			  identifierString:@"HWGrowlCPUPowerLimited"
-				 contextString:nil
-						plugin:self];
 }
 
 -(void)darkWakeThermalEmergencyFired {
@@ -380,10 +287,10 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 
 	// BUG FIX (17-ago-2026): was 300 — same fixed-constant risk class confirmed live in Network
 	// Monitor's Wi-Fi tab. Bumped with margin after adding 1 row (Low Power Mode correlation).
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 560)];
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 560)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notify when entering:", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -504,8 +411,6 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 		@[@"Serious", @"Thermal-Serious", HWG_THERMAL_NOTIFY_SERIOUS_KEY, @YES],
 		@[@"Critical", @"Thermal-Critical", HWG_THERMAL_NOTIFY_CRITICAL_KEY, @YES],
 		@[@"Dark Wake Thermal Emergency", @"Thermal-DarkWakeEmergency", HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, @YES],
-		@[@"CPU Power Limited (Intel only)", @"Thermal-CPUThrottled", HWG_THERMAL_NOTIFY_CPU_THROTTLE_KEY, @NO],
-		@[@"Hardware Thermal Warning Level (Intel only)", @"Thermal-WarningLevel", HWG_THERMAL_NOTIFY_WARNING_LEVEL_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -524,7 +429,18 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
 	[iconsContent addSubview:iconPicker];
 
-	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 460)];
+	// BUG FIX (18-ago-2026) — root cause of every "Notify?" checkbox in this tab failing to
+	// respond to real clicks (confirmed via AXUIElementCopyElementAtPosition: a hit-test at
+	// the checkbox's own on-screen rect resolved to the NSScrollView itself, not the checkbox,
+	// while every OTHER control in the same row — image, label, even the Custom/System/Reset
+	// buttons — hit-tested correctly). The PREVIOUS "fix" here made this initial guess (460)
+	// LARGER than the tab's real content height (~432) — meaning NSScrollView never needed to
+	// engage scrolling AT CONSTRUCTION TIME, before AppDelegate's -setFrameSize: later resizes
+	// this to the real container size. Camera Monitor (whose checkboxes work) starts smaller
+	// than ITS content (160 vs ~250 needed) and engages scrolling from construction — matching
+	// that working precedent by keeping this guess deliberately SMALLER than the content need,
+	// regardless of the outer pane's own fixed height (which AppDelegate overrides anyway).
+	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
 	iconsScroll.hasVerticalScroller = YES;
 	iconsScroll.autohidesScrollers = YES;
 	iconsScroll.drawsBackground = NO;
@@ -543,22 +459,18 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return @[@"ThermalStateChanged", @"DarkWakeThermalEmergency", @"ThermalWarningLevelChanged", @"CPUPowerLimited"];
+	return @[@"ThermalStateChanged", @"DarkWakeThermalEmergency"];
 }
 -(NSDictionary*)localizedNames {
 	return @{
 		@"ThermalStateChanged": NSLocalizedString(@"Thermal State Changed", @""),
 		@"DarkWakeThermalEmergency": NSLocalizedString(@"Dark Wake Thermal Emergency", @""),
-		@"ThermalWarningLevelChanged": NSLocalizedString(@"Hardware Thermal Warning Level Changed", @""),
-		@"CPUPowerLimited": NSLocalizedString(@"CPU Power Limited", @""),
 	};
 }
 -(NSDictionary*)noteDescriptions {
 	return @{
 		@"ThermalStateChanged": NSLocalizedString(@"Sent when the Mac's thermal state changes (throttling level)", @""),
 		@"DarkWakeThermalEmergency": NSLocalizedString(@"Sent when the Mac overheats during a brief maintenance wake", @""),
-		@"ThermalWarningLevelChanged": NSLocalizedString(@"Sent when the hardware thermal warning level changes (Intel Macs only)", @""),
-		@"CPUPowerLimited": NSLocalizedString(@"Sent when the CPU's speed or core count is being limited by the hardware (Intel Macs only)", @""),
 	};
 }
 -(NSArray*)defaultNotifications {

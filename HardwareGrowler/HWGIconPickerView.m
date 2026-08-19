@@ -115,6 +115,17 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 	// keeps every row's button columns aligned (they all still share this one width) while
 	// guaranteeing no label ever needs the "…"/tooltip fallback.
 	CGFloat nameColumnWidth = 150;
+	// BUG FIX (18-ago-2026) — this column width used to grow completely unbounded to fit
+	// whatever the widest label happened to be. Confirmed via AXUIElementCopyElementAtPosition
+	// that an unusually long label (43 chars, vs. the ~28-char longest label anywhere else in
+	// the app at the time) pushed every row's "Notify?" checkbox — positioned AFTER this column
+	// plus 3 fixed-width buttons — past this view's own width entirely, landing it outside the
+	// actual clickable/scrollable content area, where clicks and hit-tests resolve to the
+	// enclosing NSScrollView instead of the checkbox. Capping this keeps every row's controls
+	// provably within bounds regardless of what label text a future feature adds; a label
+	// beyond the cap now truncates with "…" (the existing toolTip/lineBreakMode fallback below
+	// already handles that) instead of silently breaking every checkbox in the tab.
+	CGFloat const kMaxNameColumnWidth = 240;
 	for (NSArray *spec in iconSpecs) {
 		// Measure with an actual NSTextField (not NSString sizeWithAttributes:), then read its
 		// real -intrinsicContentSize — the two didn't agree closely enough in practice ("Other
@@ -126,7 +137,7 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 		// +24 margin — generous on purpose. A real Retina display can measure/render text
 		// slightly wider than this headless-style measurement predicts; a few points of unused
 		// trailing space in a name column is invisible, but truncating the longest label isn't.
-		CGFloat needed = ceil(measuringField.intrinsicContentSize.width) + 24;
+		CGFloat needed = MIN(ceil(measuringField.intrinsicContentSize.width) + 24, kMaxNameColumnWidth);
 		if (needed > nameColumnWidth) nameColumnWidth = needed;
 	}
 
@@ -139,10 +150,21 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 		imageView.image = HWGResolveIconNamed(defaultName);
 		imageView.imageScaling = NSImageScaleProportionallyUpOrDown;
 
+		// REVERTED (19-ago-2026) — a multi-line wrapping version of this label was tried so
+		// long labels stay fully visible instead of truncating, using a "hug the taller of
+		// two views" dual-priority Auto Layout constraint pair for row spacing. That
+		// introduced a NEW checkbox-click regression (reported live, affecting rows beyond
+		// just the wrapped ones) on top of being unnecessary: the only labels that ever
+		// needed it (Thermal Monitor's 2 Intel-only rows) were removed from this Apple
+		// Silicon build entirely — see TODO.md's "PENDIENTE — SOLO PARA HG4MAC-INTEL" section.
+		// Back to the simple, previously-verified single-line + truncate-with-tooltip
+		// approach; the 240pt column cap above still protects every row's controls from ever
+		// being pushed out of bounds by a future long label, it just truncates instead of
+		// wrapping when that happens.
 		NSTextField *nameField = [NSTextField labelWithString:label];
 		nameField.translatesAutoresizingMaskIntoConstraints = NO;
 		nameField.lineBreakMode = NSLineBreakByTruncatingTail;
-		nameField.toolTip = label; // safety net only — the column is now sized to fit every label in full
+		nameField.toolTip = label; // safety net for any label the 240pt cap must truncate
 
 		NSButton *changeButton = [NSButton buttonWithTitle:NSLocalizedString(@"Custom", @"") target:self action:@selector(changeButtonClicked:)];
 		changeButton.translatesAutoresizingMaskIntoConstraints = NO;

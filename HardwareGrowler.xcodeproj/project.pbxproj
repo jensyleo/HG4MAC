@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		01E345AB27A588DDDEFA94D3 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 25308007811C53690B41CB70 /* Metal.framework */; };
 		04B6CC4A86C53E194803CA48 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC523C3515556BE500548427 /* IOKit.framework */; };
 		09A9FD093DEAA959B8A4E3A2 /* HWGIconPickerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 32C4D07D06AAE813831A914C /* HWGIconPickerView.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		102CD950EE257885DEB7B39F /* HWGIconPickerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 32C4D07D06AAE813831A914C /* HWGIconPickerView.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
@@ -521,7 +520,6 @@
 			files = (
 				BC75524F156528AA00CB0542 /* Cocoa.framework in Frameworks */,
 				BC75527015652BB100CB0542 /* IOKit.framework in Frameworks */,
-				01E345AB27A588DDDEFA94D3 /* Metal.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
