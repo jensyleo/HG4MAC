@@ -38,6 +38,17 @@ icon; Color/Duplex/Staple/Fax/MFP capability bits are a static General-tab field
 "Printer Connected" notification. The "job name/owner" candidate from the audit was already
 covered by the existing Print Job Started/Finished feature — no new work needed there.
 
+### Fixed: Dark Wake Thermal Emergency notification now off by default
+Same reasoning as the other rare/niche fields in this app: an event this uncommon shouldn't be
+noisy out of the box.
+
+### Added: Gamepad Monitor — 5 remaining audit candidates (cross-platform, no Intel-only content)
+Game-recognized keyboard/mouse connect/disconnect (`GCKeyboard`/`GCMouse`, macOS 11+), racing
+wheel connect/disconnect (`GCRacingWheel`, macOS 13+), DualSense/DualShock lightbar color as a
+read-only field, and Xbox Elite paddle presence. All added as plain General-tab checkboxes
+following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
+`HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
+
 ### Fixed: every Icons tab "Notify?" checkbox had zero width (silently unclickable)
 Reported live as "the last 2 Thermal Monitor checkboxes don't respond to clicks" — the first
 attempted diagnosis (bumping Thermal Monitor's fixed pane height, since that's the bug class
