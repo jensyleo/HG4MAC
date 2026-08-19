@@ -786,8 +786,6 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_VRR_KEY  title:NSLocalizedString(@"Variable refresh rate range (ProMotion, macOS 12+)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_EDR_KEY  title:NSLocalizedString(@"HDR/EDR headroom", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_NOTCH_KEY title:NSLocalizedString(@"Notch / camera housing presence (macOS 12+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_SLEEP_KEY title:NSLocalizedString(@"Notify on display sleep/wake", @"") defaultOn:YES],
-		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY title:NSLocalizedString(@"Notify on color profile change", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
@@ -891,6 +889,11 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		@[@"Module Icon (Sidebar)", @"HWGPrefsDisplay-Module"],
 		@[@"Display Connected", @"Display-On", HWG_DISPLAY_NOTIFY_CONNECT_KEY],
 		@[@"Display Disconnected", @"Display-Off", HWG_DISPLAY_NOTIFY_DISCONNECT_KEY],
+		// Final API audit (18-ago-2026) — moved here from General (correction, 19-ago-2026):
+		// notify on/off toggles for new notification categories belong in Icons, not General.
+		// No dedicated icon assets for these, so reusing the module icon.
+		@[@"Display Sleep/Wake", @"HWGPrefsDisplay-Module", HWG_DISPLAY_NOTIFY_SLEEP_KEY, @YES],
+		@[@"Display Color Profile Changed", @"HWGPrefsDisplay-Module", HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

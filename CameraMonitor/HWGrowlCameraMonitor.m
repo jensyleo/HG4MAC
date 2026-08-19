@@ -600,10 +600,6 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 		// Final API audit (18-ago-2026) — OFF by default.
 		[self checkboxWithKey:HWG_CAMERA_SHOW_MAX_FRAMERATE_KEY title:NSLocalizedString(@"Max frame rate", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_CAMERA_SHOW_SYSTEM_PREFERRED_KEY title:NSLocalizedString(@"System Preferred Camera (macOS 13+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_CAMERA_SHOW_PORTRAIT_EFFECT_KEY title:NSLocalizedString(@"Notify when Portrait Effect changes (macOS 12+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_CAMERA_SHOW_STUDIO_LIGHT_KEY title:NSLocalizedString(@"Notify when Studio Light changes (macOS 13+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_CAMERA_SHOW_REACTIONS_KEY title:NSLocalizedString(@"Notify when Reactions changes (macOS 14+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_CAMERA_SHOW_BG_REPLACEMENT_KEY title:NSLocalizedString(@"Notify when Background Replacement changes (macOS 15+)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
@@ -639,6 +635,13 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 		@[@"In Use", @"CameraMonitor-Icon-InUse", HWG_CAMERA_NOTIFY_IN_USE_KEY],
 		@[@"In Use — Started (icon)", @"CameraMonitor-Icon-InUse", HWG_CAMERA_NOTIFY_INUSE_ROW_KEY],
 		@[@"In Use — Stopped (icon)", @"CameraMonitor-Icon", HWG_CAMERA_NOTIFY_IDLE_ROW_KEY],
+		// Final API audit (18-ago-2026) — moved here from General (correction, 19-ago-2026):
+		// each of these fires its own distinct notification, so per the same convention as the
+		// rows above, they belong here, not as General-tab field-visibility checkboxes.
+		@[@"Portrait Effect Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_PORTRAIT_EFFECT_KEY, @NO],
+		@[@"Studio Light Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_STUDIO_LIGHT_KEY, @NO],
+		@[@"Reactions Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_REACTIONS_KEY, @NO],
+		@[@"Background Replacement Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_BG_REPLACEMENT_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

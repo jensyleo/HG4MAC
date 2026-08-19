@@ -2903,25 +2903,26 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	vpnItem.view = [self scrollWrapping:vpnTab height:120];
 	[tabs addTabViewItem:vpnItem];
 
-	// --- Tab: Other (catch-all for fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
-	// Final API audit (18-ago-2026), batch 5 — first real use of this previously-empty tab.
-	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 180)];
-	NSTextField *otherHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notifications", @"")];
-	[otherTab addSubview:otherHeader];
+	// --- Tab: Other (catch-all reserved for FUTURE fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
+	// CORRECTION (19-ago-2026): the 4 batch-5 notify toggles that briefly lived here were moved
+	// to the Icons tab instead — notify on/off toggles for new notification categories belong
+	// there, not in a General-style tab (same convention as every other monitor). Back to an
+	// empty placeholder.
+	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
+	NSTextField *otherPlaceholder = [NSTextField labelWithString:
+		NSLocalizedString(@"No additional fields yet.", @"")];
+	otherPlaceholder.textColor = [NSColor secondaryLabelColor];
+	otherPlaceholder.font = [NSFont systemFontOfSize:12];
+	otherPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
+	[otherTab addSubview:otherPlaceholder];
 	[NSLayoutConstraint activateConstraints:@[
-		[otherHeader.topAnchor     constraintEqualToAnchor:otherTab.topAnchor constant:16],
-		[otherHeader.leadingAnchor  constraintEqualToAnchor:otherTab.leadingAnchor constant:16],
+		[otherPlaceholder.topAnchor     constraintEqualToAnchor:otherTab.topAnchor constant:16],
+		[otherPlaceholder.leadingAnchor  constraintEqualToAnchor:otherTab.leadingAnchor constant:16],
 	]];
-	[self layoutRows:@[
-		[self checkboxWithKey:HWG_NET_NOTIFY_DETACHING_KEY title:NSLocalizedString(@"Notify when an adapter is being removed (Detaching)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_NET_NOTIFY_SVC_ORDER_KEY title:NSLocalizedString(@"Notify when the network service order changes", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_NET_NOTIFY_PROMISCUOUS_KEY title:NSLocalizedString(@"Notify when promiscuous mode is enabled (packet capture)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_NET_NOTIFY_BOND_KEY title:NSLocalizedString(@"Notify on Link Aggregation (Bond) member status change", @"") defaultOn:NO],
-	] inView:otherTab belowView:otherHeader gap:10];
 
 	NSTabViewItem *otherItem = [[NSTabViewItem alloc] initWithIdentifier:@"other"];
 	otherItem.label = NSLocalizedString(@"Other", @"");
-	otherItem.view = [self scrollWrapping:otherTab height:180];
+	otherItem.view = [self scrollWrapping:otherTab height:120];
 	[tabs addTabViewItem:otherItem];
 
 	// --- Tab: Icons (per-event icon overrides) ---
@@ -2978,6 +2979,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Network Path Costly Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_EXPENSIVE_KEY, @NO],
 		@[@"Network Path Constrained Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_CONSTRAINED_KEY, @NO],
 		@[@"Network Link Quality Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_QUALITY_KEY, @NO],
+		// Final API audit (18-ago-2026), batch 5 — moved here from the "Other" tab
+		// (correction, 19-ago-2026): notify toggles for new notification categories belong in
+		// Icons, not a General-style tab.
+		@[@"Network Adapter Being Removed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_DETACHING_KEY, @NO],
+		@[@"Network Service Order Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_SVC_ORDER_KEY, @NO],
+		@[@"Promiscuous Mode Enabled", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PROMISCUOUS_KEY, @NO],
+		@[@"Link Aggregation Member Status Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_BOND_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

@@ -395,11 +395,6 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		// Touchpad/Haptics/Motion above.
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_LIGHTBAR_KEY      title:NSLocalizedString(@"Lightbar color (read-only)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_PADDLES_KEY       title:NSLocalizedString(@"Xbox Elite paddles presence", @"") defaultOn:NO],
-		// Final API audit (18-ago-2026) — separate notify toggles for device classes distinct
-		// from GCController (see the header comment on HWG_GAMEPAD_NOTIFY_KEYBOARD_KEY above).
-		[self checkboxWithKey:HWG_GAMEPAD_NOTIFY_KEYBOARD_KEY    title:NSLocalizedString(@"Notify for game-recognized keyboards", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_GAMEPAD_NOTIFY_MOUSE_KEY       title:NSLocalizedString(@"Notify for game-recognized mice", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_GAMEPAD_NOTIFY_RACING_WHEEL_KEY title:NSLocalizedString(@"Notify for racing wheels", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];
@@ -428,6 +423,13 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:@[
 		@[@"Module Icon (Sidebar)", @"GamepadMonitor-Icon-Module"],
 		@[@"Game Controller", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_KEY],
+		// Final API audit (18-ago-2026) — moved here from General (correction, 19-ago-2026):
+		// notify on/off toggles for a genuinely new notification category belong in Icons, not
+		// General — General is only for field-visibility toggles on an existing notice. Reusing
+		// the module icon since no dedicated assets exist for these device classes.
+		@[@"Game-Recognized Keyboard", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_KEYBOARD_KEY, @NO],
+		@[@"Game-Recognized Mouse", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_MOUSE_KEY, @NO],
+		@[@"Racing Wheel", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_RACING_WHEEL_KEY, @YES],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

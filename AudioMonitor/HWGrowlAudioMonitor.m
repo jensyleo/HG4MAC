@@ -1352,12 +1352,6 @@ static AudioObjectPropertyAddress kAliveAddress = {
 		// connect events elsewhere in the app).
 		[self checkboxWithKey:HWG_AUDIO_SHOW_BITDEPTH_KEY title:NSLocalizedString(@"Bit depth", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_AUDIO_SHOW_LATENCY_KEY  title:NSLocalizedString(@"Latency", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_JACK_KEY   title:NSLocalizedString(@"Notify on headphone jack connect/disconnect", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DATASOURCE_KEY title:NSLocalizedString(@"Notify on audio source change (Speakers/Headphones/Line Out)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY title:NSLocalizedString(@"Notify when a device stops responding (no clean disconnect)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_MIC_MODE_KEY title:NSLocalizedString(@"Notify on microphone mode change (Standard/Voice Isolation/Wide Spectrum)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY title:NSLocalizedString(@"Notify for head-tracking headphones (AirPods Pro/Max, macOS 14+)", @"") defaultOn:NO],
-		[self checkboxWithKey:HWG_AUDIO_NOTIFY_MIDI_KEY title:NSLocalizedString(@"Notify on MIDI device connect/disconnect", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];
@@ -1395,6 +1389,16 @@ static AudioObjectPropertyAddress kAliveAddress = {
 		// monitor. OFF by default, unlike the rows above.
 		@[@"Sample Rate Changed", @"AudioMonitor-Icon-SampleRate", HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY, @NO],
 		@[@"Volume Critical", @"AudioMonitor-Icon-VolumeCritical", HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY, @NO],
+		// Final API audit (18-ago-2026) — moved here from General (correction, 19-ago-2026):
+		// each of these is a genuinely new notification category, not a field-visibility toggle
+		// on an existing one — same convention as Sample Rate Changed/Volume Critical above. No
+		// dedicated icon assets for these, so reusing the module icon.
+		@[@"Audio Jack Changed", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_JACK_KEY, @NO],
+		@[@"Audio Source Changed", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_DATASOURCE_KEY, @NO],
+		@[@"Device Stopped Responding", @"AudioMonitor-Icon-Off", HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY, @NO],
+		@[@"Microphone Mode Changed", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_MIC_MODE_KEY, @NO],
+		@[@"Head-Tracking Headphones", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY, @NO],
+		@[@"MIDI Device Connected/Disconnected", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_MIDI_KEY, @YES],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);

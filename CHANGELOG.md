@@ -49,6 +49,17 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Fixed: notify toggles misplaced in General tab instead of Icons (correction)
+Several new "enable/disable this notification" checkboxes added during this session's audit
+pass ended up on the General tab instead of Icons, violating this app's own established
+convention (notify toggles → Icons, field-visibility toggles → General). Moved across all 5
+modules touched this session: Gamepad (Keyboard/Mouse/Racing Wheel), Camera (Portrait Effect/
+Studio Light/Reactions/Background Replacement), Display (Sleep/Wake, Color Profile), Audio
+(Jack/Data Source/Device Stopped Responding/Microphone Mode/Head-Tracking/MIDI), and Network
+(Detaching/Service Order/Promiscuous/Bond — the dedicated "Other" tab created for these was
+reverted back to its empty placeholder). Field-visibility checkboxes that were correctly on
+General were left untouched.
+
 ### Added: Network Monitor — batch 5/N of 32 audit candidates (cross-platform) — module complete
 Adapter Detaching (reuses the existing Link dict, no new observation), service order changed
 (new watched key, distinct from PrimaryInterfaceChanged), baudrate for non-Ethernet interfaces,
