@@ -9,6 +9,7 @@
 #import "HWGIconPickerView.h"
 #import <CoreGraphics/CoreGraphics.h>
 #import <OSLog/OSLog.h>
+#import <ColorSync/ColorSync.h>
 
 // Detection is driven by CGDisplayRegisterReconfigurationCallback + CGGetOnlineDisplayList,
 // NOT NSScreen/NSApplicationDidChangeScreenParametersNotification. NSScreen only exposes
@@ -31,6 +32,23 @@
 #define HWG_DISPLAY_SHOW_COLORSPACE_KEY    @"HWGDisplayShowColorSpace"
 #define HWG_DISPLAY_SHOW_BUILTIN_KEY       @"HWGDisplayShowBuiltin"
 #define HWG_DISPLAY_SHOW_MIRROR_SOURCE_KEY @"HWGDisplayShowMirrorSource"
+// Final API audit (18-ago-2026) — all public CGDisplay/NSScreen APIs, all OFF by default.
+#define HWG_DISPLAY_SHOW_EDID_KEY  @"HWGDisplayShowEDID"
+#define HWG_DISPLAY_SHOW_VRR_KEY   @"HWGDisplayShowVRRRange"
+#define HWG_DISPLAY_SHOW_EDR_KEY   @"HWGDisplayShowEDRHeadroom"
+#define HWG_DISPLAY_SHOW_NOTCH_KEY @"HWGDisplayShowNotch"
+// Final API audit (18-ago-2026) — CGDisplayIsAsleep, per-display, diffed the same way as the
+// existing mode/role change detection: a display can sleep/wake without ever leaving
+// CGGetOnlineDisplayList (its CGDirectDisplayID stays valid the whole time), so this needs its
+// own signature tracked alongside displayModeSignatures/displayRoleSignatures, not a
+// connect/disconnect derivative.
+#define HWG_DISPLAY_NOTIFY_SLEEP_KEY @"HWGDisplayNotifySleep"
+// Final API audit (18-ago-2026) — kColorSyncDisplayDeviceProfilesNotification, a
+// NSDistributedNotificationCenter notification (not NSNotificationCenter — ColorSync posts
+// system-wide, not just to the current process), fires whenever ANY display's ICC profile
+// changes (System Settings > Displays > Color Profile, Night Shift/True Tone-driven profile
+// swaps, a color calibration tool, etc.).
+#define HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY @"HWGDisplayNotifyColorProfileChanged"
 
 // F34: notify when an already-connected display changes resolution or refresh rate (e.g.
 // user picks a different resolution in System Settings, or a TV renegotiates a different
@@ -85,6 +103,10 @@ static NSInteger HWGDisplayIntForKey(NSString *key, NSInteger def) {
 // starting/stopping Mirroring between two already-connected displays) can be detected without
 // a connect/disconnect having happened.
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *displayRoleSignatures;
+// Final API audit (18-ago-2026) — id -> last-known CGDisplayIsAsleep BOOL (boxed), same diffing
+// approach as displayRoleSignatures above, so a display sleeping/waking while it stays online
+// the whole time (never added/removed) can still be detected and reported.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *displaySleepSignatures;
 
 // Experimental early-detection polling state (see -pollForPhysicalVideoLink).
 @property (nonatomic, strong) NSTimer *earlyDetectionTimer;
@@ -109,6 +131,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 @synthesize displayNames;
 @synthesize displayModeSignatures;
 @synthesize displayRoleSignatures;
+@synthesize displaySleepSignatures;
 @synthesize earlyDetectionTimer;
 @synthesize earlyDetectionLastPollDate;
 @synthesize earlyDetectionIntervalLabel;
@@ -120,6 +143,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		displayNames = [NSMutableDictionary dictionary];
 		displayModeSignatures = [NSMutableDictionary dictionary];
 		displayRoleSignatures = [NSMutableDictionary dictionary];
+		displaySleepSignatures = [NSMutableDictionary dictionary];
 
 		// Baseline silently at launch — like Thermal/USB/WiFi — so the first real
 		// connect/disconnect after this point is the first thing ever notified.
@@ -128,6 +152,15 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		CGDisplayRegisterReconfigurationCallback(HWGDisplayReconfigurationCallback, (__bridge void *)self);
 
 		[self updateEarlyDetectionTimerState];
+
+		// Final API audit (18-ago-2026) — kColorSyncDisplayDeviceProfilesNotification is posted
+		// via NSDistributedNotificationCenter (system-wide, ColorSync's own mechanism), not
+		// NSNotificationCenter — confirmed against the header (`CSEXTERN CFStringRef
+		// kColorSyncDisplayDeviceProfilesNotification`).
+		[[NSDistributedNotificationCenter defaultCenter] addObserver:self
+															  selector:@selector(colorProfileChanged:)
+																  name:(__bridge NSString *)kColorSyncDisplayDeviceProfilesNotification
+																object:nil];
 	}
 	return self;
 }
@@ -135,6 +168,20 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 -(void)dealloc {
 	CGDisplayRemoveReconfigurationCallback(HWGDisplayReconfigurationCallback, (__bridge void *)self);
 	[earlyDetectionTimer invalidate];
+	[[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
+}
+
+#pragma mark Color profile change (final API audit, 18-ago-2026)
+
+-(void)colorProfileChanged:(NSNotification *)note {
+	if (!HWGDisplayBoolForKey(HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY, NO)) return;
+	[delegate notifyWithName:@"DisplayColorProfileChanged"
+						 title:NSLocalizedString(@"Display Color Profile Changed", @"")
+					   description:NSLocalizedString(@"A display's ICC color profile changed (System Settings, Night Shift/True Tone, or a calibration tool)", @"")
+						  icon:[self iconDataForConnected:YES]
+			  identifierString:@"HWGrowlDisplayColorProfile"
+				 contextString:nil
+						plugin:self];
 }
 
 #pragma mark Experimental early physical-link detection (off by default)
@@ -338,7 +385,57 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_MIRROR_SOURCE_KEY, NO) && CGDisplayIsInMirrorSet(displayID)) {
 		CGDirectDisplayID mirrorOf = CGDisplayMirrorsDisplay(displayID);
 		if (mirrorOf != kCGNullDirectDisplay) {
-			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Mirroring display ID:\t%u", @""), mirrorOf]];
+			// Final API audit (18-ago-2026) — CGDisplayIsInHWMirrorSet distinguishes GPU-level
+			// hardware mirroring (identical framebuffer driven at the hardware level, no extra
+			// compositing cost) from ordinary software mirroring (macOS re-renders/scales per
+			// display, e.g. when mirrored displays have different resolutions).
+			NSString *mirrorType = CGDisplayIsInHWMirrorSet(displayID) ? NSLocalizedString(@"hardware", @"") : NSLocalizedString(@"software", @"");
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Mirroring display ID:\t%u (%@)", @""), mirrorOf, mirrorType]];
+		}
+	}
+	// Final API audit (18-ago-2026) — CGDisplayVendorNumber/ModelNumber/SerialNumber, EDID-
+	// sourced, public since macOS 10.2. 0xFFFFFFFF is Apple's documented "unknown" sentinel for
+	// each of these three (e.g. built-in displays with no discrete EDID).
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_EDID_KEY, NO)) {
+		uint32_t vendor = CGDisplayVendorNumber(displayID);
+		uint32_t model = CGDisplayModelNumber(displayID);
+		uint32_t serial = CGDisplaySerialNumber(displayID);
+		if (vendor != 0xFFFFFFFF || model != 0xFFFFFFFF || serial != 0xFFFFFFFF) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"EDID (vendor/model/serial):\t%u / %u / %u", @""), vendor, model, serial]];
+		}
+	}
+	// Final API audit (18-ago-2026) — NSScreen.minimumRefreshInterval/maximumRefreshInterval,
+	// macOS 12+. Equal min/max means the display doesn't support variable refresh rate at all
+	// (documented behavior) — only shown when they differ, i.e. VRR/ProMotion is real here.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_VRR_KEY, NO) && matchingScreen) {
+		if (@available(macOS 12.0, *)) {
+			NSTimeInterval minInterval = matchingScreen.minimumRefreshInterval;
+			NSTimeInterval maxInterval = matchingScreen.maximumRefreshInterval;
+			if (minInterval > 0 && maxInterval > 0 && fabs(minInterval - maxInterval) > 0.0001) {
+				double maxHz = 1.0 / minInterval;
+				double minHz = 1.0 / maxInterval;
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Variable refresh rate:\t%.0f–%.0f Hz", @""), minHz, maxHz]];
+			}
+		}
+	}
+	// Final API audit (18-ago-2026) — current vs potential EDR headroom. A ratio near 1.0 means
+	// no HDR content is currently driving extra brightness; the "potential" value is the panel's
+	// ceiling regardless of what's on screen right now.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_EDR_KEY, NO) && matchingScreen) {
+		CGFloat currentEDR = matchingScreen.maximumExtendedDynamicRangeColorComponentValue;
+		CGFloat potentialEDR = matchingScreen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+		if (potentialEDR > 1.0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"HDR/EDR headroom:\t%.2fx current, %.2fx potential", @""), currentEDR, potentialEDR]];
+		}
+	}
+	// Final API audit (18-ago-2026) — NSScreen.safeAreaInsets, macOS 12+. A non-zero top inset
+	// on a built-in display is macOS's own signal for "there's a notch/camera housing here".
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_NOTCH_KEY, NO) && matchingScreen) {
+		if (@available(macOS 12.0, *)) {
+			NSEdgeInsets insets = matchingScreen.safeAreaInsets;
+			if (insets.top > 0) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Notch / camera housing:\t%.0fpt safe-area inset", @""), insets.top]];
+			}
 		}
 	}
 
@@ -443,6 +540,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 			NSString *signature = [self modeSignatureForDisplayID:cgID];
 			if (signature) displayModeSignatures[displayID] = signature;
 			displayRoleSignatures[displayID] = [self roleForDisplayID:cgID];
+			displaySleepSignatures[displayID] = @(CGDisplayIsAsleep(cgID));
 		}
 		return;
 	}
@@ -466,6 +564,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		NSString *signature = [self modeSignatureForDisplayID:cgID];
 		if (signature) displayModeSignatures[displayID] = signature;
 		displayRoleSignatures[displayID] = [self roleForDisplayID:cgID];
+		displaySleepSignatures[displayID] = @(CGDisplayIsAsleep(cgID));
 		NSString *extraInfo = [self extraInfoForDisplayID:cgID];
 		NSString *description = extraInfo ? [NSString stringWithFormat:@"%@\n%@", name, extraInfo] : name;
 		[self notifyConnected:YES displayID:displayID description:description];
@@ -476,6 +575,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[displayNames removeObjectForKey:displayID];
 		[displayModeSignatures removeObjectForKey:displayID];
 		[displayRoleSignatures removeObjectForKey:displayID];
+		[displaySleepSignatures removeObjectForKey:displayID];
 	}
 
 	// Neither added nor removed: still online, but its mode may have changed (user picked a
@@ -543,6 +643,32 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 									plugin:self];
 			}
 			displayRoleSignatures[displayID] = newRole;
+		}
+	}
+
+	// Final API audit (18-ago-2026) — CGDisplayIsAsleep, per-display, same unchanged-set
+	// diffing as mode/role above. A display sleeping (e.g. a monitor's own power-save timeout,
+	// or "Displays have separate spaces" auto-sleep on an idle secondary display) never leaves
+	// CGGetOnlineDisplayList, so this needs its own tracked signature.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_NOTIFY_SLEEP_KEY, YES)) {
+		NSMutableSet<NSNumber *> *unchanged = [newIDs mutableCopy];
+		[unchanged minusSet:added];
+		[unchanged minusSet:removed];
+		for (NSNumber *displayID in unchanged) {
+			CGDirectDisplayID cgID = [displayID unsignedIntValue];
+			BOOL newAsleep = CGDisplayIsAsleep(cgID);
+			NSNumber *oldAsleepNumber = displaySleepSignatures[displayID];
+			if (oldAsleepNumber && [oldAsleepNumber boolValue] != newAsleep) {
+				NSString *name = displayNames[displayID] ?: NSLocalizedString(@"External Display", @"");
+				[delegate notifyWithName:@"DisplaySleepChanged"
+									 title:newAsleep ? NSLocalizedString(@"Display Slept", @"") : NSLocalizedString(@"Display Woke", @"")
+							   description:name
+									  icon:[self iconDataForConnected:!newAsleep]
+						  identifierString:[NSString stringWithFormat:@"HWGrowlDisplaySleep-%@", displayID]
+							 contextString:nil
+									plugin:self];
+			}
+			displaySleepSignatures[displayID] = @(newAsleep);
 		}
 	}
 
@@ -626,13 +752,14 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	// BUG FIX (17-ago-2026): was 485 — same fixed-constant risk class confirmed live in Network
-	// Monitor's Wi-Fi tab. Bumped with generous margin after adding 5 rows (UUID/Physical
-	// size+PPI/Color space/Built-in/Mirror source).
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 660)];
+	// BUG FIX (18-ago-2026): was 660 — same fixed-constant risk class, bumped after adding 5
+	// more rows (EDID/VRR range/EDR headroom/Notch/Notify on sleep-wake). Auto Layout's
+	// top-anchor chain below drives the real size regardless — see the Gamepad Monitor note on
+	// this same constant class.
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 820)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 660)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 820)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -652,6 +779,15 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_ROTATION_KEY   title:NSLocalizedString(@"Rotation", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_MODE_CHANGE_KEY title:NSLocalizedString(@"Notify on resolution/refresh rate change", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_ROLE_CHANGE_KEY title:NSLocalizedString(@"Notify on role change (Main/Extended/Mirrored)", @"") defaultOn:YES],
+		// Final API audit (18-ago-2026) — OFF by default (this monitor already shows several
+		// fields per display), except Sleep/Wake which follows Mode/Role's ON-by-default
+		// convention (it's a genuinely new distinct event, not extra detail on an existing one).
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_EDID_KEY title:NSLocalizedString(@"EDID (vendor/model/serial)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_VRR_KEY  title:NSLocalizedString(@"Variable refresh rate range (ProMotion, macOS 12+)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_EDR_KEY  title:NSLocalizedString(@"HDR/EDR headroom", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_NOTCH_KEY title:NSLocalizedString(@"Notch / camera housing presence (macOS 12+)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_SLEEP_KEY title:NSLocalizedString(@"Notify on display sleep/wake", @"") defaultOn:YES],
+		[self checkboxWithKey:HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY title:NSLocalizedString(@"Notify on color profile change", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
@@ -792,21 +928,25 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"DisplayConnected", @"DisplayDisconnected", @"DisplayModeChanged", @"DisplayRoleChanged", @"DisplayLinkDetected", nil];
+	return [NSArray arrayWithObjects:@"DisplayConnected", @"DisplayDisconnected", @"DisplayModeChanged", @"DisplayRoleChanged", @"DisplayLinkDetected", @"DisplaySleepChanged", @"DisplayColorProfileChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Display Connected", @""), @"DisplayConnected",
 			  NSLocalizedString(@"Display Disconnected", @""), @"DisplayDisconnected",
 			  NSLocalizedString(@"Display Mode Changed", @""), @"DisplayModeChanged",
 			  NSLocalizedString(@"Display Role Changed", @""), @"DisplayRoleChanged",
-			  NSLocalizedString(@"Video Link Detected (Experimental)", @""), @"DisplayLinkDetected", nil];
+			  NSLocalizedString(@"Video Link Detected (Experimental)", @""), @"DisplayLinkDetected",
+			  NSLocalizedString(@"Display Slept/Woke", @""), @"DisplaySleepChanged",
+			  NSLocalizedString(@"Display Color Profile Changed", @""), @"DisplayColorProfileChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when an external display is connected", @""), @"DisplayConnected",
 			  NSLocalizedString(@"Sent when an external display is disconnected", @""), @"DisplayDisconnected",
 			  NSLocalizedString(@"Sent when an already-connected display's resolution or refresh rate changes", @""), @"DisplayModeChanged",
 			  NSLocalizedString(@"Sent when an already-connected display's role changes (becomes/stops being Main, or Mirroring starts/stops)", @""), @"DisplayRoleChanged",
-			  NSLocalizedString(@"Experimental: sent when a physical video link is detected before macOS assigns the display a role. Off by default — see Preferences.", @""), @"DisplayLinkDetected", nil];
+			  NSLocalizedString(@"Experimental: sent when a physical video link is detected before macOS assigns the display a role. Off by default — see Preferences.", @""), @"DisplayLinkDetected",
+			  NSLocalizedString(@"Sent when an already-connected display goes to sleep or wakes (e.g. its own power-save timeout)", @""), @"DisplaySleepChanged",
+			  NSLocalizedString(@"Sent when any display's ICC color profile changes — off by default", @""), @"DisplayColorProfileChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"DisplayConnected", @"DisplayDisconnected", nil];

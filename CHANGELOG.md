@@ -49,6 +49,18 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Display Monitor — 8 remaining audit candidates (cross-platform, no Intel-only content)
+Color profile change (via `NSDistributedNotificationCenter`, not the usual local one — ColorSync
+posts system-wide), EDID vendor/model/serial, VRR/ProMotion range, HDR/EDR headroom, notch/
+safe-area presence, per-display sleep/wake (new `DisplaySleepChanged` notification, its own
+diffed signature dictionary), and hardware-vs-software mirroring (folded into the existing
+mirror-source field). `CGDisplayModeCopyPixelEncoding` (bit depth) was found `API_DEPRECATED`
+since macOS 10.11 — not implemented. The `CGDisplayChangeSummaryFlags` enum-of-11-bits candidate
+is already covered by this module's existing derived events (Connected/Disconnected/ModeChanged/
+RoleChanged); no separate raw-bitmask diagnostic was added. All new fields off by default except
+Sleep/Wake (on, matching Mode/Role Changed's convention for genuinely new events). Pending live
+verification with external hardware — see `TODO.md`.
+
 ### Added: Camera Monitor — 6 remaining audit candidates (cross-platform, no Intel-only content)
 Portrait Effect / Studio Light / Reactions / Background Replacement (Control Center video
 effects, macOS 12/13/14/15+, observed via class-level KVO on `AVCaptureDevice`), System Preferred
