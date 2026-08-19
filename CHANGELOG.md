@@ -49,6 +49,20 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Network Monitor — batch 5/N of 32 audit candidates (cross-platform) — module complete
+Adapter Detaching (reuses the existing Link dict, no new observation), service order changed
+(new watched key, distinct from PrimaryInterfaceChanged), baudrate for non-Ethernet interfaces,
+promiscuous mode, and Link Aggregation (Bond) member status — first real use of the previously-
+placeholder "Other" tab. 25/32 candidates done.
+
+Investigated and confirmed the remaining 7: `NEVPNManager`/`NEFilterManager`/
+`NEDNSSettingsManager`/`NETransparentProxyManager` are all "this app's own configuration only"
+(confirmed via the NEFilterManager header's own documented disable-other-apps'-configs
+behavior) — VPN protocol/server detail, VPN config CRUD, content filter, encrypted DNS, and
+traffic-interception-extension status can't be read for third-party apps' configurations via
+public API, so they're not implemented. AVB/TSN and private Wi-Fi MAC rotation have no public
+API/event either. NetworkMonitor's 32-candidate audit is now considered complete.
+
 ### Added: Network Monitor — batch 4/N of 32 audit candidates (cross-platform)
 Path status/costly/constrained (`nw_path_monitor`, a new mechanism distinct from the reverted
 16-jul NWPathMonitor link-detection attempt — this reads facts SCDynamicStore/SCNetworkReachability

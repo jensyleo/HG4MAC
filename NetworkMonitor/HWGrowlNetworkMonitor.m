@@ -132,6 +132,26 @@
 // field on the existing Ethernet-speed-changed notification / General field.
 #define HWG_ETH_SHOW_MAXSPEED_KEY @"HWGEthernetShowMaxSupportedSpeed"
 
+// Final API audit (18-ago-2026), batch 5 — 5 more candidates:
+//   1. Adapter removed/Detaching — kSCPropNetLinkDetaching, a CFBoolean already living in the
+//      SAME "State:/Network/Interface/<if>/Link" dict this file already watches for Link
+//      up/down — no new observation mechanism, just a field this app never read before.
+//   2. Service reordered — new watched key (Setup:/Network/Global/IPv4's ServiceOrder array),
+//      distinct from PrimaryInterfaceChanged (batch 1 already covers when the PRIMARY changes;
+//      this covers the array's order changing even when the primary interface doesn't).
+//   3. Baudrate for non-Ethernet-media interfaces (utun/awdl/llw/etc.) — getifaddrs AF_LINK
+//      if_data, same call already used for the MAC address field (batch 3).
+//   4. Promiscuous mode — SIOCGIFFLAGS' IFF_PROMISC bit, polled the same way Ethernet speed is
+//      (no push notification for this flag).
+//   5. Link Aggregation (Bond) member status — SCBondInterfaceCopyStatus, polled (bond
+//      membership rarely changes outside of System Settings, and there's no push notification
+//      for member link-quality specifically).
+#define HWG_NET_NOTIFY_DETACHING_KEY  @"HWGNetworkNotifyAdapterDetaching"
+#define HWG_NET_NOTIFY_SVC_ORDER_KEY  @"HWGNetworkNotifyServiceOrderChanged"
+#define HWG_IP_SHOW_BAUDRATE_KEY      @"HWGIPShowBaudrate"
+#define HWG_NET_NOTIFY_PROMISCUOUS_KEY @"HWGNetworkNotifyPromiscuousMode"
+#define HWG_NET_NOTIFY_BOND_KEY        @"HWGNetworkNotifyBondMemberStatus"
+
 // Per-row "Notify?" checkboxes (Icons tab) — one per icon row, matching the USB/Thunderbolt/
 // Bluetooth/Volume Monitor pattern. Several rows share one underlying notifyWithName call
 // (5 Wi-Fi signal-level rows share AirportSignalChange; Ethernet/Other Interface share
@@ -313,6 +333,11 @@ typedef enum {
 @property (nonatomic, assign) NSInteger lastKnownPathQuality;
 @property (nonatomic, assign) BOOL haveLastKnownPathFlags;
 
+// Final API audit (18-ago-2026), batch 5.
+@property (nonatomic, strong) NSArray<NSString *> *lastKnownServiceOrder;
+@property (nonatomic, strong) NSMutableSet<NSString *> *lastKnownPromiscuousInterfaces;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *lastKnownBondMemberStatus;
+
 @end
 
 @implementation HWGrowlNetworkMonitor
@@ -344,6 +369,9 @@ typedef enum {
 @synthesize lastKnownPathConstrained;
 @synthesize lastKnownPathQuality;
 @synthesize haveLastKnownPathFlags;
+@synthesize lastKnownServiceOrder;
+@synthesize lastKnownPromiscuousInterfaces;
+@synthesize lastKnownBondMemberStatus;
 @synthesize ethernetClassificationCache;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
@@ -372,6 +400,8 @@ typedef enum {
 		self.lastReportedWifiInterfaceMode = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
 		self.lastKnownDHCPLeaseStartByInterface = [NSMutableDictionary dictionary];
+		self.lastKnownPromiscuousInterfaces = [NSMutableSet set];
+		self.lastKnownBondMemberStatus = [NSMutableDictionary dictionary];
 
 		[self startObserving];
 		[self startWiFiMonitoring];
@@ -917,7 +947,11 @@ typedef enum {
     // changes when the user switches Network Location — kSCPrefCurrentSet/
     // kSCDynamicStorePropSetupCurrentSet) added as literal keys; DHCP lease detail added as a
     // per-interface pattern, same shape as the existing Link pattern below.
-    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", @"State:/Network/Global/DNS", @"Setup:/System", @"Setup:", nil];
+    // Final API audit (18-ago-2026), batch 5 — "Setup:/Network/Global/IPv4" added for its
+    // ServiceOrder array (kSCPropNetServiceOrder), distinct from the already-watched
+    // "State:/Network/Global/IPv4" (which reflects the resolved PRIMARY interface, not the
+    // full ordered list of every service).
+    NSArray *watchedKeys = [NSArray arrayWithObjects:@"State:/Network/Global/IPv4", @"State:/Network/Global/IPv6", @"State:/Network/Global/DNS", @"Setup:/System", @"Setup:", @"Setup:/Network/Global/IPv4", nil];
     NSArray *watchedPatterns = [NSArray arrayWithObjects:@"State:/Network/Interface/[^/]+/Link", @"State:/Network/Interface/[^/]+/DHCP", nil];
 	if (!SCDynamicStoreSetNotificationKeys(dynStore,
                                           (__bridge CFArrayRef)watchedKeys,
@@ -1047,6 +1081,30 @@ typedef enum {
 	if (!ifname || ![self isWiredEthernetInterface:ifname]) return;
 	BOOL active = [self readLinkActiveForKey:key];
 	[self updateInterface:ifname forType:HWGEthernetInterface withStatus:@{@"Active": @(active)}];
+	// Final API audit (18-ago-2026), batch 5 — kSCPropNetLinkDetaching, same dict this method
+	// already reads for Active above — no new observation mechanism.
+	if ([self readLinkDetachingForKey:key]) [self reportAdapterDetaching:ifname];
+}
+
+// "Detaching" is a transient CFBoolean the kernel sets right before an adapter is torn down
+// (e.g. a USB-Ethernet dongle physically unplugged, or a virtual interface being destroyed) —
+// distinct from the Link/Active bit, which reflects carrier presence, not removal-in-progress.
+-(BOOL)readLinkDetachingForKey:(NSString *)key {
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)key);
+	if (!d) return NO;
+	NSDictionary *dict = (__bridge_transfer NSDictionary *)d;
+	return [dict[(__bridge NSString *)kSCPropNetLinkDetaching] boolValue];
+}
+
+-(void)reportAdapterDetaching:(NSString *)ifname {
+	if (![self boolForKey:HWG_NET_NOTIFY_DETACHING_KEY default:NO]) return;
+	[delegate notifyWithName:@"NetworkAdapterDetaching"
+						 title:NSLocalizedString(@"Network Adapter Being Removed", @"")
+					   description:ifname
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:[NSString stringWithFormat:@"HWGrowlAdapterDetaching-%@", ifname]
+				 contextString:nil
+						plugin:self];
 }
 
 #pragma mark DHCP lease / Hostname / Location (final API audit, 18-ago-2026, batch 1)
@@ -1137,6 +1195,38 @@ typedef enum {
 						plugin:self];
 }
 
+// "Setup:/Network/Global/IPv4"'s ServiceOrder array — distinct from PrimaryInterfaceChanged
+// (batch 1): dragging a lower-priority service above another in System Settings' service list
+// changes this array WITHOUT necessarily changing which interface is currently primary (that
+// only happens if the reordering also promotes a different currently-active service to #1).
+-(void)checkServiceOrderChanged {
+	if (![self boolForKey:HWG_NET_NOTIFY_SVC_ORDER_KEY default:NO]) return;
+	NSArray<NSString *> *newOrder = [self currentServiceOrder];
+	if (!newOrder) return;
+	NSArray<NSString *> *previous = self.lastKnownServiceOrder;
+	self.lastKnownServiceOrder = newOrder;
+	if (!previous || [previous isEqualToArray:newOrder]) return;
+	// Same SET of services, different ORDER — an add/remove is a different fact entirely
+	// (already implied by other events), so only fire for a genuine reorder.
+	if (![[NSSet setWithArray:previous] isEqualToSet:[NSSet setWithArray:newOrder]]) return;
+
+	[delegate notifyWithName:@"NetworkServiceOrderChanged"
+						 title:NSLocalizedString(@"Network Service Order Changed", @"")
+					   description:[newOrder componentsJoinedByString:@" → "]
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:@"HWGrowlServiceOrderChanged"
+				 contextString:nil
+						plugin:self];
+}
+
+-(NSArray<NSString *> *)currentServiceOrder {
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("Setup:/Network/Global/IPv4"));
+	if (!d) return nil;
+	NSArray *order = [(__bridge NSDictionary *)d objectForKey:(__bridge NSString *)kSCPropNetServiceOrder];
+	CFRelease(d);
+	return [order isKindOfClass:[NSArray class]] ? order : nil;
+}
+
 -(void)primeHostnameAndLocationState {
 	// Silent baseline — same "no notification for the pre-existing state" convention every
 	// other monitor follows — reuses the same read logic, just seeds the ivars first so the
@@ -1162,6 +1252,7 @@ typedef enum {
 			self.lastKnownLocationName = name;
 		}
 	}
+	self.lastKnownServiceOrder = [self currentServiceOrder];
 }
 
 #pragma mark General Internet reachability (SCNetworkReachability, final API audit, 18-ago-2026)
@@ -1678,6 +1769,105 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 					  contextString:nil
 								plugin:self];
 	}
+
+	// Final API audit (18-ago-2026), batch 5 — piggybacking on this same 20s timer since both
+	// are slow-changing, rare conditions with no push notification of their own (same reasoning
+	// as the Ethernet-speed poll above).
+	[self checkPromiscuousModeForKnownInterfaces];
+	[self checkBondMemberStatus];
+}
+
+// SIOCGIFFLAGS' IFF_PROMISC bit — no push notification exists for this flag, so it's polled.
+-(void)checkPromiscuousModeForKnownInterfaces {
+	if (![self boolForKey:HWG_NET_NOTIFY_PROMISCUOUS_KEY default:NO]) return;
+
+	NSMutableSet<NSString *> *currentlyPromiscuous = [NSMutableSet set];
+	struct ifaddrs *interfaces = NULL;
+	if (getifaddrs(&interfaces) == 0) {
+		NSMutableSet<NSString *> *seen = [NSMutableSet set];
+		for (struct ifaddrs *cur = interfaces; cur != NULL; cur = cur->ifa_next) {
+			NSString *ifname = [NSString stringWithUTF8String:cur->ifa_name];
+			if ([seen containsObject:ifname]) continue;   // getifaddrs lists one entry per address family; flags are per-interface
+			[seen addObject:ifname];
+			if (cur->ifa_flags & IFF_PROMISC) [currentlyPromiscuous addObject:ifname];
+		}
+		freeifaddrs(interfaces);
+	}
+
+	BOOL hadBaseline = [self boolForKey:@"HWGNetworkPromiscuousBaselined" default:NO];
+	NSMutableSet<NSString *> *newlyPromiscuous = [currentlyPromiscuous mutableCopy];
+	[newlyPromiscuous minusSet:self.lastKnownPromiscuousInterfaces];
+	if (hadBaseline) {
+		for (NSString *ifname in newlyPromiscuous) {
+			[delegate notifyWithName:@"NetworkPromiscuousModeChanged"
+								 title:NSLocalizedString(@"Promiscuous Mode Enabled", @"")
+							description:ifname
+								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+					  identifierString:[NSString stringWithFormat:@"HWGrowlPromiscuous-%@", ifname]
+						  contextString:nil
+									plugin:self];
+		}
+	}
+	self.lastKnownPromiscuousInterfaces = currentlyPromiscuous;
+	[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"HWGNetworkPromiscuousBaselined"];
+}
+
+// SCBondInterfaceCopyStatus — per-member aggregation status (kSCBondStatusOK vs. LinkInvalid/
+// NoPartner/NotInActiveGroup). Only meaningful if the user has actually configured a Bond
+// interface in System Settings (rare) — silently does nothing if SCBondInterfaceCopyAll
+// returns none, same "no-op when the feature doesn't apply" shape as other hardware-gated
+// fields in this app.
+-(void)checkBondMemberStatus {
+	if (![self boolForKey:HWG_NET_NOTIFY_BOND_KEY default:NO]) return;
+
+	SCPreferencesRef prefs = SCPreferencesCreate(kCFAllocatorDefault, CFSTR("HG4MAC-BondCheck"), NULL);
+	if (!prefs) return;
+	CFArrayRef bonds = SCBondInterfaceCopyAll(prefs);
+	if (bonds) {
+		CFIndex count = CFArrayGetCount(bonds);
+		for (CFIndex i = 0; i < count; i++) {
+			SCBondInterfaceRef bond = (SCBondInterfaceRef)CFArrayGetValueAtIndex(bonds, i);
+			SCBondStatusRef bondStatus = SCBondInterfaceCopyStatus(bond);
+			if (!bondStatus) continue;
+			CFArrayRef members = SCBondInterfaceGetMemberInterfaces(bond);
+			if (members) {
+				CFIndex memberCount = CFArrayGetCount(members);
+				for (CFIndex m = 0; m < memberCount; m++) {
+					SCNetworkInterfaceRef member = (SCNetworkInterfaceRef)CFArrayGetValueAtIndex(members, m);
+					NSString *bsdName = (__bridge NSString *)SCNetworkInterfaceGetBSDName(member);
+					if (!bsdName) continue;
+					CFDictionaryRef memberStatusDict = SCBondStatusGetInterfaceStatus(bondStatus, member);
+					if (!memberStatusDict) continue;
+					NSNumber *aggStatus = [(__bridge NSDictionary *)memberStatusDict objectForKey:(__bridge NSString *)kSCBondStatusDeviceAggregationStatus];
+					if (!aggStatus) continue;
+					NSNumber *previous = self.lastKnownBondMemberStatus[bsdName];
+					self.lastKnownBondMemberStatus[bsdName] = aggStatus;
+					if (previous && ![previous isEqualToNumber:aggStatus]) {
+						[delegate notifyWithName:@"NetworkBondMemberStatusChanged"
+											 title:NSLocalizedString(@"Link Aggregation Member Status Changed", @"")
+										description:[NSString stringWithFormat:@"%@: %@", bsdName, [self bondStatusLabel:[aggStatus integerValue]]]
+											  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+								  identifierString:[NSString stringWithFormat:@"HWGrowlBondMember-%@", bsdName]
+									  contextString:nil
+											plugin:self];
+					}
+				}
+			}
+			CFRelease(bondStatus);
+		}
+		CFRelease(bonds);
+	}
+	CFRelease(prefs);
+}
+
+-(NSString *)bondStatusLabel:(NSInteger)status {
+	switch (status) {
+		case kSCBondStatusOK:              return NSLocalizedString(@"OK", @"");
+		case kSCBondStatusLinkInvalid:      return NSLocalizedString(@"Link invalid (down/half-duplex/wrong speed)", @"");
+		case kSCBondStatusNoPartner:        return NSLocalizedString(@"No 802.3ad partner on switch port", @"");
+		case kSCBondStatusNotInActiveGroup: return NSLocalizedString(@"Not in the active aggregation group", @"");
+		default:                             return NSLocalizedString(@"Unknown", @"");
+	}
 }
 
 /* TO DO: REWRITE ME WITH BETTER METHODS OF GETTING INFO */
@@ -1928,6 +2118,27 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 		if (dl->sdl_alen != 6) continue;   // not an Ethernet-style 6-byte MAC (e.g. utun has none)
 		const unsigned char *mac = (const unsigned char *)LLADDR(dl);
 		result = [NSString stringWithFormat:@"%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]];
+		break;
+	}
+	freeifaddrs(interfaces);
+	return result;
+}
+
+// Final API audit (18-ago-2026), batch 5 — ifi_baudrate from the AF_LINK if_data struct, same
+// getifaddrs call as -macAddressForInterface: above. Meaningful mainly for interfaces with no
+// Ethernet media to read via SIOCGIFMEDIA (utun/awdl/llw/bridge*/etc.) — real Ethernet/Wi-Fi
+// already report their negotiated speed through -getMediaTypeForInterface:mode:/CWInterface,
+// so this is only shown when THAT path returned nothing.
+- (NSInteger)baudrateForInterface:(NSString *)interfaceString {
+	struct ifaddrs *interfaces = NULL;
+	if (getifaddrs(&interfaces) != 0) return 0;
+	NSInteger result = 0;
+	for (struct ifaddrs *cur = interfaces; cur != NULL; cur = cur->ifa_next) {
+		if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_LINK) continue;
+		if (strcmp(cur->ifa_name, [interfaceString UTF8String]) != 0) continue;
+		if (!cur->ifa_data) continue;
+		struct if_data *data = (struct if_data *)cur->ifa_data;
+		result = data->ifi_baudrate;
 		break;
 	}
 	freeifaddrs(interfaces);
@@ -2193,6 +2404,7 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	BOOL showMAC          = [self boolForKey:HWG_IP_SHOW_MAC_KEY default:NO];
 	BOOL showDNSSearch    = [self boolForKey:HWG_IP_SHOW_DNS_SEARCH_KEY default:NO];
 	BOOL showDHCPDetail   = [self boolForKey:HWG_IP_SHOW_DHCP_DETAIL_KEY default:NO];
+	BOOL showBaudrate     = [self boolForKey:HWG_IP_SHOW_BAUDRATE_KEY default:NO];
 	NSMutableSet<NSString *> *perInterfaceFieldsShownFor = [NSMutableSet set];
 
 	// F33: each field individually toggleable from Preferences → Modules → Network Monitor.
@@ -2256,6 +2468,17 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 			if (showDHCPDetail) {
 				NSString *lease = [self dhcpLeaseDetailForInterface:bsdName];
 				if (lease) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"DHCP lease:\t%@", @""), lease]];
+			}
+			// Final API audit (18-ago-2026), batch 5 — only when the interface has no
+			// Ethernet-media speed to show (utun/awdl/llw/bridge*/etc.); real Ethernet/Wi-Fi
+			// already report their negotiated speed via their own dedicated fields.
+			if (showBaudrate) {
+				NSString *mode = nil;
+				NSString *mediaSpeed = [self getMediaTypeForInterface:bsdName mode:&mode];
+				if (!mediaSpeed) {
+					NSInteger baudrate = [self baudrateForInterface:bsdName];
+					if (baudrate > 0) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Baudrate:\t%ld bps", @""), (long)baudrate]];
+				}
 			}
 		}
 	}
@@ -2375,6 +2598,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
                 [observer checkComputerNameChanged];
             else if ([key isEqualToString:@"Setup:"])
                 [observer checkLocationChanged];
+            else if ([key isEqualToString:@"Setup:/Network/Global/IPv4"])
+                [observer checkServiceOrderChanged];
         }];
     }
 }
@@ -2616,7 +2841,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	// it clips/hides the newly added rows below the fold, same failure class as the Icons tab
 	// bug fixed 17-ago-2026). Bumped after adding 6 rows (Config method/MTU/Type/MAC/DNS search/
 	// DHCP detail).
-	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 430)];
+	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 465)];
 	NSTextField *ipHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ipTab addSubview:ipHeader];
 	[NSLayoutConstraint activateConstraints:@[
@@ -2638,11 +2863,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_IP_SHOW_MAC_KEY           title:NSLocalizedString(@"MAC address", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_IP_SHOW_DNS_SEARCH_KEY    title:NSLocalizedString(@"DNS search domains", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_IP_SHOW_DHCP_DETAIL_KEY   title:NSLocalizedString(@"DHCP lease detail (start/expiration/server)", @"") defaultOn:NO],
+		// Final API audit (18-ago-2026), batch 5 — OFF by default.
+		[self checkboxWithKey:HWG_IP_SHOW_BAUDRATE_KEY      title:NSLocalizedString(@"Baudrate (interfaces without Ethernet media)", @"") defaultOn:NO],
 	] inView:ipTab belowView:ipHeader gap:10];
 
 	NSTabViewItem *ipItem = [[NSTabViewItem alloc] initWithIdentifier:@"ip"];
 	ipItem.label = NSLocalizedString(@"IP", @"");
-	ipItem.view = [self scrollWrapping:ipTab height:430];
+	ipItem.view = [self scrollWrapping:ipTab height:465];
 	[tabs addTabViewItem:ipItem];
 
 	// --- Tab: VPN (F34 #4 — split out of "Other" 22-jul-2026, own dedicated tab) ---
@@ -2676,22 +2903,25 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	vpnItem.view = [self scrollWrapping:vpnTab height:120];
 	[tabs addTabViewItem:vpnItem];
 
-	// --- Tab: Other (catch-all reserved for FUTURE fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
-	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
-	NSTextField *otherPlaceholder = [NSTextField labelWithString:
-		NSLocalizedString(@"No additional fields yet.", @"")];
-	otherPlaceholder.textColor = [NSColor secondaryLabelColor];
-	otherPlaceholder.font = [NSFont systemFontOfSize:12];
-	otherPlaceholder.translatesAutoresizingMaskIntoConstraints = NO;
-	[otherTab addSubview:otherPlaceholder];
+	// --- Tab: Other (catch-all for fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
+	// Final API audit (18-ago-2026), batch 5 — first real use of this previously-empty tab.
+	NSView *otherTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 180)];
+	NSTextField *otherHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notifications", @"")];
+	[otherTab addSubview:otherHeader];
 	[NSLayoutConstraint activateConstraints:@[
-		[otherPlaceholder.topAnchor     constraintEqualToAnchor:otherTab.topAnchor constant:16],
-		[otherPlaceholder.leadingAnchor  constraintEqualToAnchor:otherTab.leadingAnchor constant:16],
+		[otherHeader.topAnchor     constraintEqualToAnchor:otherTab.topAnchor constant:16],
+		[otherHeader.leadingAnchor  constraintEqualToAnchor:otherTab.leadingAnchor constant:16],
 	]];
+	[self layoutRows:@[
+		[self checkboxWithKey:HWG_NET_NOTIFY_DETACHING_KEY title:NSLocalizedString(@"Notify when an adapter is being removed (Detaching)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_NET_NOTIFY_SVC_ORDER_KEY title:NSLocalizedString(@"Notify when the network service order changes", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_NET_NOTIFY_PROMISCUOUS_KEY title:NSLocalizedString(@"Notify when promiscuous mode is enabled (packet capture)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_NET_NOTIFY_BOND_KEY title:NSLocalizedString(@"Notify on Link Aggregation (Bond) member status change", @"") defaultOn:NO],
+	] inView:otherTab belowView:otherHeader gap:10];
 
 	NSTabViewItem *otherItem = [[NSTabViewItem alloc] initWithIdentifier:@"other"];
 	otherItem.label = NSLocalizedString(@"Other", @"");
-	otherItem.view = [self scrollWrapping:otherTab height:120];
+	otherItem.view = [self scrollWrapping:otherTab height:180];
 	[tabs addTabViewItem:otherItem];
 
 	// --- Tab: Icons (per-event icon overrides) ---
@@ -2779,7 +3009,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", @"WifiHostAPModeChanged", @"NetworkPathStatusChanged", @"NetworkPathExpensiveChanged", @"NetworkPathConstrainedChanged", @"NetworkPathQualityChanged", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", @"WifiHostAPModeChanged", @"NetworkPathStatusChanged", @"NetworkPathExpensiveChanged", @"NetworkPathConstrainedChanged", @"NetworkPathQualityChanged", @"NetworkAdapterDetaching", @"NetworkServiceOrderChanged", @"NetworkPromiscuousModeChanged", @"NetworkBondMemberStatusChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -2804,7 +3034,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Network Path Status Changed", @""), @"NetworkPathStatusChanged",
 			  NSLocalizedString(@"Network Path Costly Changed", @""), @"NetworkPathExpensiveChanged",
 			  NSLocalizedString(@"Network Path Constrained Changed", @""), @"NetworkPathConstrainedChanged",
-			  NSLocalizedString(@"Network Link Quality Changed", @""), @"NetworkPathQualityChanged", nil];
+			  NSLocalizedString(@"Network Link Quality Changed", @""), @"NetworkPathQualityChanged",
+			  NSLocalizedString(@"Network Adapter Being Removed", @""), @"NetworkAdapterDetaching",
+			  NSLocalizedString(@"Network Service Order Changed", @""), @"NetworkServiceOrderChanged",
+			  NSLocalizedString(@"Promiscuous Mode Enabled", @""), @"NetworkPromiscuousModeChanged",
+			  NSLocalizedString(@"Link Aggregation Member Status Changed", @""), @"NetworkBondMemberStatusChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -2829,7 +3063,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when the current network path's status changes (Satisfied/Unsatisfied/Satisfiable) — off by default", @""), @"NetworkPathStatusChanged",
 			  NSLocalizedString(@"Sent when the current network path becomes/stops being costly (e.g. an iPhone Personal Hotspot) — off by default", @""), @"NetworkPathExpensiveChanged",
 			  NSLocalizedString(@"Sent when the current network path becomes/stops being constrained (Low Data Mode) — off by default", @""), @"NetworkPathConstrainedChanged",
-			  NSLocalizedString(@"Sent when the current network path's link quality measurement changes (Minimal/Moderate/Good) — off by default", @""), @"NetworkPathQualityChanged", nil];
+			  NSLocalizedString(@"Sent when the current network path's link quality measurement changes (Minimal/Moderate/Good) — off by default", @""), @"NetworkPathQualityChanged",
+			  NSLocalizedString(@"Sent right before a network adapter is torn down (e.g. a USB-Ethernet dongle unplugged) — off by default", @""), @"NetworkAdapterDetaching",
+			  NSLocalizedString(@"Sent when the network service priority order changes without the primary interface changing — off by default", @""), @"NetworkServiceOrderChanged",
+			  NSLocalizedString(@"Sent when an interface enters promiscuous (packet capture) mode — off by default", @""), @"NetworkPromiscuousModeChanged",
+			  NSLocalizedString(@"Sent when a Link Aggregation (Bond) member's status changes — off by default, only applies if a Bond is configured", @""), @"NetworkBondMemberStatusChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];
