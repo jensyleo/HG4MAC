@@ -49,6 +49,13 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Network Monitor — batch 3/N of 32 audit candidates (cross-platform)
+IP config method (DHCP/Manual), MTU, decoded interface type (`SCNetworkInterfaceGetInterfaceType`),
+MAC address (non-Wi-Fi), DNS search domains, and full DHCP lease detail (start/expiration/
+server) — all static fields on the existing IPAddressChange notification. Also fixed a real
+layout bug: the IP tab's `scrollWrapping:height:` was undersized for its new row count (same bug
+class as the Icons tab fix on 17-ago), bumped 230→430. 15/32 candidates done — see `TODO.md`.
+
 ### Added: Network Monitor — batch 2/N of 32 audit candidates (cross-platform)
 Wi-Fi country/region code, transmit power, hardware address, interface mode — all from
 `CWInterface`, same class as the existing Band/Generation/Security fields. Also: Wi-Fi Host AP/

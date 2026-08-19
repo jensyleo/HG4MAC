@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <ifaddrs.h>
+#include <net/if_dl.h>
 
 /* @"Link Status" == 1 seems to mean disconnected */
 #define AIRPORT_DISCONNECTED 1
@@ -79,6 +80,16 @@
 // changed shows an arrow, not every interface every time any one of them changes.
 #define HWG_IP_SHOW_OLDNEW_KEY       @"HWGIPShowOldNewAddress"
 #define HWG_IP_USE_FRIENDLY_KEY      @"HWGIPUseFriendlyNames"
+
+// Final API audit (18-ago-2026), batch 3 — all per-interface static fields added to the same
+// IPAddressChange notification these already appear on. OFF by default (this notification
+// already shows several lines per interface).
+#define HWG_IP_SHOW_CONFIG_METHOD_KEY @"HWGIPShowConfigMethod"
+#define HWG_IP_SHOW_MTU_KEY           @"HWGIPShowMTU"
+#define HWG_IP_SHOW_TYPE_KEY          @"HWGIPShowDecodedType"
+#define HWG_IP_SHOW_MAC_KEY           @"HWGIPShowMACAddress"
+#define HWG_IP_SHOW_DNS_SEARCH_KEY    @"HWGIPShowDNSSearchDomains"
+#define HWG_IP_SHOW_DHCP_DETAIL_KEY   @"HWGIPShowDHCPLeaseDetail"
 
 // F34 #4: VPN connected/disconnected. OFF by default per user request — this is a NEW
 // notification, not a visibility toggle on an existing one. Detection is a HEURISTIC (see
@@ -1663,6 +1674,111 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 // active interfaces on DIFFERENT subnets (e.g. Wi-Fi + a USB-Ethernet dock), the Global
 // dictionary silently drops every gateway except the primary one. Per-service lookup
 // reports every interface's own gateway, matching what's actually shown for each interface.
+#pragma mark IP config method / MTU / MAC / decoded type / DNS search domains / DHCP lease detail
+#pragma mark (final API audit, 18-ago-2026, batch 3)
+
+// Same enumeration shape as -gatewaysByInterfaceForProtocol: above, reading ConfigMethod
+// ("DHCP"/"Manual"/"BOOTP"/etc.) from each service's own State:.../IPv4 dict instead of Router.
+- (NSDictionary *)ipv4ConfigMethodsByInterface {
+	NSMutableDictionary *result = [NSMutableDictionary dictionary];
+	CFArrayRef keys = SCDynamicStoreCopyKeyList(dynStore, CFSTR("State:/Network/Service/[^/]+/IPv4"));
+	if (!keys) return result;
+	CFIndex count = CFArrayGetCount(keys);
+	for (CFIndex i = 0; i < count; i++) {
+		CFStringRef key = CFArrayGetValueAtIndex(keys, i);
+		CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, key);
+		if (!d) continue;
+		NSDictionary *dict = (__bridge NSDictionary *)d;
+		NSString *ifname = dict[@"InterfaceName"];
+		NSString *method = dict[(__bridge NSString *)kSCPropNetIPv4ConfigMethod];
+		if (ifname && method) result[ifname] = method;
+		CFRelease(d);
+	}
+	CFRelease(keys);
+	return result;
+}
+
+// SIOCGIFMTU — the same ioctl/socket idiom already used by -getMediaTypeForInterface:mode:
+// above for SIOCGIFMEDIA.
+- (NSInteger)mtuForInterface:(NSString *)interfaceString {
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) return 0;
+	struct ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, [interfaceString UTF8String], sizeof(ifr.ifr_name) - 1);
+	NSInteger mtu = 0;
+	if (ioctl(s, SIOCGIFMTU, &ifr) == 0) mtu = ifr.ifr_mtu;
+	close(s);
+	return mtu;
+}
+
+// AF_LINK entry in getifaddrs() carries the interface's hardware (MAC) address — same call
+// already used for IPv4/IPv6 collection above, just filtering for a different sa_family.
+- (NSString *)macAddressForInterface:(NSString *)interfaceString {
+	struct ifaddrs *interfaces = NULL;
+	if (getifaddrs(&interfaces) != 0) return nil;
+	NSString *result = nil;
+	for (struct ifaddrs *cur = interfaces; cur != NULL; cur = cur->ifa_next) {
+		if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_LINK) continue;
+		if (strcmp(cur->ifa_name, [interfaceString UTF8String]) != 0) continue;
+		struct sockaddr_dl *dl = (struct sockaddr_dl *)cur->ifa_addr;
+		if (dl->sdl_alen != 6) continue;   // not an Ethernet-style 6-byte MAC (e.g. utun has none)
+		const unsigned char *mac = (const unsigned char *)LLADDR(dl);
+		result = [NSString stringWithFormat:@"%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]];
+		break;
+	}
+	freeifaddrs(interfaces);
+	return result;
+}
+
+// SCNetworkInterface's decoded type (kSCNetworkInterfaceTypeEthernet/IEEE80211/Bond/etc.) for
+// the BSD name — a real decode of what ifconfig just calls "en0", not this app's own
+// Wi-Fi-vs-Ethernet-vs-Other heuristic used elsewhere (-isWiredEthernetInterface: etc.), which
+// stays unchanged; this is purely an additional display field.
+- (NSString *)decodedInterfaceTypeForBSDName:(NSString *)bsdName {
+	NSArray *allInterfaces = (__bridge_transfer NSArray *)SCNetworkInterfaceCopyAll();
+	for (id ifaceObj in allInterfaces) {
+		SCNetworkInterfaceRef iface = (__bridge SCNetworkInterfaceRef)ifaceObj;
+		NSString *thisBSDName = (__bridge NSString *)SCNetworkInterfaceGetBSDName(iface);
+		if (![thisBSDName isEqualToString:bsdName]) continue;
+		NSString *type = (__bridge NSString *)SCNetworkInterfaceGetInterfaceType(iface);
+		return type;
+	}
+	return nil;
+}
+
+- (NSDictionary *)globalDNSSearchDomains {
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, CFSTR("State:/Network/Global/DNS"));
+	if (!d) return nil;
+	NSArray *domains = [(__bridge NSDictionary *)d objectForKey:(__bridge NSString *)kSCPropNetDNSSearchDomains];
+	CFRelease(d);
+	return [domains isKindOfClass:[NSArray class]] ? @{@"domains": domains} : nil;
+}
+
+// Full DHCP lease dict (start/length/server) for a BSD interface — a richer read of the same
+// "State:/Network/Interface/<if>/DHCP" key already used for the renewal-detection candidate
+// (batch 1's -handleDHCPKeyChanged:), here just for DISPLAY on the IP notification.
+- (NSString *)dhcpLeaseDetailForInterface:(NSString *)bsdName {
+	NSString *key = [NSString stringWithFormat:@"State:/Network/Interface/%@/DHCP", bsdName];
+	CFDictionaryRef d = SCDynamicStoreCopyValue(dynStore, (__bridge CFStringRef)key);
+	if (!d) return nil;
+	NSDictionary *dict = (__bridge NSDictionary *)d;
+	NSDate *start = dict[@"LeaseStartTime"];
+	NSNumber *length = dict[@"LeaseLength"];
+	NSString *server = dict[@"ServerID"] ?: dict[@"ServerIdentifier"];
+	CFRelease(d);
+	if (!start && !length && !server) return nil;
+
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+	if (start) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"since %@", @""), start]];
+	if (length) {
+		NSDate *expiration = [start dateByAddingTimeInterval:[length doubleValue]];
+		if (expiration) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"expires %@", @""), expiration]];
+	}
+	if (server) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"server %@", @""), server]];
+	return [parts count] ? [parts componentsJoinedByString:@", "] : nil;
+}
+
 - (NSDictionary *)gatewaysByInterfaceForProtocol:(NSString *)proto {
 	NSMutableDictionary *result = [NSMutableDictionary dictionary];
 	NSString *pattern = [NSString stringWithFormat:@"State:/Network/Service/[^/]+/%@", proto];
@@ -1866,6 +1982,15 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	[self checkProxyConfigChanged];
 	NSDictionary *ipv4Gateways = [self gatewaysByInterfaceForProtocol:@"IPv4"];
 	NSDictionary *ipv6Gateways = [self gatewaysByInterfaceForProtocol:@"IPv6"];
+	// Final API audit (18-ago-2026), batch 3.
+	NSDictionary *ipv4ConfigMethods = [self ipv4ConfigMethodsByInterface];
+	BOOL showConfigMethod = [self boolForKey:HWG_IP_SHOW_CONFIG_METHOD_KEY default:NO];
+	BOOL showMTU          = [self boolForKey:HWG_IP_SHOW_MTU_KEY default:NO];
+	BOOL showType         = [self boolForKey:HWG_IP_SHOW_TYPE_KEY default:NO];
+	BOOL showMAC          = [self boolForKey:HWG_IP_SHOW_MAC_KEY default:NO];
+	BOOL showDNSSearch    = [self boolForKey:HWG_IP_SHOW_DNS_SEARCH_KEY default:NO];
+	BOOL showDHCPDetail   = [self boolForKey:HWG_IP_SHOW_DHCP_DETAIL_KEY default:NO];
+	NSMutableSet<NSString *> *perInterfaceFieldsShownFor = [NSMutableSet set];
 
 	// F33: each field individually toggleable from Preferences → Modules → Network Monitor.
 	// Routability still drives icon choice below regardless of what's actually displayed.
@@ -1905,6 +2030,31 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 		// still gets its gateway reported.
 		NSString *gw = ipv4Gateways[bsdName];
 		if (gw && showGateway) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Gateway:\t%@", @""), gw]];
+		// Final API audit (18-ago-2026), batch 3 — per-interface, so only added ONCE per BSD
+		// name even though an interface can appear in both the IPv4 and IPv6 loops.
+		if (![perInterfaceFieldsShownFor containsObject:bsdName]) {
+			[perInterfaceFieldsShownFor addObject:bsdName];
+			if (showConfigMethod) {
+				NSString *method = ipv4ConfigMethods[bsdName];
+				if (method) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"IP config method:\t%@", @""), method]];
+			}
+			if (showMTU) {
+				NSInteger mtu = [self mtuForInterface:bsdName];
+				if (mtu > 0) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"MTU:\t%ld", @""), (long)mtu]];
+			}
+			if (showType) {
+				NSString *type = [self decodedInterfaceTypeForBSDName:bsdName];
+				if (type) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface type:\t%@", @""), type]];
+			}
+			if (showMAC) {
+				NSString *mac = [self macAddressForInterface:bsdName];
+				if (mac) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"MAC address:\t%@", @""), mac]];
+			}
+			if (showDHCPDetail) {
+				NSString *lease = [self dhcpLeaseDetailForInterface:bsdName];
+				if (lease) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"DHCP lease:\t%@", @""), lease]];
+			}
+		}
 	}
 	[self.previousIPv4ByInterface removeObjectsForKeys:[self.previousIPv4ByInterface.allKeys filteredArrayUsingPredicate:
 		[NSPredicate predicateWithBlock:^BOOL(NSString *key, NSDictionary *bindings) { return ![seenIPv4Interfaces containsObject:key]; }]]];
@@ -1928,6 +2078,15 @@ static int cidrBitsFromNetmaskV4(uint32_t netmask) {
 	}
 	[self.previousIPv6ByInterface removeObjectsForKeys:[self.previousIPv6ByInterface.allKeys filteredArrayUsingPredicate:
 		[NSPredicate predicateWithBlock:^BOOL(NSString *key, NSDictionary *bindings) { return ![seenIPv6Interfaces containsObject:key]; }]]];
+
+	// Final API audit (18-ago-2026), batch 3 — global (system-wide), not per-interface, so
+	// added once at the end rather than inside either loop above.
+	if (showDNSSearch) {
+		NSArray *domains = [self globalDNSSearchDomains][@"domains"];
+		if ([domains count]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"DNS search domains:\t%@", @""), [domains componentsJoinedByString:@", "]]];
+		}
+	}
 
 	NSString *combined = [lines componentsJoinedByString:@"\n"];
 	BOOL hasAddressesNow = ([ipv4Info count] + [ipv6Info count]) > 0;
@@ -2245,7 +2404,12 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[tabs addTabViewItem:ethItem];
 
 	// --- Tab: IP ---
-	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 230)];
+	// BUG FIX (18-ago-2026): was 230 — same fixed-constant risk class as elsewhere in this app
+	// (-scrollWrapping:height: forces the CONTENT view to exactly this height, so undersizing
+	// it clips/hides the newly added rows below the fold, same failure class as the Icons tab
+	// bug fixed 17-ago-2026). Bumped after adding 6 rows (Config method/MTU/Type/MAC/DNS search/
+	// DHCP detail).
+	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 430)];
 	NSTextField *ipHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ipTab addSubview:ipHeader];
 	[NSLayoutConstraint activateConstraints:@[
@@ -2259,11 +2423,19 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_IP_SHOW_NONROUTABLE_KEY title:NSLocalizedString(@"\"(non-routable)\" tag on self-assigned addresses", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_IP_USE_FRIENDLY_KEY     title:NSLocalizedString(@"Use friendly interface names (vs. en0/en5…)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_IP_SHOW_OLDNEW_KEY      title:NSLocalizedString(@"Show old → new address when it changes", @"") defaultOn:YES],
+		// Final API audit (18-ago-2026), batch 3 — OFF by default (this notification already
+		// shows several fields per interface).
+		[self checkboxWithKey:HWG_IP_SHOW_CONFIG_METHOD_KEY title:NSLocalizedString(@"IP config method (DHCP/Manual)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_IP_SHOW_MTU_KEY           title:NSLocalizedString(@"MTU", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_IP_SHOW_TYPE_KEY          title:NSLocalizedString(@"Decoded interface type", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_IP_SHOW_MAC_KEY           title:NSLocalizedString(@"MAC address", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_IP_SHOW_DNS_SEARCH_KEY    title:NSLocalizedString(@"DNS search domains", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_IP_SHOW_DHCP_DETAIL_KEY   title:NSLocalizedString(@"DHCP lease detail (start/expiration/server)", @"") defaultOn:NO],
 	] inView:ipTab belowView:ipHeader gap:10];
 
 	NSTabViewItem *ipItem = [[NSTabViewItem alloc] initWithIdentifier:@"ip"];
 	ipItem.label = NSLocalizedString(@"IP", @"");
-	ipItem.view = [self scrollWrapping:ipTab height:230];
+	ipItem.view = [self scrollWrapping:ipTab height:430];
 	[tabs addTabViewItem:ipItem];
 
 	// --- Tab: VPN (F34 #4 — split out of "Other" 22-jul-2026, own dedicated tab) ---
