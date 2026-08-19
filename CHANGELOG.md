@@ -49,6 +49,15 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Camera Monitor — 6 remaining audit candidates (cross-platform, no Intel-only content)
+Portrait Effect / Studio Light / Reactions / Background Replacement (Control Center video
+effects, macOS 12/13/14/15+, observed via class-level KVO on `AVCaptureDevice`), System Preferred
+Camera (macOS 13+), and max supported frame rate. All off by default, plain General-tab
+checkboxes. `AVCaptureDevice.isSuspended` from the same audit entry was found to not exist on
+macOS at all (`API_UNAVAILABLE` there, iOS/tvOS/visionOS only per the SDK header) — not
+implemented, documented as an audit inaccuracy in `TODO.md`. Pending live verification (toggling
+Control Center effects, testing with a second camera) — see `TODO.md`.
+
 ### Fixed: every Icons tab "Notify?" checkbox had zero width (silently unclickable)
 Reported live as "the last 2 Thermal Monitor checkboxes don't respond to clicks" — the first
 attempted diagnosis (bumping Thermal Monitor's fixed pane height, since that's the bug class
