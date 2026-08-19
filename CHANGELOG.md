@@ -46,6 +46,18 @@ top gap). Added 8pt of bottom padding to the closing constraint; confirmed via t
 `HWGIconPickerView`'s frame grew accordingly (365→373pt) and the last row now has real
 clearance instead of sitting at the exact computed edge.
 
+### Fixed: Thermal Monitor's Icons tab still needed to scroll by a hair to reach the last row
+Reported a third time after both fixes above. Did the actual arithmetic instead of guessing
+again: the Icons tab's real content height is 432pt (header + 7 rows + padding), but the pane's
+outer fixed frame was 460pt — after subtracting the tab header's own chrome (~25-30pt), the
+VISIBLE area was only marginally larger than the content, right at the edge where scrolling
+either barely wasn't needed or barely was, depending on rounding — and scrolling to reach a row
+this close to the fold is exactly the kind of interaction most likely to misfire. Bumped the
+pane's fixed height from 460 to 560 (visible area now ~530pt vs 432pt needed — over 100pt of
+real margin, scrolling provably not required at all). Confirmed via the harness:
+`scroll.documentView.frame.size.height` (432) vs `scroll.contentSize.height` (604 in a 650pt
+test window) — content fits with room to spare.
+
 ### Added: Thunderbolt Monitor — real GPU identity, location and VRAM in eGPU notifications
 `MTLDevice.name/location/isRemovable/recommendedMaxWorkingSetSize` (Metal.framework, public,
 macOS 10.11+). The existing eGPU detection (PCI class-code "Display Controller") only ever knew
