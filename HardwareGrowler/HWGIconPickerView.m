@@ -241,10 +241,18 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 		previous = imageView;
 	}
 
+	// BUG FIX (18-ago-2026) — this used to pin the LAST row flush to self.bottomAnchor with
+	// zero margin (`== self.bottomAnchor`, no slack at all). Every caller then sizes this
+	// view's frame from -fittingSize, which resolves that equality as tightly as Auto Layout's
+	// internal rounding allows — any fractional-point rounding shortfall clips exactly the
+	// bottom row and nothing else, which matches the reported symptom precisely: only the
+	// LAST row(s) in a list ever failed to respond to clicks, never an earlier one (those have
+	// real margin below them from the next row's own top gap). A few points of bottom padding
+	// costs nothing and removes the whole class of "last row only" clipping.
 	[NSLayoutConstraint activateConstraints:@[
 		[header.topAnchor constraintEqualToAnchor:self.topAnchor],
 		[header.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-		[previous.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+		[self.bottomAnchor constraintEqualToAnchor:previous.bottomAnchor constant:8],
 	]];
 
 	self.rows = rows;

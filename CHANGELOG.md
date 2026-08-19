@@ -34,6 +34,18 @@ with an explicit `widthAnchor` constraint (20pt) in the shared component — cor
 monitor at once, not just Thermal Monitor. Verified via the same harness: frame went from
 `{0, 16}` to `{20, 16}` across all rows.
 
+### Fixed: Icons tab's LAST row could sit flush against a zero-margin computed edge
+After the width fix above, the report persisted for the same two rows specifically — same
+harness, this time dumping `HWGIconPickerView`'s own closing constraint: the view's bottom was
+pinned to the last row's image view with a bare equality (`== self.bottomAnchor`, no slack),
+so every caller sizing this view from `-fittingSize` gets the tightest possible height with
+zero margin below the final row. Any fractional-point Auto Layout rounding there clips exactly
+the bottom row and only the bottom row — matching the reported pattern precisely (always the
+LAST items, never an earlier one, since earlier rows have real margin from the next row's own
+top gap). Added 8pt of bottom padding to the closing constraint; confirmed via the harness that
+`HWGIconPickerView`'s frame grew accordingly (365→373pt) and the last row now has real
+clearance instead of sitting at the exact computed edge.
+
 ### Added: Thunderbolt Monitor — real GPU identity, location and VRAM in eGPU notifications
 `MTLDevice.name/location/isRemovable/recommendedMaxWorkingSetSize` (Metal.framework, public,
 macOS 10.11+). The existing eGPU detection (PCI class-code "Display Controller") only ever knew
