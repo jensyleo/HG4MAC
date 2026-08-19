@@ -9,6 +9,21 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Printer Monitor — Rejecting Jobs event + Capabilities field
+Both read from the same `printer-type` `CUPS_PRINTER_*` bitmask CUPS already returns (no extra
+IPP round-trip): `CUPS_PRINTER_REJECTING` (a printer can start/stop accepting jobs at any time —
+admin pause, or auto-reject after repeated errors) gets its own Icons-tab event with a dedicated
+icon; Color/Duplex/Staple/Fax/MFP capability bits are a static General-tab field on the existing
+"Printer Connected" notification. The "job name/owner" candidate from the audit was already
+covered by the existing Print Job Started/Finished feature — no new work needed there.
+
+### Fixed: Thermal Monitor's Icons tab checkboxes not clickable after adding 2 new rows
+Same class of bug already documented above (fixed-height Preferences panes not growing when
+rows are added) — reported live immediately after the CPU Power Limited / Hardware Thermal
+Warning Level rows were added. Bumped the pane's fixed dimensions (340→460, scroll guess
+200→320) with generous margin, per this project's own established convention: never assume a
+panel "still fits" after adding a row.
+
 ### Added: Thunderbolt Monitor — real GPU identity, location and VRAM in eGPU notifications
 `MTLDevice.name/location/isRemovable/recommendedMaxWorkingSetSize` (Metal.framework, public,
 macOS 10.11+). The existing eGPU detection (PCI class-code "Display Controller") only ever knew

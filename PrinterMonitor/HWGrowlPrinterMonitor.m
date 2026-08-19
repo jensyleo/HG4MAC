@@ -79,6 +79,17 @@
 #define HWG_PRINTER_SUPPLY_LOW_THRESHOLD 10
 #define HWG_PRINTER_SUPPLY_RECOVER_THRESHOLD 15
 
+// Final API audit (18-ago-2026) — both read from the same "printer-type" bitmask CUPS already
+// returns as a dest option (decimal string), parsed with the documented CUPS_PRINTER_* bits
+// from cups.h — no extra IPP round-trip beyond what HWGCollectPrinterInfo already does per
+// tick. CUPS_PRINTER_REJECTING is a real STATE (a printer can start/stop accepting jobs at
+// any time — e.g. an admin pausing the queue, or a queue auto-rejecting after repeated
+// errors), so it gets its own Icons-tab event like error-state/default-changed above.
+// Color/Duplex/Staple/Fax/MFP are static per-printer CAPABILITIES, so they're a General-tab
+// field on the existing "Printer Connected" notification instead.
+#define HWG_PRINTER_NOTIFY_REJECTING_KEY @"HWGPrinterNotifyRejectingJobs"
+#define HWG_PRINTER_SHOW_CAPABILITIES_KEY @"HWGPrinterShowCapabilities"
+
 static BOOL HWGPrinterBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -97,6 +108,9 @@ static BOOL HWGPrinterBoolForKey(NSString *key, BOOL def) {
 // Added 17-ago-2026 (feedback del usuario) — printer-is-shared, already sitting in the same
 // per-dest options dict every other field above reads, no extra IPP round-trip needed.
 @property (nonatomic, assign) BOOL isShared;
+// Final API audit (18-ago-2026) — parsed from the "printer-type" CUPS_PRINTER_* bitmask.
+@property (nonatomic, assign) BOOL isRejectingJobs;
+@property (nonatomic, copy) NSString *capabilitiesSummary;   // e.g. "Color, Duplex, MFP" or nil
 @end
 @implementation HWGPrinterInfo
 @end
@@ -113,6 +127,20 @@ static NSString *HWGConnectionTypeForDeviceURI(NSString *uri) {
 		return NSLocalizedString(@"Network", @"");
 	}
 	return [scheme length] ? [scheme uppercaseString] : nil;
+}
+
+// Final API audit (18-ago-2026) — human-readable summary of the documented CUPS_PRINTER_*
+// capability bits, in the same "printer-type" bitmask CUPS_PRINTER_REJECTING (below) reads.
+// Only lists the capabilities a user would recognize; omits bits like CUPS_PRINTER_COMMANDS or
+// CUPS_PRINTER_VARIABLE that don't map to anything meaningful in a notification.
+static NSString *HWGPrinterCapabilitiesSummary(int printerType) {
+	NSMutableArray<NSString*> *caps = [NSMutableArray array];
+	if (printerType & CUPS_PRINTER_COLOR)  [caps addObject:NSLocalizedString(@"Color", @"")];
+	if (printerType & CUPS_PRINTER_DUPLEX) [caps addObject:NSLocalizedString(@"Duplex", @"")];
+	if (printerType & CUPS_PRINTER_STAPLE) [caps addObject:NSLocalizedString(@"Staple", @"")];
+	if (printerType & CUPS_PRINTER_FAX)    [caps addObject:NSLocalizedString(@"Fax", @"")];
+	if (printerType & CUPS_PRINTER_MFP)    [caps addObject:NSLocalizedString(@"Scanner (MFP)", @"")];
+	return caps.count ? [caps componentsJoinedByString:@", "] : nil;
 }
 
 // Reads every CUPS destination (what `lpstat -p` also reads — see BUG FIX note above for why
@@ -142,6 +170,11 @@ static NSDictionary<NSString*, HWGPrinterInfo*> *HWGCollectPrinterInfo(void) {
 
 		const char *isShared = cupsGetOption("printer-is-shared", dest->num_options, dest->options);
 		info.isShared = (isShared && strcmp(isShared, "true") == 0);
+
+		const char *printerTypeStr = cupsGetOption("printer-type", dest->num_options, dest->options);
+		int printerType = printerTypeStr ? atoi(printerTypeStr) : 0;
+		info.isRejectingJobs = (printerType & CUPS_PRINTER_REJECTING) != 0;
+		info.capabilitiesSummary = HWGPrinterCapabilitiesSummary(printerType);
 
 		result[info.name] = info;
 	}
@@ -333,6 +366,10 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 @property (nonatomic, assign) NSUInteger pollTickCount;
 @property (nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*> *lastKnownSupplyLow;
 
+// Final API audit (18-ago-2026) — last known CUPS_PRINTER_REJECTING state per printer, same
+// OK↔problem transition pattern as -lastKnownStateReasons above.
+@property (nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*> *lastKnownRejectingJobs;
+
 @end
 
 @implementation HWGrowlPrinterMonitor
@@ -345,6 +382,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		self.lastKnownStateReasons = [NSMutableDictionary dictionary];
 		self.lastKnownJobStates = [NSMutableDictionary dictionary];
 		self.lastKnownSupplyLow = [NSMutableDictionary dictionary];
+		self.lastKnownRejectingJobs = [NSMutableDictionary dictionary];
 		// Baseline silently at launch — never announce printers/states/defaults that were
 		// already present.
 		NSDictionary<NSString*, HWGPrinterInfo*> *info = HWGCollectPrinterInfo();
@@ -352,6 +390,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		for (HWGPrinterInfo *p in [info allValues]) {
 			self.lastKnownStateReasons[p.name] = p.stateReasons;
 			if (p.isDefault) self.lastKnownDefaultPrinter = p.name;
+			self.lastKnownRejectingJobs[p.name] = @(p.isRejectingJobs);
 		}
 		[self updateWatcherState];
 	}
@@ -372,7 +411,8 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_ERROR_KEY, NO) ||
 		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_DEFAULT_KEY, NO) ||
 		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_JOB_KEY, NO) ||
-		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_SUPPLY_KEY, NO);
+		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_SUPPLY_KEY, NO) ||
+		HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_REJECTING_KEY, NO);
 	if (enabled && !_pollTimer) {
 		self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:HWG_PRINTER_POLL_INTERVAL
 														   target:self
@@ -425,6 +465,11 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 			if (HWGPrinterBoolForKey(HWG_PRINTER_SHOW_SHARED_KEY, NO)) {
 				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Shared: %@", @""), info.isShared ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
 			}
+			// Final API audit (18-ago-2026) — printer-type CUPS_PRINTER_* bits, same options
+			// dict already read above.
+			if (HWGPrinterBoolForKey(HWG_PRINTER_SHOW_CAPABILITIES_KEY, NO) && info.capabilitiesSummary) {
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Capabilities: %@", @""), info.capabilitiesSummary]];
+			}
 
 			if (HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_CONNECT_KEY, YES)) {
 				[delegate notifyWithName:@"PrinterConnected"
@@ -448,7 +493,10 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 
 		// Re-arm error-state tracking for removed printers (a later reinsertion should be
 		// evaluated fresh, not compared against a stale reading from before it disappeared).
-		for (NSString *name in removed) [self.lastKnownStateReasons removeObjectForKey:name];
+		for (NSString *name in removed) {
+			[self.lastKnownStateReasons removeObjectForKey:name];
+			[self.lastKnownRejectingJobs removeObjectForKey:name];
+		}
 
 		self.knownPrinterNames = currentNames;
 	}
@@ -480,6 +528,37 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 										plugin:self];
 			}
 			self.lastKnownStateReasons[info.name] = info.stateReasons;
+		}
+	}
+
+	// Final API audit (18-ago-2026) — CUPS_PRINTER_REJECTING, same OK↔problem transition
+	// pattern as the error-state block above, tracked separately since a printer can reject
+	// jobs (queue paused by an admin, or CUPS auto-rejecting after repeated errors) while its
+	// state-reasons stay "none" — this is a distinct signal, not folded into that block.
+	if (HWGPrinterBoolForKey(HWG_PRINTER_NOTIFY_REJECTING_KEY, NO)) {
+		for (HWGPrinterInfo *info in [currentInfo allValues]) {
+			NSNumber *previousRejecting = self.lastKnownRejectingJobs[info.name];
+			BOOL wasRejecting = previousRejecting ? previousRejecting.boolValue : NO;
+			if (info.isRejectingJobs && !wasRejecting) {
+				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:NO] TIFFRepresentation];
+				[delegate notifyWithName:@"PrinterRejectingJobs"
+										 title:NSLocalizedString(@"Printer Is Rejecting Jobs", @"")
+								 description:info.name
+										  icon:iconData
+						  identifierString:[NSString stringWithFormat:@"HWGrowlPrinterRejecting-%@", info.name]
+							  contextString:nil
+										plugin:self];
+			} else if (!info.isRejectingJobs && wasRejecting) {
+				NSData *iconData = [[HWGrowlPrinterMonitor printerIconConnected:YES] TIFFRepresentation];
+				[delegate notifyWithName:@"PrinterRejectingJobs"
+										 title:NSLocalizedString(@"Printer Is Accepting Jobs Again", @"")
+								 description:info.name
+										  icon:iconData
+						  identifierString:[NSString stringWithFormat:@"HWGrowlPrinterRejecting-%@", info.name]
+							  contextString:nil
+										plugin:self];
+			}
+			self.lastKnownRejectingJobs[info.name] = @(info.isRejectingJobs);
 		}
 	}
 
@@ -937,9 +1016,11 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	NSButton *connRow      = [self checkboxWithKey:HWG_PRINTER_SHOW_CONNECTION_KEY title:NSLocalizedString(@"Connection type (USB/Network/Bluetooth)", @"") defaultOn:NO];
 	// Added 17-ago-2026 — printer-is-shared, same options dict already read.
 	NSButton *sharedRow    = [self checkboxWithKey:HWG_PRINTER_SHOW_SHARED_KEY title:NSLocalizedString(@"Sharing status", @"") defaultOn:NO];
+	// Final API audit (18-ago-2026) — printer-type capability bits (Color/Duplex/Staple/Fax/MFP).
+	NSButton *capabilitiesRow = [self checkboxWithKey:HWG_PRINTER_SHOW_CAPABILITIES_KEY title:NSLocalizedString(@"Capabilities (color, duplex, fax, scanner…)", @"") defaultOn:NO];
 	NSView *previous = infoHeader;
 	CGFloat gap = 10;
-	for (NSButton *r in @[locationRow, makeModelRow, connRow, sharedRow]) {
+	for (NSButton *r in @[locationRow, makeModelRow, connRow, sharedRow, capabilitiesRow]) {
 		[v addSubview:r];
 		[NSLayoutConstraint activateConstraints:@[
 			[r.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:gap],
@@ -964,7 +1045,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	// same risk class already confirmed live in Network Monitor's Wi-Fi tab (adding a row here
 	// without growing this pushes it past the document view's own bounds, where it renders but
 	// doesn't respond to clicks). Bumped with margin after adding the "Sharing status" row.
-	generalItem.view = [self scrollWrapping:v height:460];
+	generalItem.view = [self scrollWrapping:v height:500];
 	[tabs addTabViewItem:generalItem];
 
 	// --- Tab: Icons ---
@@ -985,6 +1066,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		@[@"Default Printer Changed", @"PrinterMonitor-Icon-DefaultChanged", HWG_PRINTER_NOTIFY_DEFAULT_KEY, @NO],
 		@[@"Print Job Started / Finished", @"PrinterMonitor-Icon-JobStatus", HWG_PRINTER_NOTIFY_JOB_KEY, @NO],
 		@[@"Supply Low (Toner/Ink)", @"PrinterMonitor-Icon-SupplyLow", HWG_PRINTER_NOTIFY_SUPPLY_KEY, @NO],
+		@[@"Rejecting Jobs", @"PrinterMonitor-Icon-Rejecting", HWG_PRINTER_NOTIFY_REJECTING_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -1035,7 +1117,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"PrinterConnected", @"PrinterDisconnected", @"PrinterError", @"PrinterDefaultChanged", @"PrintJobStarted", @"PrintJobFinished", @"PrinterSupplyLow", nil];
+	return [NSArray arrayWithObjects:@"PrinterConnected", @"PrinterDisconnected", @"PrinterError", @"PrinterDefaultChanged", @"PrintJobStarted", @"PrintJobFinished", @"PrinterSupplyLow", @"PrinterRejectingJobs", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Printer Connected", @""), @"PrinterConnected",
@@ -1044,7 +1126,8 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 			  NSLocalizedString(@"Default Printer Changed", @""), @"PrinterDefaultChanged",
 			  NSLocalizedString(@"Print Job Started", @""), @"PrintJobStarted",
 			  NSLocalizedString(@"Print Job Finished", @""), @"PrintJobFinished",
-			  NSLocalizedString(@"Printer Supply Low", @""), @"PrinterSupplyLow", nil];
+			  NSLocalizedString(@"Printer Supply Low", @""), @"PrinterSupplyLow",
+			  NSLocalizedString(@"Printer Rejecting Jobs", @""), @"PrinterRejectingJobs", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a printer is added to the system (F34)", @""), @"PrinterConnected",
@@ -1053,7 +1136,8 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 			  NSLocalizedString(@"Sent when the system's default printer changes", @""), @"PrinterDefaultChanged",
 			  NSLocalizedString(@"Sent when a print job starts processing", @""), @"PrintJobStarted",
 			  NSLocalizedString(@"Sent when a print job completes or is canceled", @""), @"PrintJobFinished",
-			  NSLocalizedString(@"Sent when a printer's toner/ink level drops to 10% or below", @""), @"PrinterSupplyLow", nil];
+			  NSLocalizedString(@"Sent when a printer's toner/ink level drops to 10% or below", @""), @"PrinterSupplyLow",
+			  NSLocalizedString(@"Sent when a printer starts or stops rejecting new jobs", @""), @"PrinterRejectingJobs", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray array];

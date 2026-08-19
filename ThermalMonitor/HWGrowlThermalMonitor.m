@@ -380,10 +380,10 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 
 	// BUG FIX (17-ago-2026): was 300 — same fixed-constant risk class confirmed live in Network
 	// Monitor's Wi-Fi tab. Bumped with margin after adding 1 row (Low Power Mode correlation).
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 460)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 460)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notify when entering:", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -524,7 +524,7 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 	iconPicker.frame = NSMakeRect(iconsPad, iconsPad + iconsHeaderH + iconsGap, iconsWidth, iconPickerH);
 	[iconsContent addSubview:iconPicker];
 
-	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 200)];
+	NSScrollView *iconsScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 560, 320)];
 	iconsScroll.hasVerticalScroller = YES;
 	iconsScroll.autohidesScrollers = YES;
 	iconsScroll.drawsBackground = NO;
