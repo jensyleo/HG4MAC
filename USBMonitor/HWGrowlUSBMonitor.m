@@ -688,7 +688,7 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		@[@"Wireless", @"USB-TypeWireless", [HWG_USB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Wireless"]],
 		@[@"Connected (generic)", @"USB-On", [HWG_USB_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other"]],
 		@[@"Disconnected (generic)", @"USB-Off", HWG_USB_NOTIFY_DISCONNECT_KEY],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

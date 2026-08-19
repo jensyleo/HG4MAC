@@ -80,11 +80,11 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 
 @implementation HWGIconPickerView
 
-- (instancetype)initWithIconSpecs:(NSArray<NSArray *> *)iconSpecs {
+- (instancetype)initWithIconSpecs:(NSArray<NSArray *> *)iconSpecs width:(CGFloat)width {
 	self = [super initWithFrame:NSZeroRect];
 	if (self) {
 		self.translatesAutoresizingMaskIntoConstraints = NO;
-		[self buildWithIconSpecs:iconSpecs];
+		[self buildWithIconSpecs:iconSpecs width:width];
 	}
 	return self;
 }
@@ -98,7 +98,7 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 	[[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
 }
 
-- (void)buildWithIconSpecs:(NSArray<NSArray *> *)iconSpecs {
+- (void)buildWithIconSpecs:(NSArray<NSArray *> *)iconSpecs width:(CGFloat)pickerWidth {
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Icons", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
 	header.textColor = [NSColor secondaryLabelColor];
@@ -115,17 +115,33 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 	// keeps every row's button columns aligned (they all still share this one width) while
 	// guaranteeing no label ever needs the "…"/tooltip fallback.
 	CGFloat nameColumnWidth = 150;
-	// BUG FIX (18-ago-2026) — this column width used to grow completely unbounded to fit
-	// whatever the widest label happened to be. Confirmed via AXUIElementCopyElementAtPosition
-	// that an unusually long label (43 chars, vs. the ~28-char longest label anywhere else in
-	// the app at the time) pushed every row's "Notify?" checkbox — positioned AFTER this column
-	// plus 3 fixed-width buttons — past this view's own width entirely, landing it outside the
-	// actual clickable/scrollable content area, where clicks and hit-tests resolve to the
-	// enclosing NSScrollView instead of the checkbox. Capping this keeps every row's controls
-	// provably within bounds regardless of what label text a future feature adds; a label
-	// beyond the cap now truncates with "…" (the existing toolTip/lineBreakMode fallback below
-	// already handles that) instead of silently breaking every checkbox in the tab.
-	CGFloat const kMaxNameColumnWidth = 240;
+	// BUG FIX (18-ago-2026, made structural 19-ago-2026) — this column width used to grow
+	// completely unbounded to fit whatever the widest label happened to be, then (18-ago) was
+	// capped at a hardcoded 240pt. That hardcoded cap turned out to be its own bug: 240pt plus
+	// the other fixed-width columns (image + 3 buttons + the notify checkbox + all the gaps
+	// between them, kFixedColumnsWidth below) adds up to MORE than the actual width every
+	// caller allocates this view (their `iconsWidth`, typically ~528pt) — so any row whose
+	// label needs anywhere near the 240pt cap pushes the LAST column (the "Notify?" checkbox)
+	// past this view's own real width. Confirmed live via AXUIElementCopyElementAtPosition
+	// (19-ago-2026, Camera Monitor): a real screen click exactly on a checkbox's own reported
+	// position resolved to the enclosing NSScrollView's AXScrollArea, not the checkbox — the
+	// checkbox was being painted (Auto Layout doesn't clip child rendering) but sat outside the
+	// NSClipView's real, hit-testable document bounds. This is why the bug kept recurring across
+	// different monitors/labels each time a new notify row was added: 240 was never actually
+	// safe, it just happened not to be reached by whichever labels existed at the time.
+	//
+	// Fixed structurally instead of re-guessing a bigger constant: the cap is now DERIVED from
+	// the real `width` the caller passes to -initWithIconSpecs:width: (every caller already
+	// computes this as its own `iconsWidth` before constructing this view), so it can never
+	// exceed what actually fits, for this or any future caller/label — no more picking a number
+	// and hoping.
+	CGFloat const kFixedColumnsWidth = 32 /*image*/ + 10 /*gap*/ + 10 /*gap*/ + 70 /*change*/ + 8 /*gap*/ + 70 /*system*/ + 8 /*gap*/ + 70 /*reset*/ + 16 /*gap*/ + 20 /*notify*/;
+	CGFloat const kMinNameColumnWidth = 80;
+	// `pickerWidth <= 0` is a defensive fallback only (e.g. a future caller that forgets to
+	// pass a real width) — every current caller passes its real `iconsWidth`.
+	CGFloat const kMaxNameColumnWidth = (pickerWidth > 0)
+		? MAX(kMinNameColumnWidth, pickerWidth - kFixedColumnsWidth)
+		: 240;
 	for (NSArray *spec in iconSpecs) {
 		// Measure with an actual NSTextField (not NSString sizeWithAttributes:), then read its
 		// real -intrinsicContentSize — the two didn't agree closely enough in practice ("Other
@@ -258,6 +274,16 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 			[notifyBox.centerYAnchor constraintEqualToAnchor:imageView.centerYAnchor],
 			[notifyBox.leadingAnchor constraintEqualToAnchor:resetButton.trailingAnchor constant:16],
 			[notifyBox.widthAnchor constraintEqualToConstant:20],
+			// Structural safety net (19-ago-2026): even though kMaxNameColumnWidth above is now
+			// derived from this view's real width so the columns should always fit, this
+			// explicit trailing bound means a future change to a button width/gap constant
+			// (without updating kFixedColumnsWidth to match) fails LOUDLY — Auto Layout logs a
+			// constraint-breakage warning to the console and visibly clips/misplaces the row —
+			// instead of silently laying the checkbox out past the clipped, hit-testable area
+			// where it looks fine but never responds to a click. Priority just below required
+			// (999) so it wins over nothing else here but still reports as a real break rather
+			// than being silently dropped as unsatisfiable.
+			[notifyBox.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor],
 		]];
 
 		previous = imageView;

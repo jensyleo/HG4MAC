@@ -1468,7 +1468,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		@[@"Unmounted (generic)", @"DisksVolumes-Eject", [HWG_VOLUME_NOTIFY_KEY_PREFIX stringByAppendingString:@"Other_Unmounted"]],
 		@[@"Ejected Unsafely", @"Device-Critical", HWG_VOLUME_NOTIFY_UNSAFE_EJECT_KEY, @NO],
 		@[@"Low Disk Space (5% free)", @"Device-Critical", HWG_VOLUME_NOTIFY_LOW_SPACE_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

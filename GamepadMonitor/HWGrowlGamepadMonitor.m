@@ -430,7 +430,7 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		@[@"Game-Recognized Keyboard", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_KEYBOARD_KEY, @NO],
 		@[@"Game-Recognized Mouse", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_MOUSE_KEY, @NO],
 		@[@"Racing Wheel", @"GamepadMonitor-Icon", HWG_GAMEPAD_NOTIFY_RACING_WHEEL_KEY, @YES],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

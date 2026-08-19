@@ -642,7 +642,7 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 		@[@"Studio Light Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_STUDIO_LIGHT_KEY, @NO],
 		@[@"Reactions Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_REACTIONS_KEY, @NO],
 		@[@"Background Replacement Changed", @"CameraMonitor-Icon", HWG_CAMERA_SHOW_BG_REPLACEMENT_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

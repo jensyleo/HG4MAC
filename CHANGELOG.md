@@ -49,6 +49,21 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Fixed (structurally): Icons tab "Notify?" checkbox could land outside the clickable area
+Root cause found with certainty this time: the 18-ago fix capped the name column at a fixed
+240pt to keep long labels from pushing the row's controls out of bounds — but 240pt plus the
+row's other fixed-width columns (image + 3 buttons + notify checkbox + gaps, 314pt) adds up to
+554pt, while every module only gives this view ~528pt to work with. The checkbox still painted
+correctly (Auto Layout doesn't clip rendering) but sat outside the enclosing NSScrollView's real
+clipped/hit-testable bounds — invisible until a label got close enough to the cap to trigger it,
+which is why this kept recurring on a new notification each time. `HWGIconPickerView`'s
+initializer now requires the caller's real width (`initWithIconSpecs:width:`) and derives the
+name-column cap from it mathematically, so the columns can never exceed the available space
+regardless of future labels; added a defensive trailing constraint so any future change to a
+button width fails loudly instead of silently. All 13 call sites updated. Verified live with
+real simulated mouse clicks (not just accessibility actions) on first/middle/last rows of
+Camera Monitor's Icons tab.
+
 ### Fixed: notify toggles misplaced in General tab instead of Icons (correction)
 Several new "enable/disable this notification" checkboxes added during this session's audit
 pass ended up on the General tab instead of Icons, violating this app's own established

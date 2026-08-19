@@ -1399,7 +1399,7 @@ static AudioObjectPropertyAddress kAliveAddress = {
 		@[@"Microphone Mode Changed", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_MIC_MODE_KEY, @NO],
 		@[@"Head-Tracking Headphones", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY, @NO],
 		@[@"MIDI Device Connected/Disconnected", @"AudioMonitor-Icon", HWG_AUDIO_NOTIFY_MIDI_KEY, @YES],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

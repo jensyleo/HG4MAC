@@ -894,7 +894,7 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		// No dedicated icon assets for these, so reusing the module icon.
 		@[@"Display Sleep/Wake", @"HWGPrefsDisplay-Module", HWG_DISPLAY_NOTIFY_SLEEP_KEY, @YES],
 		@[@"Display Color Profile Changed", @"HWGPrefsDisplay-Module", HWG_DISPLAY_NOTIFY_COLORPROFILE_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

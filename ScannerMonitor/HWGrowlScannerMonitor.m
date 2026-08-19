@@ -544,7 +544,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		// Confirmed live: no checkbox in this tab responded to clicks until this was shortened.
 		@[@"Scan Started/Finished", @"ScannerMonitor-Icon-ScanStatus", HWG_SCANNER_NOTIFY_SCANSTATUS_KEY, @NO],
 		@[@"Feeder State Changed", @"ScannerMonitor-Icon-AdfState", HWG_SCANNER_NOTIFY_ADFSTATE_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

@@ -411,7 +411,7 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 		@[@"Serious", @"Thermal-Serious", HWG_THERMAL_NOTIFY_SERIOUS_KEY, @YES],
 		@[@"Critical", @"Thermal-Critical", HWG_THERMAL_NOTIFY_CRITICAL_KEY, @YES],
 		@[@"Dark Wake Thermal Emergency", @"Thermal-DarkWakeEmergency", HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

@@ -2986,7 +2986,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Network Service Order Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_SVC_ORDER_KEY, @NO],
 		@[@"Promiscuous Mode Enabled", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PROMISCUOUS_KEY, @NO],
 		@[@"Link Aggregation Member Status Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_BOND_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

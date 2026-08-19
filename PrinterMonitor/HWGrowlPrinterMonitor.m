@@ -1067,7 +1067,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		@[@"Print Job Started / Finished", @"PrinterMonitor-Icon-JobStatus", HWG_PRINTER_NOTIFY_JOB_KEY, @NO],
 		@[@"Supply Low (Toner/Ink)", @"PrinterMonitor-Icon-SupplyLow", HWG_PRINTER_NOTIFY_SUPPLY_KEY, @NO],
 		@[@"Rejecting Jobs", @"PrinterMonitor-Icon-Rejecting", HWG_PRINTER_NOTIFY_REJECTING_KEY, @NO],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

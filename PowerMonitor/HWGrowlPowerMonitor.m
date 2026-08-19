@@ -1420,9 +1420,9 @@ static void powerSourceChanged(void *context) {
 	[iconSpecs addObject:@[NSLocalizedString(@"Display(s) Sleep", @""), @"Power-LowPowerMode", HWG_POWER_NOTIFY_SCREENS_SLEEP_KEY, @NO]];
 	[iconSpecs addObject:@[NSLocalizedString(@"Display(s) Wake", @""), @"Power-AdapterChanged", HWG_POWER_NOTIFY_SCREENS_WAKE_KEY, @NO]];
 
-	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:iconSpecs];
-	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	CGFloat iconPickerW = width - 2 * pad;
+	HWGIconPickerView *iconPicker = [[HWGIconPickerView alloc] initWithIconSpecs:iconSpecs width:iconPickerW];
+	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconPickerW, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;
 

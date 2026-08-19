@@ -661,7 +661,7 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		@[@"Signal — Fair", @"Bluetooth-Signal-2"],
 		@[@"Signal — Good", @"Bluetooth-Signal-3"],
 		@[@"Signal — Excellent", @"Bluetooth-Signal-4"],
-	]];
+	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
 	CGFloat iconPickerH = iconPicker.fittingSize.height;

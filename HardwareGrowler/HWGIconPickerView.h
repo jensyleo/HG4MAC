@@ -57,7 +57,17 @@ NS_ASSUME_NONNULL_BEGIN
 //                                                       checkbox's initial state lies about
 //                                                       actual behavior until first toggled.
 // e.g. @[ @[@"Hub", @"USB-TypeHub", @"HWGUSBNotifyType_Hub"], @[@"Module Icon (Sidebar)", @"HWGPrefsUSB-Module"] ]
-- (instancetype)initWithIconSpecs:(NSArray<NSArray *> *)iconSpecs;
+//
+// `width` MUST be the exact width this view will be given (every caller already computes this
+// as `iconsWidth` before constructing the picker) — see the "BUG FIX (19-ago-2026)" comment in
+// the .m file for why this can no longer be a hardcoded constant: the row layout's fixed-width
+// columns (image + 3 buttons + notify checkbox, ~314pt) plus the name column must never exceed
+// the REAL width this view has, or the last column (the "Notify?" checkbox) is laid out past
+// the document view's own bounds — still painted, but outside the enclosing NSScrollView's
+// clipped/hit-testable region, so it silently stops responding to clicks. Passing the real
+// width here lets the name-column cap be derived correctly for every caller, present and
+// future, instead of guessing a constant that happens to fit today's callers.
+- (instancetype)initWithIconSpecs:(NSArray<NSArray *> *)iconSpecs width:(CGFloat)width;
 
 @end
 
