@@ -9,6 +9,17 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Thunderbolt Monitor — real GPU identity, location and VRAM in eGPU notifications
+`MTLDevice.name/location/isRemovable/recommendedMaxWorkingSetSize` (Metal.framework, public,
+macOS 10.11+). The existing eGPU detection (PCI class-code "Display Controller") only ever knew
+the raw vendor/device ID; this resolves the actual GPU Metal sees, matching on
+`isRemovable == YES`. Only meaningful on connect (Metal's device list has already dropped the
+card by the time a disconnect fires, same limitation the PCI-based check already documents).
+Skipped from this audit: a Metal-based `MTLDeviceWasAddedNotification` connect/disconnect event
+would duplicate the PCI-based detection this module already has; Neural Engine core count
+(`MLAllComputeDevices`) doesn't belong to a Thunderbolt monitor conceptually — left out rather
+than force-fit.
+
 ### Added: Thermal Monitor — CPU Power Limited and Hardware Thermal Warning Level (Intel only)
 `IOPMCopyCPUPowerStatus()` and `IOPMGetThermalWarningLevel()` (both `IOKit/pwr_mgt/IOPMLib.h`,
 public), pushed via their documented BSD `notify(3)` keys (`com.apple.system.power.CPU` /

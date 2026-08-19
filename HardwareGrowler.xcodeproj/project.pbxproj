@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01E345AB27A588DDDEFA94D3 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 25308007811C53690B41CB70 /* Metal.framework */; };
 		04B6CC4A86C53E194803CA48 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BC523C3515556BE500548427 /* IOKit.framework */; };
 		09A9FD093DEAA959B8A4E3A2 /* HWGIconPickerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 32C4D07D06AAE813831A914C /* HWGIconPickerView.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		102CD950EE257885DEB7B39F /* HWGIconPickerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 32C4D07D06AAE813831A914C /* HWGIconPickerView.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
@@ -293,6 +294,7 @@
 		177BD1B00DAE17A0562B1E5B /* CameraMonitor-Prefix.pch */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "CameraMonitor-Prefix.pch"; sourceTree = "<group>"; };
 		1E2871605E7811C094BB2E67 /* HWGNotificationHistoryStore.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HWGNotificationHistoryStore.m; sourceTree = "<group>"; };
 		207F0F159F573DA92C7635DF /* HWGrowlAudioMonitor.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = HWGrowlAudioMonitor.m; sourceTree = "<group>"; };
+		25308007811C53690B41CB70 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = ../../../../../../../../System/Library/Frameworks/Metal.framework; sourceTree = "<group>"; };
 		26C644079E7A4E5D14DB48FE /* GamepadMonitor.hwgrowlmonitor */ = {isa = PBXFileReference; explicitFileType = "wrapper.plug-in"; includeInIndex = 0; name = GamepadMonitor.hwgrowlmonitor; path = GamepadMonitor.hwgrowlmonitor; sourceTree = BUILT_PRODUCTS_DIR; };
 		28836ADB028995789C65CA65 /* HWGrowlScannerMonitor.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = HWGrowlScannerMonitor.m; sourceTree = "<group>"; };
 		28C2064DAA83FBBCEAB47438 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
@@ -519,6 +521,7 @@
 			files = (
 				BC75524F156528AA00CB0542 /* Cocoa.framework in Frameworks */,
 				BC75527015652BB100CB0542 /* IOKit.framework in Frameworks */,
+				01E345AB27A588DDDEFA94D3 /* Metal.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -830,6 +833,7 @@
 				D8AAD83A132BDE2CE4CAA3EC /* GameController.framework */,
 				C7CB0835A490148B193DA7DC /* Cocoa.framework */,
 				DF665225A4D643927B329D89 /* libcups.tbd */,
+				25308007811C53690B41CB70 /* Metal.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
