@@ -221,9 +221,21 @@ static BOOL HWGIconPickerNotifyBoolForKey(NSString *key, BOOL def) {
 		]];
 
 		[NSLayoutConstraint activateConstraints:@[
+			// BUG FIX (18-ago-2026) — root cause of "the last 2 checkboxes don't respond to
+			// clicks", reported live on Thermal Monitor's two newest Icons-tab rows and
+			// confirmed via an isolated test harness dumping this view's real frame geometry:
+			// notifyBox previously had NO width constraint at all, only `leading = X` and
+			// `trailing <= self.trailingAnchor` (an inequality). With nothing pulling it wider
+			// and an empty-title checkbox's intrinsic content size apparently not resolving to
+			// a positive width in this constraint system, Auto Layout collapsed it to
+			// frame.width == 0 on EVERY row across EVERY monitor that uses this shared
+			// component — a real, silent click target of zero width, invisible until a user
+			// actually needed to toggle a row that defaults OFF (most existing rows default ON,
+			// so this went unnoticed until Thermal Monitor's two Intel-only additions, which
+			// default OFF). Explicit width constraint fixes it for all 13 monitors at once.
 			[notifyBox.centerYAnchor constraintEqualToAnchor:imageView.centerYAnchor],
 			[notifyBox.leadingAnchor constraintEqualToAnchor:resetButton.trailingAnchor constant:16],
-			[notifyBox.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor],
+			[notifyBox.widthAnchor constraintEqualToConstant:20],
 		]];
 
 		previous = imageView;

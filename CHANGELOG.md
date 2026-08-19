@@ -17,12 +17,22 @@ icon; Color/Duplex/Staple/Fax/MFP capability bits are a static General-tab field
 "Printer Connected" notification. The "job name/owner" candidate from the audit was already
 covered by the existing Print Job Started/Finished feature — no new work needed there.
 
-### Fixed: Thermal Monitor's Icons tab checkboxes not clickable after adding 2 new rows
-Same class of bug already documented above (fixed-height Preferences panes not growing when
-rows are added) — reported live immediately after the CPU Power Limited / Hardware Thermal
-Warning Level rows were added. Bumped the pane's fixed dimensions (340→460, scroll guess
-200→320) with generous margin, per this project's own established convention: never assume a
-panel "still fits" after adding a row.
+### Fixed: every Icons tab "Notify?" checkbox had zero width (silently unclickable)
+Reported live as "the last 2 Thermal Monitor checkboxes don't respond to clicks" — the first
+attempted diagnosis (bumping Thermal Monitor's fixed pane height, since that's the bug class
+already fixed twice earlier this session) did NOT fix it. Built an isolated test harness that
+loads the compiled plugin bundle directly, places its `-preferencePane` in a throwaway window,
+and dumps the real Auto Layout-resolved frame of every subview — confirmed the actual root
+cause: `HWGIconPickerView`'s per-row "Notify?" checkbox had a `leading` constraint and a
+`trailing <= self.trailingAnchor` **inequality**, but no width constraint and no positive pull
+resolving its width — Auto Layout collapsed it to `frame.width == 0` on every single row, in
+every monitor that uses this shared component (13 modules). This went unnoticed because most
+existing rows default ON (nothing to click to see it "work"); Thermal Monitor's two newest
+rows are the first to default OFF, on the only toggle able to enable them (no General-tab
+equivalent) — the first case where actually clicking that specific checkbox mattered. Fixed
+with an explicit `widthAnchor` constraint (20pt) in the shared component — corrects every
+monitor at once, not just Thermal Monitor. Verified via the same harness: frame went from
+`{0, 16}` to `{20, 16}` across all rows.
 
 ### Added: Thunderbolt Monitor — real GPU identity, location and VRAM in eGPU notifications
 `MTLDevice.name/location/isRemovable/recommendedMaxWorkingSetSize` (Metal.framework, public,
