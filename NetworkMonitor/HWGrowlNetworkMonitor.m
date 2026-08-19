@@ -57,6 +57,12 @@
 #define HWG_WIFI_SHOW_RATE_KEY       @"HWGWifiShowTransmitRate"
 #define HWG_WIFI_SHOW_CHANNEL_KEY    @"HWGWifiShowChannel"
 #define HWG_WIFI_SHOW_SNR_KEY        @"HWGWifiShowNoiseSNR"
+// Final API audit (18-ago-2026), batch 2 — all 4 read from CWInterface, same class already
+// used for Band/Generation/Security/Rate/Channel/SNR above. OFF by default.
+#define HWG_WIFI_SHOW_COUNTRY_KEY    @"HWGWifiShowCountryCode"
+#define HWG_WIFI_SHOW_TXPOWER_KEY    @"HWGWifiShowTransmitPower"
+#define HWG_WIFI_SHOW_HWADDR_KEY     @"HWGWifiShowHardwareAddress"
+#define HWG_WIFI_SHOW_MODE_KEY       @"HWGWifiShowInterfaceMode"
 
 #define HWG_ETH_SHOW_INTERFACE_KEY   @"HWGEthernetShowInterface"
 #define HWG_ETH_SHOW_SPEED_KEY       @"HWGEthernetShowSpeed"
@@ -89,6 +95,11 @@
 #define HWG_NET_NOTIFY_DHCP_RENEWED_KEY @"HWGNetworkNotifyDHCPRenewed"
 #define HWG_NET_NOTIFY_HOSTNAME_KEY      @"HWGNetworkNotifyHostnameChanged"
 #define HWG_NET_NOTIFY_LOCATION_KEY      @"HWGNetworkNotifyLocationChanged"
+
+// Final API audit (18-ago-2026), batch 2 — Wi-Fi interface entering/leaving Host AP (Internet
+// Sharing) or IBSS (ad-hoc) mode. Same CWInterfaceMode already read for the General-tab
+// "Interface mode" field (HWG_WIFI_SHOW_MODE_KEY), but as a state-TRANSITION event.
+#define HWG_NET_NOTIFY_WIFI_HOSTAP_KEY @"HWGNetworkNotifyWifiHostAPMode"
 
 // Per-row "Notify?" checkboxes (Icons tab) — one per icon row, matching the USB/Thunderbolt/
 // Bluetooth/Volume Monitor pattern. Several rows share one underlying notifyWithName call
@@ -234,6 +245,7 @@ typedef enum {
 @property (nonatomic, assign) NSInteger lastReportedWifiBars;
 // -1 = no baseline read yet this launch, 0/1 = last known radio power state (off/on).
 @property (nonatomic, assign) NSInteger lastReportedWifiRadioOn;
+@property (nonatomic, assign) NSInteger lastReportedWifiInterfaceMode;
 @property (nonatomic, strong) NSDate *lastSignalNoteTime;
 @property (nonatomic, strong) NSTimer *signalPollTimer;
 
@@ -287,6 +299,7 @@ typedef enum {
 @synthesize lastReportedBSSID;
 @synthesize lastReportedWifiBars;
 @synthesize lastReportedWifiRadioOn;
+@synthesize lastReportedWifiInterfaceMode;
 @synthesize lastSignalNoteTime;
 @synthesize signalPollTimer;
 @synthesize prefsView;
@@ -305,6 +318,7 @@ typedef enum {
 		self.ethernetClassificationCache = [NSMutableDictionary dictionary];
 		self.lastReportedWifiBars = -1;
 		self.lastReportedWifiRadioOn = -1;
+		self.lastReportedWifiInterfaceMode = -1;
 		self.activeVPNInterfaceNames = [NSMutableSet set];
 		self.lastKnownDHCPLeaseStartByInterface = [NSMutableDictionary dictionary];
 
@@ -474,6 +488,46 @@ typedef enum {
 -(void)modeDidChangeForWiFiInterfaceWithName:(NSString *)interfaceName {
 	[self checkWifiRadioPowerStateForInterface:interfaceName];
 	[self handleWiFiStateChangeForInterface:interfaceName];
+	// Final API audit (18-ago-2026), batch 2 — this CWEventDelegate callback already fires on
+	// every CWInterfaceMode transition, including entering/leaving Host AP (Internet Sharing)
+	// or IBSS (ad-hoc) — the audit's candidate. No new observation mechanism needed, just
+	// reading the mode here and comparing.
+	CWInterface *iface = [self.wifiClient interfaceWithName:interfaceName];
+	if (iface) [self checkWifiModeTransition:[iface interfaceMode]];
+}
+
+-(NSString *)wifiInterfaceModeLabel:(CWInterfaceMode)mode {
+	switch (mode) {
+		case kCWInterfaceModeStation: return NSLocalizedString(@"Station (normal client)", @"");
+		case kCWInterfaceModeIBSS:    return NSLocalizedString(@"Ad-hoc (IBSS)", @"");
+		case kCWInterfaceModeHostAP:  return NSLocalizedString(@"Host AP (Internet Sharing)", @"");
+		default:                      return NSLocalizedString(@"None", @"");
+	}
+}
+
+// Silent baseline on first sighting (lastReportedWifiInterfaceMode starts at -1, an impossible
+// CWInterfaceMode value) — same convention as every other transition-tracking property in this
+// file (e.g. lastReportedWifiRadioOn above).
+-(void)checkWifiModeTransition:(CWInterfaceMode)mode {
+	if (![self boolForKey:HWG_NET_NOTIFY_WIFI_HOSTAP_KEY default:NO]) return;
+	if (lastReportedWifiInterfaceMode == mode) return;
+	BOOL hadBaseline = (lastReportedWifiInterfaceMode != -1);
+	NSInteger previousMode = lastReportedWifiInterfaceMode;
+	self.lastReportedWifiInterfaceMode = mode;
+	if (!hadBaseline) return;
+	// Only notify for a transition INTO or OUT OF Host AP/IBSS — not every Station<->Station
+	// no-op or association-detail change that might also route through this delegate callback.
+	BOOL wasSpecial = (previousMode == kCWInterfaceModeHostAP || previousMode == kCWInterfaceModeIBSS);
+	BOOL nowSpecial = (mode == kCWInterfaceModeHostAP || mode == kCWInterfaceModeIBSS);
+	if (!wasSpecial && !nowSpecial) return;
+
+	[delegate notifyWithName:@"WifiHostAPModeChanged"
+						 title:NSLocalizedString(@"Wi-Fi Interface Mode Changed", @"")
+					   description:[NSString stringWithFormat:NSLocalizedString(@"%@ → %@", @""), [self wifiInterfaceModeLabel:previousMode], [self wifiInterfaceModeLabel:mode]]
+						  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+			  identifierString:@"HWGrowlWifiHostAPMode"
+				 contextString:nil
+						plugin:self];
 }
 
 -(void)handleWiFiStateChangeForInterface:(NSString *)interfaceName {
@@ -1246,7 +1300,12 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 	BOOL showRate    = [self boolForKey:HWG_WIFI_SHOW_RATE_KEY default:NO];
 	BOOL showChannel = [self boolForKey:HWG_WIFI_SHOW_CHANNEL_KEY default:NO];
 	BOOL showSNR     = [self boolForKey:HWG_WIFI_SHOW_SNR_KEY default:NO];
-	if (!showBand && !showGen && !showSec && !showRate && !showChannel && !showSNR) return nil;
+	BOOL showCountry = [self boolForKey:HWG_WIFI_SHOW_COUNTRY_KEY default:NO];
+	BOOL showTxPower = [self boolForKey:HWG_WIFI_SHOW_TXPOWER_KEY default:NO];
+	BOOL showHWAddr  = [self boolForKey:HWG_WIFI_SHOW_HWADDR_KEY default:NO];
+	BOOL showMode    = [self boolForKey:HWG_WIFI_SHOW_MODE_KEY default:NO];
+	if (!showBand && !showGen && !showSec && !showRate && !showChannel && !showSNR
+		&& !showCountry && !showTxPower && !showHWAddr && !showMode) return nil;
 
 	CWInterface *iface = [self.wifiClient interface];
 	if (!iface) return nil;
@@ -1297,6 +1356,23 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 		if (noise != 0) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Noise:\t%ld dBm (SNR: %ld dB)", "First %ld = noise floor in dBm, second %ld = signal-to-noise ratio in dB"), (long)noise, (long)(rssi - noise)]];
 		}
+	}
+	// Final API audit (18-ago-2026), batch 2 — CWInterface.countryCode/transmitPower/
+	// hardwareAddress/interfaceMode, all public since macOS 10.6/10.7.
+	if (showCountry) {
+		NSString *country = [iface countryCode];
+		if (country.length) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Regulatory country/region:\t%@", @""), country]];
+	}
+	if (showTxPower) {
+		NSInteger power = [iface transmitPower];
+		if (power != 0) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Transmit power:\t%ld dBm", @""), (long)power]];
+	}
+	if (showHWAddr) {
+		NSString *hwAddr = [iface hardwareAddress];
+		if (hwAddr.length) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Wi-Fi hardware address:\t%@", @""), hwAddr]];
+	}
+	if (showMode) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface mode:\t%@", @""), [self wifiInterfaceModeLabel:[iface interfaceMode]]]];
 	}
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
@@ -2132,6 +2208,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_WIFI_SHOW_RATE_KEY        title:NSLocalizedString(@"Link rate (Mbps)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_WIFI_SHOW_CHANNEL_KEY     title:NSLocalizedString(@"Channel number + width", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_WIFI_SHOW_SNR_KEY         title:NSLocalizedString(@"Noise floor + SNR", @"") defaultOn:NO],
+		// Final API audit (18-ago-2026), batch 2 — OFF by default, same tier as Rate/Channel/SNR.
+		[self checkboxWithKey:HWG_WIFI_SHOW_COUNTRY_KEY     title:NSLocalizedString(@"Regulatory country/region code", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_WIFI_SHOW_TXPOWER_KEY     title:NSLocalizedString(@"Transmit power", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_WIFI_SHOW_HWADDR_KEY      title:NSLocalizedString(@"Wi-Fi hardware (MAC) address", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_WIFI_SHOW_MODE_KEY        title:NSLocalizedString(@"Interface mode (Station/IBSS/Host AP)", @"") defaultOn:NO],
 		// Moved here from the Ethernet tab (13-ago-2026, feedback del usuario) — this controls
 		// whether Wi-Fi's OWN link/AWDL/AirDrop events get reported, so it belongs with the
 		// rest of the Wi-Fi settings, not Ethernet's (Ethernet's own real-interface filter at
@@ -2283,6 +2364,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"DHCP Lease Renewed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_DHCP_RENEWED_KEY, @NO],
 		@[@"Computer Name Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_HOSTNAME_KEY, @NO],
 		@[@"Network Location Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_LOCATION_KEY, @NO],
+		@[@"Wi-Fi Host AP / Ad-hoc Mode Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_WIFI_HOSTAP_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -2314,7 +2396,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", @"WifiHostAPModeChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -2334,7 +2416,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Internet Reachability Changed", @""), @"NetworkReachabilityChanged",
 			  NSLocalizedString(@"DHCP Lease Renewed", @""), @"NetworkDHCPLeaseRenewed",
 			  NSLocalizedString(@"Computer Name Changed", @""), @"NetworkHostnameChanged",
-			  NSLocalizedString(@"Network Location Changed", @""), @"NetworkLocationChanged", nil];
+			  NSLocalizedString(@"Network Location Changed", @""), @"NetworkLocationChanged",
+			  NSLocalizedString(@"Wi-Fi Host AP / Ad-hoc Mode Changed", @""), @"WifiHostAPModeChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -2354,7 +2437,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when general Internet reachability (not tied to Wi-Fi/Ethernet specifically) is lost or restored — off by default", @""), @"NetworkReachabilityChanged",
 			  NSLocalizedString(@"Sent when an interface's DHCP lease is renewed/rebound while it stays connected — off by default", @""), @"NetworkDHCPLeaseRenewed",
 			  NSLocalizedString(@"Sent when the computer's name (Sharing preferences) changes — off by default", @""), @"NetworkHostnameChanged",
-			  NSLocalizedString(@"Sent when the active Network Location changes (e.g. Home/Work/Automatic) — off by default", @""), @"NetworkLocationChanged", nil];
+			  NSLocalizedString(@"Sent when the active Network Location changes (e.g. Home/Work/Automatic) — off by default", @""), @"NetworkLocationChanged",
+			  NSLocalizedString(@"Sent when the Wi-Fi interface enters/leaves Host AP (Internet Sharing) or ad-hoc (IBSS) mode — off by default", @""), @"WifiHostAPModeChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

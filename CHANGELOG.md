@@ -49,6 +49,13 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Network Monitor — batch 2/N of 32 audit candidates (cross-platform)
+Wi-Fi country/region code, transmit power, hardware address, interface mode — all from
+`CWInterface`, same class as the existing Band/Generation/Security fields. Also: Wi-Fi Host AP/
+ad-hoc mode transition notification, reusing the existing `-modeDidChangeForWiFiInterfaceWithName:`
+CWEventDelegate callback (no new observation mechanism). All off by default. 9/32 candidates
+done — see `TODO.md` for the remaining 23.
+
 ### Added: Network Monitor — batch 1/N of 32 audit candidates (cross-platform)
 General Internet reachability (`SCNetworkReachability`), DHCP lease renewed/rebound (new
 per-interface `SCDynamicStore` key pattern), computer name changed, and Network Location
