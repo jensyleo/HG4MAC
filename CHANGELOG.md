@@ -9,6 +9,16 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Thermal Monitor — CPU Power Limited and Hardware Thermal Warning Level (Intel only)
+`IOPMCopyCPUPowerStatus()` and `IOPMGetThermalWarningLevel()` (both `IOKit/pwr_mgt/IOPMLib.h`,
+public), pushed via their documented BSD `notify(3)` keys (`com.apple.system.power.CPU` /
+`com.apple.system.power.thermal_warning`) instead of a poll timer. **Confirmed live on this M4
+(Apple Silicon): both return `kIOReturnNotFound`** — Apple Silicon never publishes these values,
+only Intel does. Since this app still ships as a universal binary (`arm64 x86_64`), this is real
+functionality on Intel Macs, not dead code — just a silent no-op on Apple Silicon. Both OFF by
+default and labeled "(Intel only)" in the Icons tab so Apple Silicon users aren't left wondering
+why the toggle never fires anything.
+
 ### Added: Thermal Monitor — Dark Wake Thermal Emergency
 `kIOPMMessageDarkWakeThermalEmergency`, delivered via `IOServiceAddInterestNotification` on
 `IOPMrootDomain` (public API, `IOKit/pwr_mgt/IOPMLib.h` + `IOMessage.h`). Fires specifically when
