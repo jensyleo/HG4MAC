@@ -49,6 +49,16 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Audio Monitor — 8 remaining audit candidates (cross-platform, no Intel-only content)
+Jack connect/disconnect, active data source change (built-in speakers vs. headphones vs. line
+out), device-stopped-responding, microphone mode (class-level KVO, same technique as Camera
+Monitor's Control Center toggles), head-tracking headphones via `CMHeadphoneMotionManager`
+(macOS 14+, new CoreMotion.framework link), MIDI device add/remove (new CoreMIDI.framework
+link), and bit depth/latency static fields. Aggregate/Multi-Output device creation needed no new
+code — already surfaced through the existing transport-type field. All off by default except
+MIDI. Pending live verification with real hardware (headphones, MIDI device, AirPods Pro/Max) —
+see `TODO.md`.
+
 ### Added: Display Monitor — 8 remaining audit candidates (cross-platform, no Intel-only content)
 Color profile change (via `NSDistributedNotificationCenter`, not the usual local one — ColorSync
 posts system-wide), EDID vendor/model/serial, VRR/ProMotion range, HDR/EDR headroom, notch/

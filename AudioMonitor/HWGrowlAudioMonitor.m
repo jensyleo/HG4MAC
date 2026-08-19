@@ -8,6 +8,8 @@
 #import <CoreAudio/CoreAudio.h>
 #import <AudioToolbox/AudioHardwareService.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreMotion/CoreMotion.h>
+#import <CoreMIDI/CoreMIDI.h>
 #import "HWGIconOverrideStore.h"
 #import "HWGIconPickerView.h"
 
@@ -65,11 +67,54 @@
 #define HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY @"HWGAudioNotifyVolumeCritical"
 #define HWG_AUDIO_VOLUME_THRESHOLD_KEY        @"HWGAudioVolumeCriticalThresholdPercent"
 
+// Final API audit (18-ago-2026) — jack connect/disconnect, active data source (e.g. built-in
+// speakers vs. headphones vs. line out on the SAME physical device — a MacBook's headphone
+// jack switches kAudioDevicePropertyDataSource, not kAudioDevicePropertyJackIsConnected alone),
+// and "device stopped responding" (kAudioDevicePropertyDeviceIsAlive going to 0, e.g. a USB/
+// Thunderbolt audio interface losing power or crashing without a clean unplug). All three use
+// the exact per-device-listener/signature-dictionary shape already proven by
+// HWG_AUDIO_NOTIFY_SAMPLERATE_CHANGED_KEY above — OFF by default like that one.
+#define HWG_AUDIO_NOTIFY_JACK_KEY        @"HWGAudioNotifyJackChanged"
+#define HWG_AUDIO_NOTIFY_DATASOURCE_KEY  @"HWGAudioNotifyDataSourceChanged"
+#define HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY @"HWGAudioNotifyDeviceStoppedResponding"
+
+// Final API audit (18-ago-2026) — AVCaptureDevice.activeMicrophoneMode (Standard/Voice
+// Isolation/Wide Spectrum), class-level KVO-observable — same class-level KVO pattern used for
+// Camera Monitor's Portrait Effect/Studio Light/etc. this same audit pass.
+#define HWG_AUDIO_NOTIFY_MIC_MODE_KEY @"HWGAudioNotifyMicrophoneModeChanged"
+
+// Final API audit (18-ago-2026) — CMHeadphoneMotionManager (CoreMotion, macOS 14+), delegate-
+// based connect/disconnect for headphones with head-tracking (AirPods Pro/Max). Requires linking
+// CoreMotion.framework (added to this target only). A GLOBAL fact (any head-tracking headphone,
+// not tied to a specific AudioDeviceID — the API doesn't expose which one), same "system-wide
+// state" class as Camera Monitor's Control Center effect toggles.
+#define HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY @"HWGAudioNotifyHeadTrackingHeadphones"
+
+// Final API audit (18-ago-2026) — CoreMIDI device add/remove (kMIDIMsgObjectAdded/Removed via
+// MIDIClientCreateWithBlock). A completely separate device universe from CoreAudio (a MIDI
+// keyboard/controller has no AudioDeviceID at all), so this is its own client/notification path,
+// not layered onto the existing CoreAudio listeners above.
+#define HWG_AUDIO_NOTIFY_MIDI_KEY @"HWGAudioNotifyMIDIDeviceChanged"
+
+// Final API audit (18-ago-2026) — bit depth (kAudioStreamPropertyPhysicalFormat) and latency
+// (kAudioDevicePropertyLatency), both static per-device fields added to the same
+// -extraInfoForDeviceID: pool as transport/channels/sample rate above. OFF by default (already
+// several fields shown per device).
+#define HWG_AUDIO_SHOW_BITDEPTH_KEY @"HWGAudioShowBitDepth"
+#define HWG_AUDIO_SHOW_LATENCY_KEY  @"HWGAudioShowLatency"
+
 static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
 }
 
+// Not formally declared <CMHeadphoneMotionManagerDelegate> here — that protocol itself is
+// macOS 14+ only, and referencing it at the interface level (unlike inside an @available-
+// guarded method body) triggers the same "only available on macOS 14" warning as the class
+// itself. -headphoneMotionManagerDidConnect:/-headphoneMotionManagerDidDisconnect: below still
+// satisfy it informally (Objective-C dispatches on selector name, not declared conformance) —
+// -setUpHeadphoneMotionManager casts self when assigning .delegate to avoid a stray warning
+// there instead.
 @interface HWGrowlAudioMonitor ()
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
@@ -139,6 +184,30 @@ static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *lastNotifiedMicDeviceIDs;
 @property (nonatomic, strong) dispatch_block_t pendingMicNotifyBlock;
 
+// Final API audit (18-ago-2026) — jack/data-source/device-alive tracking, same
+// listener-set + last-known-value-dictionary shape as the sample rate feature above.
+@property (nonatomic, strong) AudioObjectPropertyListenerBlock jackListenerBlock;
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *deviceIDsWithJackListener;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *lastKnownJackStateByDeviceID;
+
+@property (nonatomic, strong) AudioObjectPropertyListenerBlock dataSourceListenerBlock;
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *deviceIDsWithDataSourceListener;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *lastKnownDataSourceByDeviceID;
+
+@property (nonatomic, strong) AudioObjectPropertyListenerBlock deviceAliveListenerBlock;
+@property (nonatomic, strong) NSMutableSet<NSNumber *> *deviceIDsWithAliveListener;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *lastKnownAliveByDeviceID;
+
+// Final API audit (18-ago-2026) — CMHeadphoneMotionManager delegate connect/disconnect.
+// Typed `id`, not `CMHeadphoneMotionManager *`, so this property declaration itself doesn't
+// require an availability annotation (the class is macOS 14+ only) — every actual use is
+// already behind an `if (@available(macOS 14.0, *))` check in -setUpHeadphoneMotionManager.
+@property (nonatomic, strong) id headphoneMotionManager;
+
+// Final API audit (18-ago-2026) — CoreMIDI client; kept alive for the app's whole lifetime so
+// its notification block keeps firing.
+@property (nonatomic, assign) MIDIClientRef midiClient;
+
 @end
 
 // C callback trampolines — CoreAudio's AudioObjectPropertyListenerBlock already gives us a
@@ -168,6 +237,17 @@ static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 @synthesize runningMicDeviceIDs;
 @synthesize lastNotifiedMicDeviceIDs;
 @synthesize pendingMicNotifyBlock;
+@synthesize jackListenerBlock;
+@synthesize deviceIDsWithJackListener;
+@synthesize lastKnownJackStateByDeviceID;
+@synthesize dataSourceListenerBlock;
+@synthesize deviceIDsWithDataSourceListener;
+@synthesize lastKnownDataSourceByDeviceID;
+@synthesize deviceAliveListenerBlock;
+@synthesize deviceIDsWithAliveListener;
+@synthesize lastKnownAliveByDeviceID;
+@synthesize headphoneMotionManager;
+@synthesize midiClient;
 
 static const NSTimeInterval kMicDebounceInterval = 1.0;
 
@@ -197,6 +277,12 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		deviceIDsWithSampleRateListener = [NSMutableSet set];
 		lastKnownSampleRateByDeviceID = [NSMutableDictionary dictionary];
 		volumeCriticalListenerDeviceID = kAudioObjectUnknown;
+		deviceIDsWithJackListener = [NSMutableSet set];
+		lastKnownJackStateByDeviceID = [NSMutableDictionary dictionary];
+		deviceIDsWithDataSourceListener = [NSMutableSet set];
+		lastKnownDataSourceByDeviceID = [NSMutableDictionary dictionary];
+		deviceIDsWithAliveListener = [NSMutableSet set];
+		lastKnownAliveByDeviceID = [NSMutableDictionary dictionary];
 
 		// Baseline silently at launch — like every other monitor — so the first real
 		// connect/disconnect/default-change after this point is the first thing notified.
@@ -247,6 +333,43 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_VOLUME_CRITICAL_KEY, NO)) {
 			[self registerVolumeCriticalListenerForDeviceID:self.lastDefaultOutputID];
 		}
+
+		__weak typeof(self) weakSelf2 = self;
+		jackListenerBlock = ^(UInt32 n, const AudioObjectPropertyAddress *addrs) {
+			(void)n; (void)addrs;
+			[weakSelf2 refreshJackStatesNotifying:YES];
+		};
+		dataSourceListenerBlock = ^(UInt32 n, const AudioObjectPropertyAddress *addrs) {
+			(void)n; (void)addrs;
+			[weakSelf2 refreshDataSourcesNotifying:YES];
+		};
+		deviceAliveListenerBlock = ^(UInt32 n, const AudioObjectPropertyAddress *addrs) {
+			(void)n; (void)addrs;
+			[weakSelf2 refreshAliveStatesNotifying:YES];
+		};
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_JACK_KEY, NO)) {
+			[self registerJackListeners];
+			[self refreshJackStatesNotifying:NO];
+		}
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_DATASOURCE_KEY, NO)) {
+			[self registerDataSourceListeners];
+			[self refreshDataSourcesNotifying:NO];
+		}
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY, NO)) {
+			[self registerAliveListeners];
+			[self refreshAliveStatesNotifying:NO];
+		}
+
+		// Final API audit (18-ago-2026) — microphone mode, class-level KVO (same technique as
+		// Camera Monitor's Control Center effect toggles this same audit pass).
+		[AVCaptureDevice addObserver:self forKeyPath:@"activeMicrophoneMode" options:0 context:NULL];
+
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY, NO)) {
+			[self setUpHeadphoneMotionManager];
+		}
+		if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_MIDI_KEY, YES)) {
+			[self setUpMIDIClient];
+		}
 	}
 	return self;
 }
@@ -264,6 +387,22 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &sampleRateAddress, dispatch_get_main_queue(), sampleRateListenerBlock);
 	}
 	[self unregisterVolumeCriticalListener];
+
+	AudioObjectPropertyAddress jackAddress = { kAudioDevicePropertyJackIsConnected, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	for (NSNumber *deviceID in deviceIDsWithJackListener) {
+		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &jackAddress, dispatch_get_main_queue(), jackListenerBlock);
+	}
+	AudioObjectPropertyAddress dataSourceAddress = { kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	for (NSNumber *deviceID in deviceIDsWithDataSourceListener) {
+		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &dataSourceAddress, dispatch_get_main_queue(), dataSourceListenerBlock);
+	}
+	AudioObjectPropertyAddress aliveAddress = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	for (NSNumber *deviceID in deviceIDsWithAliveListener) {
+		AudioObjectRemovePropertyListenerBlock([deviceID unsignedIntValue], &aliveAddress, dispatch_get_main_queue(), deviceAliveListenerBlock);
+	}
+	[AVCaptureDevice removeObserver:self forKeyPath:@"activeMicrophoneMode"];
+	[headphoneMotionManager stopConnectionStatusUpdates];
+	if (midiClient) MIDIClientDispose(midiClient);
 }
 
 #pragma mark CoreAudio helpers
@@ -349,6 +488,31 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 	return rate;
 }
 
+// Final API audit (18-ago-2026) — reads the first stream's physical format on Output (falling
+// back to Input for input-only devices like standalone microphones) and returns its bit depth.
+-(UInt32)bitDepthForDeviceID:(AudioDeviceID)deviceID {
+	NSArray<NSNumber *> *scopes = @[@(kAudioDevicePropertyScopeOutput), @(kAudioDevicePropertyScopeInput)];
+	for (NSNumber *scope in scopes) {
+		AudioObjectPropertyAddress streamsAddress = { kAudioDevicePropertyStreams, [scope unsignedIntValue], kAudioObjectPropertyElementMain };
+		UInt32 size = 0;
+		if (AudioObjectGetPropertyDataSize(deviceID, &streamsAddress, 0, NULL, &size) != noErr || size < sizeof(AudioStreamID)) continue;
+		AudioStreamID *streamIDs = malloc(size);
+		if (!streamIDs) continue;
+		UInt32 bitDepth = 0;
+		if (AudioObjectGetPropertyData(deviceID, &streamsAddress, 0, NULL, &size, streamIDs) == noErr) {
+			AudioObjectPropertyAddress formatAddress = { kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+			AudioStreamBasicDescription format;
+			UInt32 formatSize = sizeof(format);
+			if (AudioObjectGetPropertyData(streamIDs[0], &formatAddress, 0, NULL, &formatSize, &format) == noErr) {
+				bitDepth = format.mBitsPerChannel;
+			}
+		}
+		free(streamIDs);
+		if (bitDepth > 0) return bitDepth;
+	}
+	return 0;
+}
+
 // Builds the F33 extra-info lines (transport/channels/sample rate) for a device, honoring
 // each field's own toggle — same pattern as every other monitor's extraInfoFor...: method.
 -(NSString *)extraInfoForDeviceID:(AudioDeviceID)deviceID {
@@ -389,6 +553,32 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 			UInt32 muteSize = sizeof(muted);
 			if (AudioObjectGetPropertyData(deviceID, &muteAddress, 0, NULL, &muteSize, &muted) == noErr) {
 				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Muted:\t%@", @""), muted ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
+			}
+		}
+	}
+	// Final API audit (18-ago-2026) — kAudioStreamPropertyPhysicalFormat.mBitsPerChannel, read
+	// from the device's first output stream (falls back to input if no output stream exists).
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_BITDEPTH_KEY, NO)) {
+		UInt32 bitDepth = [self bitDepthForDeviceID:deviceID];
+		if (bitDepth > 0) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Bit depth:\t%u-bit", @""), (unsigned)bitDepth]];
+		}
+	}
+	// Final API audit (18-ago-2026) — kAudioDevicePropertyLatency, in sample frames (converted
+	// to ms using the device's own nominal sample rate for a human-readable figure).
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_LATENCY_KEY, NO)) {
+		AudioObjectPropertyAddress latencyAddress = { kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain };
+		if (AudioObjectHasProperty(deviceID, &latencyAddress)) {
+			UInt32 latencyFrames = 0;
+			UInt32 latencySize = sizeof(latencyFrames);
+			if (AudioObjectGetPropertyData(deviceID, &latencyAddress, 0, NULL, &latencySize, &latencyFrames) == noErr && latencyFrames > 0) {
+				double rate = [self sampleRateForDeviceID:deviceID];
+				if (rate > 0) {
+					double ms = (latencyFrames / rate) * 1000.0;
+					[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Latency:\t%u frames (~%.1f ms)", @""), (unsigned)latencyFrames, ms]];
+				} else {
+					[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Latency:\t%u frames", @""), (unsigned)latencyFrames]];
+				}
 			}
 		}
 	}
@@ -498,6 +688,250 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		[self registerSampleRateListeners];
 		[self refreshSampleRatesNotifying:NO];   // a newly-connected device baselines silently
 	}
+	// Final API audit (18-ago-2026) — same re-sync-on-device-list-change pattern as the two
+	// blocks above, for jack/data-source/alive.
+	if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_JACK_KEY, NO)) {
+		[self unregisterStaleJackListeners];
+		[self registerJackListeners];
+		[self refreshJackStatesNotifying:NO];
+	}
+	if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_DATASOURCE_KEY, NO)) {
+		[self unregisterStaleDataSourceListeners];
+		[self registerDataSourceListeners];
+		[self refreshDataSourcesNotifying:NO];
+	}
+	if (HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY, NO)) {
+		[self unregisterStaleAliveListeners];
+		[self registerAliveListeners];
+		[self refreshAliveStatesNotifying:NO];
+	}
+}
+
+#pragma mark Jack / Data Source / Device Alive (final API audit, 18-ago-2026)
+
+static AudioObjectPropertyAddress kJackAddress = {
+	kAudioDevicePropertyJackIsConnected, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+};
+static AudioObjectPropertyAddress kDataSourceAddress = {
+	kAudioDevicePropertyDataSource, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+};
+static AudioObjectPropertyAddress kAliveAddress = {
+	kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+};
+
+-(void)registerJackListeners {
+	for (NSNumber *deviceID in self.knownDeviceIDs) {
+		if ([self.deviceIDsWithJackListener containsObject:deviceID]) continue;
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		if (!AudioObjectHasProperty(audioID, &kJackAddress)) continue;
+		AudioObjectAddPropertyListenerBlock(audioID, &kJackAddress, dispatch_get_main_queue(), self.jackListenerBlock);
+		[self.deviceIDsWithJackListener addObject:deviceID];
+	}
+}
+-(void)unregisterStaleJackListeners {
+	NSMutableSet<NSNumber *> *stale = [NSMutableSet set];
+	for (NSNumber *deviceID in self.deviceIDsWithJackListener) {
+		if ([self.knownDeviceIDs containsObject:deviceID]) continue;
+		[stale addObject:deviceID];
+		[self.lastKnownJackStateByDeviceID removeObjectForKey:deviceID];
+	}
+	[self.deviceIDsWithJackListener minusSet:stale];
+}
+-(void)refreshJackStatesNotifying:(BOOL)shouldNotify {
+	for (NSNumber *deviceID in self.deviceIDsWithJackListener) {
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		UInt32 connected = 0;
+		UInt32 size = sizeof(connected);
+		if (AudioObjectGetPropertyData(audioID, &kJackAddress, 0, NULL, &size, &connected) != noErr) continue;
+		NSNumber *previous = self.lastKnownJackStateByDeviceID[deviceID];
+		self.lastKnownJackStateByDeviceID[deviceID] = @(connected);
+		if (shouldNotify && previous && [previous boolValue] != (connected != 0)) {
+			NSString *name = [self nameForDeviceID:audioID] ?: NSLocalizedString(@"Audio Device", @"");
+			[delegate notifyWithName:@"AudioJackChanged"
+								 title:connected ? NSLocalizedString(@"Audio Jack Connected", @"") : NSLocalizedString(@"Audio Jack Disconnected", @"")
+							description:name
+								  icon:[self iconDataForSymbol:connected ? @"speaker.wave.2.fill" : @"speaker.slash.fill"]
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioJack-%@", deviceID]
+						  contextString:nil
+									plugin:self];
+		}
+	}
+}
+
+-(void)registerDataSourceListeners {
+	for (NSNumber *deviceID in self.knownDeviceIDs) {
+		if ([self.deviceIDsWithDataSourceListener containsObject:deviceID]) continue;
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		if (!AudioObjectHasProperty(audioID, &kDataSourceAddress)) continue;
+		AudioObjectAddPropertyListenerBlock(audioID, &kDataSourceAddress, dispatch_get_main_queue(), self.dataSourceListenerBlock);
+		[self.deviceIDsWithDataSourceListener addObject:deviceID];
+	}
+}
+-(void)unregisterStaleDataSourceListeners {
+	NSMutableSet<NSNumber *> *stale = [NSMutableSet set];
+	for (NSNumber *deviceID in self.deviceIDsWithDataSourceListener) {
+		if ([self.knownDeviceIDs containsObject:deviceID]) continue;
+		[stale addObject:deviceID];
+		[self.lastKnownDataSourceByDeviceID removeObjectForKey:deviceID];
+	}
+	[self.deviceIDsWithDataSourceListener minusSet:stale];
+}
+-(void)refreshDataSourcesNotifying:(BOOL)shouldNotify {
+	for (NSNumber *deviceID in self.deviceIDsWithDataSourceListener) {
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		UInt32 sourceID = 0;
+		UInt32 size = sizeof(sourceID);
+		if (AudioObjectGetPropertyData(audioID, &kDataSourceAddress, 0, NULL, &size, &sourceID) != noErr) continue;
+		NSNumber *previous = self.lastKnownDataSourceByDeviceID[deviceID];
+		self.lastKnownDataSourceByDeviceID[deviceID] = @(sourceID);
+		if (shouldNotify && previous && [previous unsignedIntValue] != sourceID) {
+			NSString *name = [self nameForDeviceID:audioID] ?: NSLocalizedString(@"Audio Device", @"");
+			NSString *sourceName = [self dataSourceLabelForDeviceID:audioID sourceID:sourceID];
+			[delegate notifyWithName:@"AudioDataSourceChanged"
+								 title:NSLocalizedString(@"Audio Source Changed", @"")
+							description:[NSString stringWithFormat:@"%@\n%@", name, sourceName]
+								  icon:[self iconDataForSymbol:@"speaker.wave.2.fill"]
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioDataSource-%@", deviceID]
+						  contextString:nil
+									plugin:self];
+		}
+	}
+}
+// Data source values are device-defined FourCharCodes (e.g. a MacBook's built-in device uses
+// distinct codes for "Internal Speakers" vs. "Headphones" vs. "Line Out") — resolved to a real
+// localized label via kAudioDevicePropertyDataSourceNameForIDCFString rather than shown raw.
+-(NSString *)dataSourceLabelForDeviceID:(AudioDeviceID)deviceID sourceID:(UInt32)sourceID {
+	AudioObjectPropertyAddress nameAddress = { kAudioDevicePropertyDataSourceNameForIDCFString, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	AudioValueTranslation translation;
+	CFStringRef nameRef = NULL;
+	translation.mInputData = &sourceID;
+	translation.mInputDataSize = sizeof(sourceID);
+	translation.mOutputData = &nameRef;
+	translation.mOutputDataSize = sizeof(nameRef);
+	UInt32 size = sizeof(translation);
+	if (AudioObjectGetPropertyData(deviceID, &nameAddress, 0, NULL, &size, &translation) == noErr && nameRef) {
+		return CFBridgingRelease(nameRef);
+	}
+	return [NSString stringWithFormat:@"0x%08x", (unsigned)sourceID];
+}
+
+-(void)registerAliveListeners {
+	for (NSNumber *deviceID in self.knownDeviceIDs) {
+		if ([self.deviceIDsWithAliveListener containsObject:deviceID]) continue;
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		if (!AudioObjectHasProperty(audioID, &kAliveAddress)) continue;
+		AudioObjectAddPropertyListenerBlock(audioID, &kAliveAddress, dispatch_get_main_queue(), self.deviceAliveListenerBlock);
+		[self.deviceIDsWithAliveListener addObject:deviceID];
+	}
+}
+-(void)unregisterStaleAliveListeners {
+	NSMutableSet<NSNumber *> *stale = [NSMutableSet set];
+	for (NSNumber *deviceID in self.deviceIDsWithAliveListener) {
+		if ([self.knownDeviceIDs containsObject:deviceID]) continue;
+		[stale addObject:deviceID];
+		[self.lastKnownAliveByDeviceID removeObjectForKey:deviceID];
+	}
+	[self.deviceIDsWithAliveListener minusSet:stale];
+}
+// kAudioDevicePropertyDeviceIsAlive going to 0 for a device that's STILL in
+// CGGetOnlineDisplayList-equivalent kAudioHardwarePropertyDevices (hasn't been removed from the
+// list yet, which can lag a moment behind the property flip) is the "stopped responding without
+// a clean unplug" signal from the audit — distinct from a normal disconnect, which removes the
+// device from the list outright and is already covered by AudioDeviceDisconnected.
+-(void)refreshAliveStatesNotifying:(BOOL)shouldNotify {
+	for (NSNumber *deviceID in self.deviceIDsWithAliveListener) {
+		AudioDeviceID audioID = [deviceID unsignedIntValue];
+		UInt32 alive = 1;
+		UInt32 size = sizeof(alive);
+		if (AudioObjectGetPropertyData(audioID, &kAliveAddress, 0, NULL, &size, &alive) != noErr) continue;
+		NSNumber *previous = self.lastKnownAliveByDeviceID[deviceID];
+		self.lastKnownAliveByDeviceID[deviceID] = @(alive);
+		if (shouldNotify && previous && [previous boolValue] && !alive) {
+			NSString *name = self.deviceNames[deviceID] ?: NSLocalizedString(@"Audio Device", @"");
+			[delegate notifyWithName:@"AudioDeviceStoppedResponding"
+								 title:NSLocalizedString(@"Audio Device Stopped Responding", @"")
+							description:name
+								  icon:[self iconDataForSymbol:@"speaker.slash.fill"]
+					  identifierString:[NSString stringWithFormat:@"HWGrowlAudioAlive-%@", deviceID]
+						  contextString:nil
+									plugin:self];
+		}
+	}
+}
+
+#pragma mark Microphone mode / Head-tracking headphones / MIDI (final API audit, 18-ago-2026)
+
+-(void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+	if (![keyPath isEqualToString:@"activeMicrophoneMode"] || ![object isEqual:[AVCaptureDevice class]]) return;
+	if (!HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_MIC_MODE_KEY, NO)) return;
+
+	NSString *modeLabel = nil;
+	switch ([AVCaptureDevice activeMicrophoneMode]) {
+		case AVCaptureMicrophoneModeStandard:       modeLabel = NSLocalizedString(@"Standard", @""); break;
+		case AVCaptureMicrophoneModeWideSpectrum:    modeLabel = NSLocalizedString(@"Wide Spectrum", @""); break;
+		case AVCaptureMicrophoneModeVoiceIsolation:  modeLabel = NSLocalizedString(@"Voice Isolation", @""); break;
+		default:                                      modeLabel = NSLocalizedString(@"Unknown", @""); break;
+	}
+	[delegate notifyWithName:@"AudioMicrophoneModeChanged"
+						 title:NSLocalizedString(@"Microphone Mode Changed", @"")
+					description:modeLabel
+						  icon:[self iconDataForSymbol:@"speaker.wave.2.fill"]
+			  identifierString:@"HWGrowlAudioMicMode"
+				  contextString:nil
+							plugin:self];
+}
+
+-(void)setUpHeadphoneMotionManager {
+	if (@available(macOS 14.0, *)) {
+		CMHeadphoneMotionManager *manager = [[CMHeadphoneMotionManager alloc] init];
+		manager.delegate = (id<CMHeadphoneMotionManagerDelegate>)self;
+		[manager startConnectionStatusUpdates];
+		headphoneMotionManager = manager;
+	}
+}
+
+-(void)headphoneMotionManagerDidConnect:(id)manager {
+	if (!HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY, NO)) return;
+	[delegate notifyWithName:@"AudioHeadTrackingHeadphonesConnected"
+						 title:NSLocalizedString(@"Head-Tracking Headphones Connected", @"")
+					description:NSLocalizedString(@"AirPods (or similar) with spatial audio head tracking are now active", @"")
+						  icon:[self iconDataForSymbol:@"speaker.wave.2.fill"]
+			  identifierString:@"HWGrowlAudioHeadTracking"
+				  contextString:nil
+							plugin:self];
+}
+-(void)headphoneMotionManagerDidDisconnect:(id)manager {
+	if (!HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY, NO)) return;
+	[delegate notifyWithName:@"AudioHeadTrackingHeadphonesDisconnected"
+						 title:NSLocalizedString(@"Head-Tracking Headphones Disconnected", @"")
+					description:@""
+						  icon:[self iconDataForSymbol:@"speaker.slash.fill"]
+			  identifierString:@"HWGrowlAudioHeadTracking"
+				  contextString:nil
+							plugin:self];
+}
+
+-(void)setUpMIDIClient {
+	__weak typeof(self) weakSelf = self;
+	MIDIClientCreateWithBlock((__bridge CFStringRef)@"HG4MAC AudioMonitor", &midiClient, ^(const MIDINotification *message) {
+		if (message->messageID != kMIDIMsgObjectAdded && message->messageID != kMIDIMsgObjectRemoved) return;
+		BOOL added = message->messageID == kMIDIMsgObjectAdded;
+		const MIDIObjectAddRemoveNotification *addRemove = (const MIDIObjectAddRemoveNotification *)message;
+		if (addRemove->childType != kMIDIObjectType_Device && addRemove->childType != kMIDIObjectType_ExternalDevice) return;
+		CFStringRef nameRef = NULL;
+		MIDIObjectGetStringProperty(addRemove->child, kMIDIPropertyDisplayName, &nameRef);
+		NSString *name = nameRef ? CFBridgingRelease(nameRef) : NSLocalizedString(@"MIDI Device", @"");
+		if (!HWGAudioBoolForKey(HWG_AUDIO_NOTIFY_MIDI_KEY, YES)) return;
+		typeof(self) strongSelf = weakSelf;
+		if (!strongSelf) return;
+		[strongSelf->delegate notifyWithName:added ? @"AudioMIDIDeviceAdded" : @"AudioMIDIDeviceRemoved"
+											 title:added ? NSLocalizedString(@"MIDI Device Connected", @"") : NSLocalizedString(@"MIDI Device Disconnected", @"")
+										description:name
+											  icon:[strongSelf iconDataForSymbol:added ? @"speaker.wave.2.fill" : @"speaker.slash.fill"]
+								  identifierString:[NSString stringWithFormat:@"HWGrowlAudioMIDI-%u", (unsigned)addRemove->child]
+									  contextString:nil
+											plugin:strongSelf];
+	});
 }
 
 #pragma mark Microphone in-use (#7)
@@ -887,13 +1321,14 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 -(NSView*)preferencePane {
 	if (prefsView) return prefsView;
 
-	// BUG FIX (17-ago-2026): was 264 — same fixed-constant risk class confirmed live in Network
-	// Monitor's Wi-Fi tab (a checkbox added without growing this renders but doesn't respond to
-	// clicks). Bumped with margin after adding 2 rows (Device UID/Mute state).
-	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	// BUG FIX (18-ago-2026): was 340 — same fixed-constant risk class, bumped after adding 9
+	// rows (Bit depth/Latency/Jack/Data source/Device stopped responding/Microphone mode/
+	// Head-tracking headphones/MIDI). Auto Layout's top-anchor chain below drives the real size
+	// regardless — see the Gamepad Monitor note on this same constant class.
+	NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 560, 620)];
 	tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 340)];
+	NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 620)];
 
 	NSTextField *header = [NSTextField labelWithString:NSLocalizedString(@"Notification fields", @"")];
 	header.font = [NSFont boldSystemFontOfSize:12];
@@ -912,6 +1347,17 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEFAULT_INPUT_KEY  title:NSLocalizedString(@"Notify on default input change", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEVICE_CONNECT_KEY title:NSLocalizedString(@"Notify on device connect/disconnect (HDMI/Thunderbolt/Built-in — USB and Bluetooth already covered by their own monitors)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_AUDIO_NOTIFY_MIC_IN_USE_KEY     title:NSLocalizedString(@"Notify when a microphone starts/stops being used", @"") defaultOn:YES],
+		// Final API audit (18-ago-2026) — OFF by default, except MIDI (genuinely new device
+		// class this app never covered before, same "on by default" convention as USB/Bluetooth
+		// connect events elsewhere in the app).
+		[self checkboxWithKey:HWG_AUDIO_SHOW_BITDEPTH_KEY title:NSLocalizedString(@"Bit depth", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_SHOW_LATENCY_KEY  title:NSLocalizedString(@"Latency", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_JACK_KEY   title:NSLocalizedString(@"Notify on headphone jack connect/disconnect", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DATASOURCE_KEY title:NSLocalizedString(@"Notify on audio source change (Speakers/Headphones/Line Out)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_DEVICE_ALIVE_KEY title:NSLocalizedString(@"Notify when a device stops responding (no clean disconnect)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_MIC_MODE_KEY title:NSLocalizedString(@"Notify on microphone mode change (Standard/Voice Isolation/Wide Spectrum)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_HEAD_TRACKING_KEY title:NSLocalizedString(@"Notify for head-tracking headphones (AirPods Pro/Max, macOS 14+)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_NOTIFY_MIDI_KEY title:NSLocalizedString(@"Notify on MIDI device connect/disconnect", @"") defaultOn:YES],
 	];
 
 	[v addSubview:header];
@@ -986,7 +1432,10 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse", @"AudioSampleRateChanged", @"AudioVolumeCritical"];
+	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse", @"AudioSampleRateChanged", @"AudioVolumeCritical",
+			 @"AudioJackChanged", @"AudioDataSourceChanged", @"AudioDeviceStoppedResponding",
+			 @"AudioMicrophoneModeChanged", @"AudioHeadTrackingHeadphonesConnected", @"AudioHeadTrackingHeadphonesDisconnected",
+			 @"AudioMIDIDeviceAdded", @"AudioMIDIDeviceRemoved"];
 }
 -(NSDictionary*)localizedNames {
 	return @{
@@ -997,6 +1446,14 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		@"AudioMicInUse": NSLocalizedString(@"Microphone In Use", @""),
 		@"AudioSampleRateChanged": NSLocalizedString(@"Sample Rate Changed", @""),
 		@"AudioVolumeCritical": NSLocalizedString(@"Volume Critically High", @""),
+		@"AudioJackChanged": NSLocalizedString(@"Audio Jack Changed", @""),
+		@"AudioDataSourceChanged": NSLocalizedString(@"Audio Source Changed", @""),
+		@"AudioDeviceStoppedResponding": NSLocalizedString(@"Audio Device Stopped Responding", @""),
+		@"AudioMicrophoneModeChanged": NSLocalizedString(@"Microphone Mode Changed", @""),
+		@"AudioHeadTrackingHeadphonesConnected": NSLocalizedString(@"Head-Tracking Headphones Connected", @""),
+		@"AudioHeadTrackingHeadphonesDisconnected": NSLocalizedString(@"Head-Tracking Headphones Disconnected", @""),
+		@"AudioMIDIDeviceAdded": NSLocalizedString(@"MIDI Device Connected", @""),
+		@"AudioMIDIDeviceRemoved": NSLocalizedString(@"MIDI Device Disconnected", @""),
 	};
 }
 -(NSDictionary*)noteDescriptions {
@@ -1008,11 +1465,20 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 		@"AudioMicInUse": NSLocalizedString(@"Sent when any connected microphone starts or stops actively being used by an app", @""),
 		@"AudioSampleRateChanged": NSLocalizedString(@"Sent when a connected device's nominal sample rate changes while still connected", @""),
 		@"AudioVolumeCritical": NSLocalizedString(@"Sent when the default output's volume crosses at/above the configured threshold (default 90%)", @""),
+		@"AudioJackChanged": NSLocalizedString(@"Sent when a device's headphone/line jack is plugged or unplugged — off by default", @""),
+		@"AudioDataSourceChanged": NSLocalizedString(@"Sent when a device's active data source changes (e.g. built-in speakers vs. headphones on the same jack) — off by default", @""),
+		@"AudioDeviceStoppedResponding": NSLocalizedString(@"Sent when a connected device stops responding without a clean disconnect — off by default", @""),
+		@"AudioMicrophoneModeChanged": NSLocalizedString(@"Sent when the system microphone mode changes (Standard/Voice Isolation/Wide Spectrum) — off by default", @""),
+		@"AudioHeadTrackingHeadphonesConnected": NSLocalizedString(@"Sent when head-tracking headphones (AirPods Pro/Max) become active, macOS 14+ — off by default", @""),
+		@"AudioHeadTrackingHeadphonesDisconnected": NSLocalizedString(@"Sent when they stop being active — off by default", @""),
+		@"AudioMIDIDeviceAdded": NSLocalizedString(@"Sent when a MIDI device is connected", @""),
+		@"AudioMIDIDeviceRemoved": NSLocalizedString(@"Sent when a MIDI device is disconnected", @""),
 	};
 }
 -(NSArray*)defaultNotifications {
-	// AudioSampleRateChanged deliberately excluded — OFF by default, unlike the rest.
-	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse"];
+	// AudioSampleRateChanged and the 6 final-audit additions above (except MIDI) deliberately
+	// excluded — OFF by default, unlike the rest.
+	return @[@"AudioDeviceConnected", @"AudioDeviceDisconnected", @"AudioDefaultOutputChanged", @"AudioDefaultInputChanged", @"AudioMicInUse", @"AudioMIDIDeviceAdded", @"AudioMIDIDeviceRemoved"];
 }
 
 @end
