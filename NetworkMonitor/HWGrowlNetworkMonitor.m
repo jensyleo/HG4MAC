@@ -15,6 +15,7 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <CoreWLAN/CoreWLAN.h>
 #import <CoreLocation/CoreLocation.h>
+#import <Network/Network.h>
 
 #include <sys/socket.h>
 #include <sys/sockio.h>
@@ -111,6 +112,25 @@
 // Sharing) or IBSS (ad-hoc) mode. Same CWInterfaceMode already read for the General-tab
 // "Interface mode" field (HWG_WIFI_SHOW_MODE_KEY), but as a state-TRANSITION event.
 #define HWG_NET_NOTIFY_WIFI_HOSTAP_KEY @"HWGNetworkNotifyWifiHostAPMode"
+
+// Final API audit (18-ago-2026), batch 4 — general (not per-destination) NWPathMonitor
+// signals: path unsatisfied/satisfied, costly (e.g. iPhone Personal Hotspot), constrained (Low
+// Data Mode), and link quality (minimal/moderate/good). Deliberately a SEPARATE mechanism from
+// HWG_NET_NOTIFY_REACHABILITY_KEY (batch 1's SCNetworkReachability) — reachability is a coarse
+// binary "does the general path exist", while these 4 are Network.framework-only facts
+// (isExpensive/isConstrained/link quality have no SCNetworkReachability equivalent at all).
+// This does NOT reintroduce the reverted P10 NWPathMonitor-for-link-detection approach (see the
+// property comment on previousIPv4ByInterface above) — that was specifically about the delay
+// before NWPathMonitor sees a newly-plugged interface, irrelevant to these 4 facts about
+// whichever path is already the system's current default.
+#define HWG_NET_NOTIFY_PATH_STATUS_KEY     @"HWGNetworkNotifyPathStatus"
+#define HWG_NET_NOTIFY_PATH_EXPENSIVE_KEY  @"HWGNetworkNotifyPathExpensive"
+#define HWG_NET_NOTIFY_PATH_CONSTRAINED_KEY @"HWGNetworkNotifyPathConstrained"
+#define HWG_NET_NOTIFY_PATH_QUALITY_KEY    @"HWGNetworkNotifyPathQuality"
+
+// Final API audit (18-ago-2026), batch 4 — max supported vs. negotiated Ethernet speed. Static
+// field on the existing Ethernet-speed-changed notification / General field.
+#define HWG_ETH_SHOW_MAXSPEED_KEY @"HWGEthernetShowMaxSupportedSpeed"
 
 // Per-row "Notify?" checkboxes (Icons tab) — one per icon row, matching the USB/Thunderbolt/
 // Bluetooth/Volume Monitor pattern. Several rows share one underlying notifyWithName call
@@ -280,6 +300,19 @@ typedef enum {
 @property (nonatomic, strong) NSString *lastKnownComputerName;
 @property (nonatomic, strong) NSString *lastKnownLocationName;
 
+// Final API audit (18-ago-2026), batch 4 — nw_path_monitor_t is an ARC-managed `os_object`
+// (like dispatch_queue_t), but stored `void *` here rather than as a typed strong property so
+// the Network.h import stays confined to just the .m file. -startPathMonitoring transfers a +1
+// ref in with `__bridge_retained`; -dealloc hands it back to ARC with `__bridge_transfer` to
+// release it normally.
+@property (nonatomic, assign) void *pathMonitor;
+@property (nonatomic, assign) NSInteger lastKnownPathStatus;
+@property (nonatomic, assign) BOOL haveLastKnownPathStatus;
+@property (nonatomic, assign) BOOL lastKnownPathExpensive;
+@property (nonatomic, assign) BOOL lastKnownPathConstrained;
+@property (nonatomic, assign) NSInteger lastKnownPathQuality;
+@property (nonatomic, assign) BOOL haveLastKnownPathFlags;
+
 @end
 
 @implementation HWGrowlNetworkMonitor
@@ -304,6 +337,13 @@ typedef enum {
 @synthesize lastKnownDHCPLeaseStartByInterface;
 @synthesize lastKnownComputerName;
 @synthesize lastKnownLocationName;
+@synthesize pathMonitor;
+@synthesize lastKnownPathStatus;
+@synthesize haveLastKnownPathStatus;
+@synthesize lastKnownPathExpensive;
+@synthesize lastKnownPathConstrained;
+@synthesize lastKnownPathQuality;
+@synthesize haveLastKnownPathFlags;
 @synthesize ethernetClassificationCache;
 @synthesize wifiClient;
 @synthesize lastReportedSSID;
@@ -339,6 +379,7 @@ typedef enum {
 		[self startEthernetSpeedPolling];
 		[self startReachabilityMonitoring];
 		[self primeHostnameAndLocationState];
+		[self startPathMonitoring];
 	}
 	return self;
 }
@@ -387,6 +428,12 @@ typedef enum {
 	if (reachabilityRef) {
 		SCNetworkReachabilityUnscheduleFromRunLoop(reachabilityRef, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
 		CFRelease(reachabilityRef);
+	}
+	if (pathMonitor) {
+		nw_path_monitor_t monitor = (__bridge_transfer nw_path_monitor_t)pathMonitor;
+		nw_path_monitor_cancel(monitor);
+		pathMonitor = NULL;
+		// `monitor` (ARC-managed local, via __bridge_transfer) is released when this scope ends.
 	}
 }
 
@@ -1167,6 +1214,100 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 						plugin:self];
 }
 
+#pragma mark General path status/cost/constraint/quality (nw_path_monitor, final API audit, 18-ago-2026, batch 4)
+
+-(NSString *)pathStatusLabel:(nw_path_status_t)status {
+	switch (status) {
+		case nw_path_status_satisfied:   return NSLocalizedString(@"Satisfied", @"");
+		case nw_path_status_unsatisfied: return NSLocalizedString(@"Unsatisfied", @"");
+		case nw_path_status_satisfiable: return NSLocalizedString(@"Satisfiable", @"");
+		default:                          return NSLocalizedString(@"Invalid", @"");
+	}
+}
+
+-(NSString *)pathQualityLabel:(nw_link_quality_t)quality {
+	switch (quality) {
+		case nw_link_quality_minimal:  return NSLocalizedString(@"Minimal", @"");
+		case nw_link_quality_moderate: return NSLocalizedString(@"Moderate", @"");
+		case nw_link_quality_good:     return NSLocalizedString(@"Good", @"");
+		default:                        return NSLocalizedString(@"Unknown", @"");
+	}
+}
+
+-(void)startPathMonitoring {
+	nw_path_monitor_t monitor = nw_path_monitor_create();
+	nw_path_monitor_set_queue(monitor, dispatch_get_main_queue());
+	__weak typeof(self) weakSelf = self;
+	nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+		[weakSelf pathUpdated:path];
+	});
+	nw_path_monitor_start(monitor);
+	pathMonitor = (__bridge_retained void *)monitor;
+}
+
+// The first call after -nw_path_monitor_start (and every real launch-time baseline) also comes
+// through here — `haveLastKnownPath*` gates notifying on that first sighting, same "silent
+// baseline" convention as every other feature in this file.
+-(void)pathUpdated:(nw_path_t)path {
+	nw_path_status_t status = nw_path_get_status(path);
+	BOOL expensive = nw_path_is_expensive(path);
+	BOOL constrained = nw_path_is_constrained(path);
+	// nw_path_get_link_quality is macOS 26.0+ only (confirmed via the -Wunguarded-availability
+	// warning against this SDK) — degrade to "unknown" on older macOS rather than requiring it.
+	nw_link_quality_t quality = nw_link_quality_unknown;
+	if (@available(macOS 26.0, *)) {
+		quality = nw_path_get_link_quality(path);
+	}
+
+	if (haveLastKnownPathStatus && (NSInteger)status != lastKnownPathStatus) {
+		if ([self boolForKey:HWG_NET_NOTIFY_PATH_STATUS_KEY default:NO]) {
+			[delegate notifyWithName:@"NetworkPathStatusChanged"
+								 title:NSLocalizedString(@"Network Path Status Changed", @"")
+							description:[NSString stringWithFormat:@"%@ → %@", [self pathStatusLabel:(nw_path_status_t)lastKnownPathStatus], [self pathStatusLabel:status]]
+								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+					  identifierString:@"HWGrowlNetworkPathStatus"
+						  contextString:nil
+									plugin:self];
+		}
+	}
+	lastKnownPathStatus = status;
+	haveLastKnownPathStatus = YES;
+
+	if (haveLastKnownPathFlags) {
+		if (expensive != lastKnownPathExpensive && [self boolForKey:HWG_NET_NOTIFY_PATH_EXPENSIVE_KEY default:NO]) {
+			[delegate notifyWithName:@"NetworkPathExpensiveChanged"
+								 title:expensive ? NSLocalizedString(@"Network Path Is Now Costly", @"") : NSLocalizedString(@"Network Path No Longer Costly", @"")
+							description:NSLocalizedString(@"e.g. an iPhone Personal Hotspot or metered connection", @"")
+								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+					  identifierString:@"HWGrowlNetworkPathExpensive"
+						  contextString:nil
+									plugin:self];
+		}
+		if (constrained != lastKnownPathConstrained && [self boolForKey:HWG_NET_NOTIFY_PATH_CONSTRAINED_KEY default:NO]) {
+			[delegate notifyWithName:@"NetworkPathConstrainedChanged"
+								 title:constrained ? NSLocalizedString(@"Network Path Is Now Constrained", @"") : NSLocalizedString(@"Network Path No Longer Constrained", @"")
+							description:NSLocalizedString(@"Low Data Mode is active for this path", @"")
+								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+					  identifierString:@"HWGrowlNetworkPathConstrained"
+						  contextString:nil
+									plugin:self];
+		}
+		if ((NSInteger)quality != lastKnownPathQuality && [self boolForKey:HWG_NET_NOTIFY_PATH_QUALITY_KEY default:NO]) {
+			[delegate notifyWithName:@"NetworkPathQualityChanged"
+								 title:NSLocalizedString(@"Network Link Quality Changed", @"")
+							description:[NSString stringWithFormat:@"%@ → %@", [self pathQualityLabel:(nw_link_quality_t)lastKnownPathQuality], [self pathQualityLabel:quality]]
+								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
+					  identifierString:@"HWGrowlNetworkPathQuality"
+						  contextString:nil
+									plugin:self];
+		}
+	}
+	lastKnownPathExpensive = expensive;
+	lastKnownPathConstrained = constrained;
+	lastKnownPathQuality = quality;
+	haveLastKnownPathFlags = YES;
+}
+
 -(void)updateInterface:(NSString*)interface forType:(NetworkInterfaceType)type withStatus:(NSDictionary*)status {
 	HWGrowlNetworkInterfaceStatus *new = [[HWGrowlNetworkInterfaceStatus alloc] initForInterface:interface
 																														ofType:type
@@ -1435,6 +1576,7 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 	BOOL showInterface = [self boolForKey:HWG_ETH_SHOW_INTERFACE_KEY default:YES];
 	BOOL showSpeed     = [self boolForKey:HWG_ETH_SHOW_SPEED_KEY default:YES];
 	BOOL showMode      = [self boolForKey:HWG_ETH_SHOW_MODE_KEY default:YES];
+	BOOL showMaxSpeed  = [self boolForKey:HWG_ETH_SHOW_MAXSPEED_KEY default:NO];
 
 	if (newActive && !oldActive) {
 		// Use the Ethernet connector icon only for interfaces with a recognized Ethernet
@@ -1451,6 +1593,12 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 		if (showInterface) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface:\t%@", ""), interfaceString]];
 		if (showSpeed)     [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Speed:\t%@", ""), speed ?: NSLocalizedString(@"Unknown", @"")]];
 		if (showMode && mode) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Mode:\t%@", ""), mode]];
+		// Final API audit (18-ago-2026), batch 4 — only shown when negotiated < max (nothing
+		// extra to say when already running at the interface's ceiling).
+		if (showMaxSpeed) {
+			NSString *maxVsNegotiated = [self maxVsNegotiatedSpeedForInterface:interfaceString];
+			if (maxVsNegotiated) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Negotiated:\t%@", @""), maxVsNegotiated]];
+		}
 		noteDescription = [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 		imageName = isEthernet ? @"Network-Ethernet-On" : @"Network-Interface-On";
 	} else if (!newActive && oldActive) {
@@ -1597,6 +1745,61 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 	if (outMode) *outMode = options;
 
 	return [NSString stringWithUTF8String:type];
+}
+
+// Final API audit (18-ago-2026), batch 4 — max supported vs. negotiated speed. Same
+// SIOCGIFMEDIA ioctl as -getMediaTypeForInterface:mode: above, but with `ifm_ulist` (the full
+// list of media types the NIC advertises supporting) filled in via a second call once the
+// first tells us how many entries to allocate for — standard two-pass ifmediareq idiom (see
+// Darwin's network_cmds/ifconfig.tproj, same source this file's header comment already credits
+// for the ifm_active-decoding approach above). Returns nil if the negotiated speed already
+// equals the max (nothing extra to report), or if the interface has only one supported type.
+-(NSString *)maxVsNegotiatedSpeedForInterface:(NSString *)interfaceString {
+	const char *interface = [interfaceString UTF8String];
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0) return nil;
+
+	struct ifmediareq ifmr;
+	memset(&ifmr, 0, sizeof(ifmr));
+	strncpy(ifmr.ifm_name, interface, sizeof(ifmr.ifm_name) - 1);
+	if (ioctl(s, SIOCGIFMEDIA, (caddr_t)&ifmr) < 0 || ifmr.ifm_count == 0) {
+		close(s);
+		return nil;
+	}
+
+	int *mediaList = calloc(ifmr.ifm_count, sizeof(int));
+	if (!mediaList) { close(s); return nil; }
+	ifmr.ifm_ulist = mediaList;
+	if (ioctl(s, SIOCGIFMEDIA, (caddr_t)&ifmr) < 0) {
+		free(mediaList);
+		close(s);
+		return nil;
+	}
+	close(s);
+
+	// Find the highest Ethernet subtype among every supported media entry, by matching each
+	// against the same ifm_subtype_ethernet_descriptions table -getMediaTypeForInterface:mode:
+	// already uses (the table is ordered fastest-first, per Darwin's own if_media.h).
+	struct ifmedia_description *bestDesc = NULL;
+	for (int i = 0; i < ifmr.ifm_count; i++) {
+		int subtype = IFM_SUBTYPE(mediaList[i]);
+		for (struct ifmedia_description *desc = ifm_subtype_ethernet_descriptions; desc->ifmt_string; ++desc) {
+			if (desc->ifmt_word == subtype) {
+				if (!bestDesc || desc < bestDesc) bestDesc = desc;   // table is fastest-first
+				break;
+			}
+		}
+	}
+	free(mediaList);
+	if (!bestDesc) return nil;
+
+	NSString *maxSpeed = [NSString stringWithUTF8String:bestDesc->ifmt_string];
+	NSString *negotiated = nil;
+	for (struct ifmedia_description *desc = ifm_subtype_ethernet_descriptions; desc->ifmt_string; ++desc) {
+		if (IFM_SUBTYPE(ifmr.ifm_active) == desc->ifmt_word) { negotiated = [NSString stringWithUTF8String:desc->ifmt_string]; break; }
+	}
+	if (!negotiated || [negotiated isEqualToString:maxSpeed]) return nil;   // already at max, or unknown — nothing extra to say
+	return [NSString stringWithFormat:NSLocalizedString(@"%@ (max %@)", @""), negotiated, maxSpeed];
 }
 
 // Counts the number of leading 1-bits in a 32-bit IPv4 netmask.
@@ -2385,7 +2588,9 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	[tabs addTabViewItem:wifiItem];
 
 	// --- Tab: Ethernet ---
-	NSView *ethTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 200)];
+	// BUG FIX (18-ago-2026): was 200 — same fixed-constant risk class as the IP tab fix above.
+	// Bumped after adding 1 row (Max supported vs. negotiated speed).
+	NSView *ethTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 240)];
 	NSTextField *ethHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ethTab addSubview:ethHeader];
 	[NSLayoutConstraint activateConstraints:@[
@@ -2396,11 +2601,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[self checkboxWithKey:HWG_ETH_SHOW_INTERFACE_KEY title:NSLocalizedString(@"Interface name (en0, en5…)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_SPEED_KEY     title:NSLocalizedString(@"Speed", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_MODE_KEY      title:NSLocalizedString(@"Mode / duplex", @"") defaultOn:YES],
+		// Final API audit (18-ago-2026), batch 4 — OFF by default.
+		[self checkboxWithKey:HWG_ETH_SHOW_MAXSPEED_KEY  title:NSLocalizedString(@"Max supported speed (if higher than negotiated)", @"") defaultOn:NO],
 	] inView:ethTab belowView:ethHeader gap:10];
 
 	NSTabViewItem *ethItem = [[NSTabViewItem alloc] initWithIdentifier:@"ethernet"];
 	ethItem.label = NSLocalizedString(@"Ethernet", @"");
-	ethItem.view = [self scrollWrapping:ethTab height:200];
+	ethItem.view = [self scrollWrapping:ethTab height:240];
 	[tabs addTabViewItem:ethItem];
 
 	// --- Tab: IP ---
@@ -2537,6 +2744,10 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		@[@"Computer Name Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_HOSTNAME_KEY, @NO],
 		@[@"Network Location Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_LOCATION_KEY, @NO],
 		@[@"Wi-Fi Host AP / Ad-hoc Mode Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_WIFI_HOSTAP_KEY, @NO],
+		@[@"Network Path Status Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_STATUS_KEY, @NO],
+		@[@"Network Path Costly Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_EXPENSIVE_KEY, @NO],
+		@[@"Network Path Constrained Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_CONSTRAINED_KEY, @NO],
+		@[@"Network Link Quality Changed", @"HWGPrefsNetwork-Module", HWG_NET_NOTIFY_PATH_QUALITY_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -2568,7 +2779,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", @"WifiHostAPModeChanged", nil];
+	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"NetworkLinkSpeedChanged", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", @"VPNConnected", @"VPNDisconnected", @"DNSServersChanged", @"PrimaryInterfaceChanged", @"ProxyConfigChanged", @"WifiRadioOn", @"WifiRadioOff", @"NetworkReachabilityChanged", @"NetworkDHCPLeaseRenewed", @"NetworkHostnameChanged", @"NetworkLocationChanged", @"WifiHostAPModeChanged", @"NetworkPathStatusChanged", @"NetworkPathExpensiveChanged", @"NetworkPathConstrainedChanged", @"NetworkPathQualityChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"IP Address Changed", @""), @"IPAddressChange",
@@ -2589,7 +2800,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"DHCP Lease Renewed", @""), @"NetworkDHCPLeaseRenewed",
 			  NSLocalizedString(@"Computer Name Changed", @""), @"NetworkHostnameChanged",
 			  NSLocalizedString(@"Network Location Changed", @""), @"NetworkLocationChanged",
-			  NSLocalizedString(@"Wi-Fi Host AP / Ad-hoc Mode Changed", @""), @"WifiHostAPModeChanged", nil];
+			  NSLocalizedString(@"Wi-Fi Host AP / Ad-hoc Mode Changed", @""), @"WifiHostAPModeChanged",
+			  NSLocalizedString(@"Network Path Status Changed", @""), @"NetworkPathStatusChanged",
+			  NSLocalizedString(@"Network Path Costly Changed", @""), @"NetworkPathExpensiveChanged",
+			  NSLocalizedString(@"Network Path Constrained Changed", @""), @"NetworkPathConstrainedChanged",
+			  NSLocalizedString(@"Network Link Quality Changed", @""), @"NetworkPathQualityChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when the systems IP address changes", @""), @"IPAddressChange",
@@ -2610,7 +2825,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 			  NSLocalizedString(@"Sent when an interface's DHCP lease is renewed/rebound while it stays connected — off by default", @""), @"NetworkDHCPLeaseRenewed",
 			  NSLocalizedString(@"Sent when the computer's name (Sharing preferences) changes — off by default", @""), @"NetworkHostnameChanged",
 			  NSLocalizedString(@"Sent when the active Network Location changes (e.g. Home/Work/Automatic) — off by default", @""), @"NetworkLocationChanged",
-			  NSLocalizedString(@"Sent when the Wi-Fi interface enters/leaves Host AP (Internet Sharing) or ad-hoc (IBSS) mode — off by default", @""), @"WifiHostAPModeChanged", nil];
+			  NSLocalizedString(@"Sent when the Wi-Fi interface enters/leaves Host AP (Internet Sharing) or ad-hoc (IBSS) mode — off by default", @""), @"WifiHostAPModeChanged",
+			  NSLocalizedString(@"Sent when the current network path's status changes (Satisfied/Unsatisfied/Satisfiable) — off by default", @""), @"NetworkPathStatusChanged",
+			  NSLocalizedString(@"Sent when the current network path becomes/stops being costly (e.g. an iPhone Personal Hotspot) — off by default", @""), @"NetworkPathExpensiveChanged",
+			  NSLocalizedString(@"Sent when the current network path becomes/stops being constrained (Low Data Mode) — off by default", @""), @"NetworkPathConstrainedChanged",
+			  NSLocalizedString(@"Sent when the current network path's link quality measurement changes (Minimal/Moderate/Good) — off by default", @""), @"NetworkPathQualityChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"IPAddressChange", @"NetworkLinkUp", @"NetworkLinkDown", @"AirportConnected", @"AirportDisconnected", @"AirportSignalChange", nil];

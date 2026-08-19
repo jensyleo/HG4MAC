@@ -49,6 +49,16 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Network Monitor — batch 4/N of 32 audit candidates (cross-platform)
+Path status/costly/constrained (`nw_path_monitor`, a new mechanism distinct from the reverted
+16-jul NWPathMonitor link-detection attempt — this reads facts SCDynamicStore/SCNetworkReachability
+can't provide, not connect/disconnect), link quality (`nw_path_get_link_quality` — found to be
+macOS 26.0+ only, guarded with `@available`, degrades to "Unknown" on older macOS), and max
+supported vs. negotiated Ethernet speed (two-pass `SIOCGIFMEDIA`). New `Network.framework` link.
+Fixed a real ARC bridging bug during implementation (nw_path_monitor_t retain/release via
+`__bridge_retained`/`__bridge_transfer`, not manual nw_release). 20/32 candidates done — see
+`TODO.md`.
+
 ### Added: Network Monitor — batch 3/N of 32 audit candidates (cross-platform)
 IP config method (DHCP/Manual), MTU, decoded interface type (`SCNetworkInterfaceGetInterfaceType`),
 MAC address (non-Wi-Fi), DNS search domains, and full DHCP lease detail (start/expiration/
