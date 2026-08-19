@@ -112,7 +112,7 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 }
 
 -(void)darkWakeThermalEmergencyFired {
-	if (!HWGThermalBoolForKey(HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, YES)) return;
+	if (!HWGThermalBoolForKey(HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, NO)) return;
 	[delegate notifyWithName:@"DarkWakeThermalEmergency"
 						 title:NSLocalizedString(@"Dark Wake Thermal Emergency", @"")
 				   description:NSLocalizedString(@"The Mac overheated during a brief maintenance wake and may sleep again immediately to cool down.", @"")
@@ -410,7 +410,7 @@ static void HWGThermalRootDomainCallback(void *refcon, io_service_t service, uin
 		@[@"Fair", @"Thermal-Fair", HWG_THERMAL_NOTIFY_FAIR_KEY, @NO],
 		@[@"Serious", @"Thermal-Serious", HWG_THERMAL_NOTIFY_SERIOUS_KEY, @YES],
 		@[@"Critical", @"Thermal-Critical", HWG_THERMAL_NOTIFY_CRITICAL_KEY, @YES],
-		@[@"Dark Wake Thermal Emergency", @"Thermal-DarkWakeEmergency", HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, @YES],
+		@[@"Dark Wake Thermal Emergency", @"Thermal-DarkWakeEmergency", HWG_THERMAL_NOTIFY_DARKWAKE_EMERGENCY_KEY, @NO],
 	]];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
