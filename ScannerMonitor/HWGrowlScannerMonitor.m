@@ -203,6 +203,12 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 	return v;
 }
 
+// Polling, not push-driven (investigated 19-ago-2026 as part of a full audit of every polling
+// timer in the app): a scanner's status is only reachable over the network via eSCL's
+// `GET /eSCL/ScannerStatus` HTTP request — there's no macOS framework/daemon involved at all
+// (unlike a USB device, which at least has IOKit notifications), so there is no
+// NSNotificationCenter/KVO/IOKit hook that could push this. Polling the device's own HTTP
+// endpoint is the only option this protocol allows.
 -(void)startScanStatusPolling {
 	if (self.scanStatusPollTimer) return;
 	__weak typeof(self) weakSelf = self;

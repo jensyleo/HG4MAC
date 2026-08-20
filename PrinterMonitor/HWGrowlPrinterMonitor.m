@@ -36,6 +36,13 @@
 #import <cups/cups.h>
 
 #define HWG_PRINTER_NOTIFY_KEY @"HWGPrinterNotifyConnectDisconnect"
+// Polling, not push-driven (investigated 19-ago-2026 as part of a full audit of every polling
+// timer in the app): CUPS's printer list/queue lives in a config file (cupsd.conf/printers.conf)
+// that can't be watched for changes without root, and neither CUPS's own API
+// (<cups/cups.h>) nor AppKit's NSPrinter/NSPrintInfo expose an NSNotificationCenter/KVO hook for
+// "a printer was added/removed" or "job state changed" — this app already documents that same
+// conclusion in the General tab's caption text. 8s is a deliberate compromise between promptness
+// and not hammering CUPS's HTTP-based IPP interface.
 #define HWG_PRINTER_POLL_INTERVAL 8.0
 
 // F34 follow-up (23-jul-2026, user request): 3 additions, all OFF by default —

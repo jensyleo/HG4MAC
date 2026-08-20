@@ -488,6 +488,13 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			DARegisterDiskDisappearedCallback(daSession, NULL, hwgDiskDisappearedCallback, (__bridge void *)self);
 		}
 
+		// Polling, not push-driven (investigated 19-ago-2026 as part of a full audit of every
+		// polling timer in the app): NSWorkspace/DiskArbitration only notify on mount/unmount/
+		// appear/disappear (already handled above) — there is no NSNotificationCenter/KVO hook
+		// for a mounted volume's free space changing over time (writing files to it doesn't
+		// post anything), so periodically re-reading each volume's resource values is the only
+		// option. 300s balances catching a volume filling up against not doing needless
+		// filesystem stat calls on every mounted volume too often.
 		self.lowSpacePollTimer = [NSTimer scheduledTimerWithTimeInterval:300.0
 		                                                           target:self
 		                                                         selector:@selector(pollLowFreeSpace:)
