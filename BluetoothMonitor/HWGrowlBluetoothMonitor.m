@@ -64,6 +64,17 @@
 #define HWG_BT_SHOW_HFPFEATURES_KEY @"HWGBluetoothShowHFPFeatures"
 #define HWG_BT_SHOW_HIDDETAIL_KEY @"HWGBluetoothShowHIDDetail"
 
+// Final API audit (19-ago-2026), lote 7 — paired/pairing-removed events. There's no push
+// notification for pairing state changes specifically (unlike connect/disconnect), so this is
+// detected the same way NetworkMonitor detects interface changes with no native push event:
+// periodically snapshot `+[IOBluetoothDevice pairedDevices]` and diff against the previous
+// snapshot. Runs on its own slow timer, independent of the radio-power poll above (that one is
+// now push-driven and only kept as a 30s safety net — this one has no push alternative at all,
+// so it stays as this feature's actual primary detection path).
+#define HWG_BT_NOTIFY_PAIRED_KEY   @"HWGBluetoothNotifyPaired"
+#define HWG_BT_NOTIFY_UNPAIRED_KEY @"HWGBluetoothNotifyUnpaired"
+#define HWG_BT_PAIRED_POLL_INTERVAL 15.0
+
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -132,6 +143,10 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // Final API audit (19-ago-2026), lote 5 — kept only to receive -centralManagerDidUpdateState:
 // (push). Never used for scanning/connecting to BLE peripherals.
 @property (nonatomic, strong) CBCentralManager *subsystemStateManager;
+// Final API audit (19-ago-2026), lote 7 — pairing detection. nil until the first poll tick
+// establishes a baseline, same "no notification on first sighting" pattern as radio power.
+@property (nonatomic, strong) NSTimer *pairedDevicesPollTimer;
+@property (nonatomic, strong) NSSet<NSString *> *lastKnownPairedAddresses;
 
 @end
 
@@ -144,10 +159,13 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @synthesize radioPowerPollTimer;
 @synthesize lastKnownRadioPowerState;
 @synthesize subsystemStateManager;
+@synthesize pairedDevicesPollTimer;
+@synthesize lastKnownPairedAddresses;
 
 -(void)dealloc {
 	[connectionNotification unregister];
 	[radioPowerPollTimer invalidate];
+	[pairedDevicesPollTimer invalidate];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	// ARC handles the release; no [super dealloc].
 }
@@ -252,6 +270,56 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 							plugin:self];
 }
 
+// Final API audit (19-ago-2026), lote 7 — diffs the current `pairedDevices` snapshot against
+// the previous one by address (not by IOBluetoothDevice identity — that class doesn't guarantee
+// the same instance is returned across calls). First tick just establishes the baseline.
+-(void)pollPairedDevices {
+	NSArray<IOBluetoothDevice *> *current = [IOBluetoothDevice pairedDevices];
+	NSMutableSet<NSString *> *currentAddresses = [NSMutableSet setWithCapacity:current.count];
+	NSMutableDictionary<NSString *, IOBluetoothDevice *> *deviceByAddress = [NSMutableDictionary dictionaryWithCapacity:current.count];
+	for (IOBluetoothDevice *device in current) {
+		NSString *address = [device addressString];
+		if (!address) continue;
+		[currentAddresses addObject:address];
+		deviceByAddress[address] = device;
+	}
+
+	NSSet<NSString *> *previousAddresses = self.lastKnownPairedAddresses;
+	self.lastKnownPairedAddresses = currentAddresses;
+	if (!previousAddresses) return;   // first sighting — baseline only, no notification
+
+	NSMutableSet<NSString *> *newlyPaired = [currentAddresses mutableCopy];
+	[newlyPaired minusSet:previousAddresses];
+	NSMutableSet<NSString *> *newlyUnpaired = [previousAddresses mutableCopy];
+	[newlyUnpaired minusSet:currentAddresses];
+
+	if (HWGBTBoolForKey(HWG_BT_NOTIFY_PAIRED_KEY, NO)) {
+		for (NSString *address in newlyPaired) {
+			IOBluetoothDevice *device = deviceByAddress[address];
+			NSData *iconData = [HWGResolveIconNamed([self bluetoothIconNameForDevice:device] ?: @"Bluetooth-On") TIFFRepresentation];
+			[delegate notifyWithName:@"BluetoothPaired"
+									 title:NSLocalizedString(@"Bluetooth Device Paired", @"")
+							 description:[device name] ?: address
+									  icon:iconData
+					  identifierString:address
+						  contextString:nil
+									plugin:self];
+		}
+	}
+	if (HWGBTBoolForKey(HWG_BT_NOTIFY_UNPAIRED_KEY, NO)) {
+		for (NSString *address in newlyUnpaired) {
+			NSData *iconData = [HWGResolveIconNamed(@"Bluetooth-Off") TIFFRepresentation];
+			[delegate notifyWithName:@"BluetoothUnpaired"
+									 title:NSLocalizedString(@"Bluetooth Device Unpaired", @"")
+							 description:address
+									  icon:iconData
+					  identifierString:address
+						  contextString:nil
+									plugin:self];
+		}
+	}
+}
+
 -(void)postRegistrationInit {
 	self.starting = YES;
 	// Final API audit (18-ago-2026) — real push notifications for radio power state (see the
@@ -272,6 +340,13 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	// off the main queue's default dispatch behavior isn't needed here — nil means "main queue",
 	// which is what every other delegate callback in this file already assumes.
 	self.subsystemStateManager = [[CBCentralManager alloc] initWithDelegate:self queue:nil options:@{CBCentralManagerOptionShowPowerAlertKey: @NO}];
+	// Final API audit (19-ago-2026), lote 7.
+	self.pairedDevicesPollTimer = [NSTimer scheduledTimerWithTimeInterval:HWG_BT_PAIRED_POLL_INTERVAL
+																	 target:self
+																   selector:@selector(pollPairedDevices)
+																   userInfo:nil
+																	repeats:YES];
+	[self pollPairedDevices];   // baseline immediately rather than waiting for the first tick
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
 	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
@@ -932,6 +1007,10 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		// Final API audit (19-ago-2026), lote 5 — subsystem-level state (restarting/unauthorized/
 		// unsupported), reuses the module icon since there's no dedicated art for this rare event.
 		@[@"Bluetooth Status Changed", @"HWGPrefsBluetooth-Module", HWG_BT_NOTIFY_SUBSYSTEM_KEY, @NO],
+		// Final API audit (19-ago-2026), lote 7 — reuse the generic connected/disconnected icons:
+		// pairing is a different event from connecting, but there's no dedicated art for it.
+		@[@"Paired", @"Bluetooth-On", HWG_BT_NOTIFY_PAIRED_KEY, @NO],
+		@[@"Unpaired", @"Bluetooth-Off", HWG_BT_NOTIFY_UNPAIRED_KEY, @NO],
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.
@@ -992,21 +1071,25 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", nil];
+	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", @"BluetoothPaired", @"BluetoothUnpaired", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Bluetooth Connected", @""), @"BluetoothConnected",
 			  NSLocalizedString(@"Bluetooth Disconnected", @""), @"BluetoothDisconnected",
 			  NSLocalizedString(@"Bluetooth Radio On", @""), @"BluetoothRadioOn",
 			  NSLocalizedString(@"Bluetooth Radio Off", @""), @"BluetoothRadioOff",
-			  NSLocalizedString(@"Bluetooth Status Changed", @""), @"BluetoothSubsystemStateChanged", nil];
+			  NSLocalizedString(@"Bluetooth Status Changed", @""), @"BluetoothSubsystemStateChanged",
+			  NSLocalizedString(@"Bluetooth Device Paired", @""), @"BluetoothPaired",
+			  NSLocalizedString(@"Bluetooth Device Unpaired", @""), @"BluetoothUnpaired", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a Bluetooth Device is connected", @""), @"BluetoothConnected",
 			  NSLocalizedString(@"Sent when a Bluetooth Device is disconnected", @""), @"BluetoothDisconnected",
 			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned on (System Settings/Control Center toggle)", @""), @"BluetoothRadioOn",
 			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned off", @""), @"BluetoothRadioOff",
-			  NSLocalizedString(@"Sent when the Bluetooth subsystem is restarting, becomes unauthorized, or is unsupported", @""), @"BluetoothSubsystemStateChanged", nil];
+			  NSLocalizedString(@"Sent when the Bluetooth subsystem is restarting, becomes unauthorized, or is unsupported", @""), @"BluetoothSubsystemStateChanged",
+			  NSLocalizedString(@"Sent when a new Bluetooth device is paired with this Mac", @""), @"BluetoothPaired",
+			  NSLocalizedString(@"Sent when a previously-paired Bluetooth device is unpaired", @""), @"BluetoothUnpaired", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];
