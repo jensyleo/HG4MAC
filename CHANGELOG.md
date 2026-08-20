@@ -4,6 +4,34 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
+## v1.19.1 — 2026-08-20
+
+Security and correctness fixes following a complete code audit.
+
+### Fixed: Stack overflow in IP address validation
+`-[NSString Growl_isLikelyIPAddress]` passed an 8-byte stack variable (`void *ipV6`) as the
+destination buffer to `inet_pton(AF_INET6, ...)`, which writes 16 bytes (`struct in6_addr`).
+This caused an 8-byte stack overflow each time a string was evaluated as a potential IP address
+(e.g., hostnames resolved from Bonjour/network responses). Corrected by using properly-sized
+`struct in_addr` and `struct in6_addr` buffers.
+
+### Fixed: Port numbers displayed with incorrect byte order
+Lines in `+[NSString stringWithAddressData:]` were printing `sin_port` and `sin6_port` (network
+byte order, big-endian) without calling `ntohs()` to convert to host byte order. This caused
+port numbers to display byte-swapped on little-endian systems (all Mac Apple Silicon/Intel).
+Added `ntohs()` calls.
+
+### Fixed: Inconsistent null-termination in interface name handling
+`-[HWGrowlNetworkMonitor getMediaTypeForInterface:mode:]` was checking for interface names that
+exceed `IFNAMSIZ` but continued with `strncpy()` without reserving a byte for the null
+terminator, inconsistent with the same pattern elsewhere in the file (lines 1979, 2126).
+Now uses `strncpy(..., sizeof - 1)` and returns early if the name is too long.
+
+### Fixed: Explicit XXE hardening in Scanner Monitor's XML parser
+`HWGrowlScannerMonitor`'s `NSXMLParser` (which processes HTTP responses from network scanners)
+now explicitly sets `shouldResolveExternalEntities = NO` instead of relying on the platform's
+default behavior, which is not documented as stable across macOS versions.
+
 ## v1.19.0 — 2026-08-20
 
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"

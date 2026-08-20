@@ -59,8 +59,8 @@
 
 - (BOOL)Growl_isLikelyIPAddress
 {
-    void * ipV4;
-    void * ipV6;
+    struct in_addr ipV4;
+    struct in6_addr ipV6;
    if(inet_pton(AF_INET, [self cStringUsingEncoding:NSUTF8StringEncoding], &ipV4) == 1 ||
       inet_pton(AF_INET6, [self cStringUsingEncoding:NSUTF8StringEncoding], &ipV6) == 1)
       return YES;
@@ -89,14 +89,14 @@
 	if (socketAddress->sa_family == AF_INET) {
 		struct sockaddr_in *ipv4 = (struct sockaddr_in *)socketAddress;
 		if (inet_ntop(AF_INET, &(ipv4->sin_addr), stringBuffer, INET6_ADDRSTRLEN))
-         addressAsString = [NSString stringWithFormat:@"%s:%d", stringBuffer, ipv4->sin_port];
+         addressAsString = [NSString stringWithFormat:@"%s:%d", stringBuffer, ntohs(ipv4->sin_port)];
 		else
 			addressAsString = @"IPv4 un-ntopable";
 	} else if (socketAddress->sa_family == AF_INET6) {
 		struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)socketAddress;
 		if (inet_ntop(AF_INET6, &(ipv6->sin6_addr), stringBuffer, INET6_ADDRSTRLEN))
 			// Suggested IPv6 format (see http://www.faqs.org/rfcs/rfc2732.html)
-         addressAsString = [NSString stringWithFormat:@"[%s]:%d", stringBuffer, ipv6->sin6_port ];
+         addressAsString = [NSString stringWithFormat:@"[%s]:%d", stringBuffer, ntohs(ipv6->sin6_port) ];
 		else
 			addressAsString = @"IPv6 un-ntopable";
 	} else

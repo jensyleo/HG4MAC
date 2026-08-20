@@ -54,9 +54,7 @@ static NSMutableArray *_activeBannerDismissBlocks = nil;
 // just-shown banner short — see the eviction-candidate search in showBannerWindow.
 static NSMutableArray *_activeBannerRevealTimes = nil;
 
-// Legacy FIFO queue of banners waiting for screen room. No longer populated
-// (see 05-ago-2026 eviction fix in `showBannerWindow`) — kept only so `dismiss`'s
-// drain code stays harmless dead code instead of needing removal mid-fix.
+// FIFO queue of banners waiting for screen room when the stack is full.
 static NSMutableArray *_pendingBannerReveals = nil;
 
 // Vertical gap between stacked banners (in screen pixels)

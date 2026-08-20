@@ -262,6 +262,7 @@ static BOOL HWGScannerBoolForKey(NSString *key, BOOL def) {
 		if (!data || error) return;   // device offline/unreachable/timed out this tick — silently skip, try again next poll
 		HWGESCLStatusParser *parser = [HWGESCLStatusParser new];
 		NSXMLParser *xmlParser = [[NSXMLParser alloc] initWithData:data];
+		xmlParser.shouldResolveExternalEntities = NO;   // data comes from a network device's HTTP response, don't rely on the platform default
 		xmlParser.delegate = parser;
 		if (![xmlParser parse] || ![parser.deviceState length]) return;   // unparseable/unexpected shape — skip rather than guess
 		dispatch_async(dispatch_get_main_queue(), ^{

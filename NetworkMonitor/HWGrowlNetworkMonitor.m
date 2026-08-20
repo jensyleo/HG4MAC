@@ -1909,8 +1909,10 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 
 	const char *interface = [interfaceString UTF8String];
 	size_t length = strlen(interface);
-	if (length >= IFNAMSIZ)
+	if (length >= IFNAMSIZ) {
 		NSLog(@"Interface name too long");
+		return NULL;
+	}
 
 	int s = socket(AF_INET, SOCK_DGRAM, 0);
 	if (s < 0) {
@@ -1919,7 +1921,7 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 	}
 	struct ifmediareq ifmr;
 	memset(&ifmr, 0, sizeof(ifmr));
-	strncpy(ifmr.ifm_name, interface, sizeof(ifmr.ifm_name));
+	strncpy(ifmr.ifm_name, interface, sizeof(ifmr.ifm_name) - 1);
 
 	if (ioctl(s, SIOCGIFMEDIA, (caddr_t)&ifmr) < 0) {
 		// Media not supported.
