@@ -28,6 +28,12 @@
 #define HWG_BT_SHOW_BATTERY_KEY @"HWGBluetoothShowBattery"
 #define HWG_BT_SHOW_RSSI_KEY    @"HWGBluetoothShowRSSI"
 #define HWG_BT_SHOW_SERVICES_KEY @"HWGBluetoothShowServices"
+// Final API audit (18-ago-2026), lote 2 — all 3 read from IOBluetoothDevice, same class already
+// used for Type/Paired/Address/Battery/Services/RSSI above. OFF by default (this notification
+// already shows several fields per device).
+#define HWG_BT_SHOW_ENCRYPTION_KEY @"HWGBluetoothShowEncryption"
+#define HWG_BT_SHOW_LINKTYPE_KEY   @"HWGBluetoothShowLinkType"
+#define HWG_BT_SHOW_INITIATOR_KEY  @"HWGBluetoothShowInitiator"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -521,6 +527,30 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		}
 	}
 
+	// Final API audit (18-ago-2026), lote 2 — link encryption state.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_ENCRYPTION_KEY, NO)) {
+		BluetoothHCIEncryptionMode mode = [device getEncryptionMode];
+		NSString *label = (mode == kEncryptionDisabled) ? NSLocalizedString(@"Disabled", @"") : NSLocalizedString(@"Enabled", @"");
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Encryption:\t%@", @""), label]];
+	}
+	// Baseband link type (ACL = data, SCO/eSCO = synchronous voice/audio).
+	if (HWGBTBoolForKey(HWG_BT_SHOW_LINKTYPE_KEY, NO)) {
+		BluetoothLinkType linkType = [device getLinkType];
+		NSString *label = nil;
+		switch (linkType) {
+			case kBluetoothACLConnection:  label = NSLocalizedString(@"ACL (data)", @""); break;
+			case kBluetoothSCOConnection:  label = NSLocalizedString(@"SCO (voice)", @""); break;
+			case kBluetoothESCOConnection: label = NSLocalizedString(@"eSCO (voice)", @""); break;
+			default: break;   // kBluetoothLinkTypeNone — no active baseband connection, omit the line
+		}
+		if (label) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Link type:\t%@", @""), label]];
+	}
+	// Who initiated the connection (this Mac vs. the remote device).
+	if (HWGBTBoolForKey(HWG_BT_SHOW_INITIATOR_KEY, NO)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Initiated by:\t%@", @""),
+			[device isIncoming] ? NSLocalizedString(@"Remote device", @"") : NSLocalizedString(@"This Mac", @"")]];
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -629,7 +659,16 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[self checkboxWithKey:HWG_BT_SHOW_PAIRED_KEY  title:NSLocalizedString(@"Paired state", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_ADDRESS_KEY title:NSLocalizedString(@"MAC address", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_BT_SHOW_BATTERY_KEY title:NSLocalizedString(@"Battery level (Apple accessories: AirPods, Magic Mouse/Keyboard/Trackpad)", @"") defaultOn:YES],
-		[self checkboxWithKey:HWG_BT_SHOW_RSSI_KEY    title:NSLocalizedString(@"Signal strength (RSSI, while connected)", @"") defaultOn:NO],
+		// BUG FIX (19-ago-2026) — this checkbox showed unchecked by default while the field it
+		// controls was actually read with a YES default (line ~514 above), i.e. the field was
+		// silently already included in notifications while Preferences showed it as off. Fixed
+		// to match the real default rather than changing the read default (which would be a
+		// user-visible behavior change for anyone already relying on the current text).
+		[self checkboxWithKey:HWG_BT_SHOW_RSSI_KEY    title:NSLocalizedString(@"Signal strength (RSSI, while connected)", @"") defaultOn:YES],
+		// Final API audit (18-ago-2026), lote 2 — OFF by default.
+		[self checkboxWithKey:HWG_BT_SHOW_ENCRYPTION_KEY title:NSLocalizedString(@"Link encryption state", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_BT_SHOW_LINKTYPE_KEY   title:NSLocalizedString(@"Link type (ACL/SCO/eSCO)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_BT_SHOW_INITIATOR_KEY  title:NSLocalizedString(@"Who initiated the connection", @"") defaultOn:NO],
 		// Added 17-ago-2026 — OFF by default: SDP service names are often verbose/technical
 		// (e.g. "AVRCP Target", "Handsfree Audio Gateway"), not something every user wants
 		// cluttering the notification by default.

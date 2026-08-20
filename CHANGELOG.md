@@ -49,6 +49,12 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added/Fixed: Bluetooth Monitor batch 2 — encryption/link type/initiator, RSSI checkbox bug
+Link encryption state, link type (ACL/SCO/eSCO), and who initiated the connection — all off by
+default. Also fixed a real pre-existing bug found in passing: the RSSI checkbox showed unchecked
+by default while the field itself was read with a YES default, i.e. it was already included in
+notifications regardless of what Preferences showed. 4/27 candidates done for this module.
+
 ### Added/Fixed: Bluetooth Monitor — radio power now uses a real push notification
 Correction to an earlier (incorrect) assumption in the code: `IOBluetoothHostControllerPoweredOnNotification`/
 `PoweredOffNotification` do exist (declared in the same header already imported) — radio on/off
