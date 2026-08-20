@@ -49,6 +49,16 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added/Fixed: Bluetooth Monitor — radio power now uses a real push notification
+Correction to an earlier (incorrect) assumption in the code: `IOBluetoothHostControllerPoweredOnNotification`/
+`PoweredOffNotification` do exist (declared in the same header already imported) — radio on/off
+now registers for these via plain `NSNotificationCenter` instead of relying solely on a 1s poll.
+The poll is kept as a 30s fallback only. This also reduces exposure to a real hang risk found
+live this session: `+[IOBluetoothHostController defaultController]` can block the main thread
+when the Bluetooth subsystem is in a bad state — the previous 1s poll called it every second;
+listening for the notification by name never calls it at all, and the fallback poll now does so
+30x less often. 1/27 candidates done for this module — see `TODO.md` for the rest.
+
 ### Fixed (structurally): General-tab checkbox lists could clip their last rows (Network/Printer)
 Same root cause class as the Icons tab fix below, but on the vertical axis: Network Monitor's
 Wi-Fi/Ethernet/IP/VPN tabs and Printer Monitor's General tab wrap their checkbox lists in an

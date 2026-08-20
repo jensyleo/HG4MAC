@@ -67,11 +67,20 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // and vice versa).
 #define HWG_BT_NOTIFY_RADIO_ON_KEY  @"HWGBluetoothNotifyRadioOn"
 #define HWG_BT_NOTIFY_RADIO_OFF_KEY @"HWGBluetoothNotifyRadioOff"
-// BUG FIX (18-ago-2026, feedback del usuario: "tarda mucho en aparecer" / "sigue estando muy
-// lento") — was 5.0s, then 2.0s. Combined with the always-tracking fix above (see
-// -pollRadioPowerState), 1.0s keeps this near-instant from the user's perspective while still
-// only doing a single cheap IOBluetoothHostController property read per tick (no I/O).
-#define HWG_BT_RADIO_POLL_INTERVAL 1.0
+// Final API audit (18-ago-2026) — CORRECTION to the 18-ago comment above: a real push
+// notification DOES exist for this after all (`IOBluetoothHostControllerPoweredOnNotification`/
+// `PoweredOffNotification`, declared right in IOBluetoothHostController.h, the exact header this
+// file already imports) — the earlier "no documented push notification" note was simply wrong.
+// Registered via plain NSNotificationCenter (observer + name only) — this does NOT call
+// +[IOBluetoothHostController defaultController] to register, so listening for it carries none
+// of the risk confirmed live this session (19-ago-2026): that call can BLOCK THE MAIN THREAD
+// when the Bluetooth subsystem is in a bad state (no controller / daemon not ready) — repeated
+// polling makes that risk recur every tick, whereas registering for a notification by name is a
+// one-time, synchronous-nothing operation. The poll interval below is kept only as a slow safety
+// net in case this notification doesn't fire on some macOS version — no longer this feature's
+// primary detection path, so it can afford to be far less frequent (and call
+// defaultController far less often).
+#define HWG_BT_RADIO_POLL_INTERVAL 30.0
 
 @interface HWGrowlBluetoothMonitor ()
 
@@ -100,7 +109,17 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 -(void)dealloc {
 	[connectionNotification unregister];
 	[radioPowerPollTimer invalidate];
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	// ARC handles the release; no [super dealloc].
+}
+
+// Final API audit (18-ago-2026) — fires immediately on the real push notification instead of
+// waiting for the next (now much slower, 30s) poll tick. Shares -pollRadioPowerState's exact
+// same dedup/baseline/notify logic — the only thing that differs between the two paths is WHAT
+// triggers the read, not how the result is processed — so this just re-runs that same method
+// rather than duplicating its logic.
+-(void)radioPowerNotificationFired:(NSNotification *)note {
+	[self pollRadioPowerState];
 }
 
 -(id)init {
@@ -164,6 +183,17 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 
 -(void)postRegistrationInit {
 	self.starting = YES;
+	// Final API audit (18-ago-2026) — real push notifications for radio power state (see the
+	// #define comment above). Registered here (not -init) to match this file's existing
+	// convention of deferring anything Bluetooth-related past the earliest launch moment.
+	[[NSNotificationCenter defaultCenter] addObserver:self
+											  selector:@selector(radioPowerNotificationFired:)
+												  name:IOBluetoothHostControllerPoweredOnNotification
+												object:nil];
+	[[NSNotificationCenter defaultCenter] addObserver:self
+											  selector:@selector(radioPowerNotificationFired:)
+												  name:IOBluetoothHostControllerPoweredOffNotification
+												object:nil];
 	[self updateRadioPowerPollState];
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
