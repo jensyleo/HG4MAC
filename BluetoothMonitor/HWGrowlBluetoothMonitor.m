@@ -52,6 +52,17 @@
 // PoweredOn/PoweredOff are deliberately NOT re-reported here — those are already covered by
 // the classic-API radio on/off notification above, and reporting both would duplicate it.
 #define HWG_BT_NOTIFY_SUBSYSTEM_KEY @"HWGBluetoothNotifySubsystemState"
+// Final API audit (19-ago-2026), lote 6 — 3 fields read from SDP attributes (not from
+// IOBluetoothDevice properties like everything above): the Device ID/PnP Information record
+// (VID/PID/version/vendor-ID-source), the Hands-Free record's SupportedFeatures bitmask, and
+// the HID record's country code + remote-wakeup flag. Attribute IDs and service-class UUIDs
+// verified against BlueZ's lib/sdp.h (github.com/pauloborges/bluez) and IOBluetooth's own
+// BluetoothAssignedNumbers.h (kBluetoothSDPUUID16ServiceClassPnPInformation/HumanInterface
+// DeviceService/HandsFree/HandsFreeAudioGateway) — NOT guessed, since a wrong attribute ID
+// would silently decode garbage instead of failing loudly.
+#define HWG_BT_SHOW_VIDPID_KEY   @"HWGBluetoothShowVIDPID"
+#define HWG_BT_SHOW_HFPFEATURES_KEY @"HWGBluetoothShowHFPFeatures"
+#define HWG_BT_SHOW_HIDDETAIL_KEY @"HWGBluetoothShowHIDDetail"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -531,6 +542,77 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 	return [NSString stringWithFormat:NSLocalizedString(@"Battery:\t%@", @""), [parts componentsJoinedByString:@" / "]];
 }
 
+// Finds the device's SDP service record whose service-class UUID list contains `uuid16`, or nil
+// if the device didn't advertise that profile. Attribute IDs are only meaningful relative to
+// the specific record they came from (the same numeric ID means something different in a HID
+// record vs. a Device ID record — see the attribute-ID doc comment above), so callers must look
+// up the right record first before reading an attribute off it.
+-(IOBluetoothSDPServiceRecord *)bluetoothSDPRecordForDevice:(IOBluetoothDevice *)device matchingUUID16:(BluetoothSDPUUID16)uuid16 {
+	for (IOBluetoothSDPServiceRecord *record in [device services]) {
+		if ([record matchesUUID16:uuid16]) return record;
+	}
+	return nil;
+}
+
+// Final API audit (19-ago-2026), lote 6 — Device ID/PnP Information record: vendor ID, product
+// ID, version, and vendor-ID source (0x0001 = Bluetooth SIG assigned, 0x0002 = USB-IF assigned —
+// which registry the vendor ID number should be looked up in).
+-(NSString *)bluetoothVendorProductInfoForDevice:(IOBluetoothDevice *)device {
+	IOBluetoothSDPServiceRecord *record = [self bluetoothSDPRecordForDevice:device matchingUUID16:kBluetoothSDPUUID16ServiceClassPnPInformation];
+	if (!record) return nil;
+
+	NSNumber *vendorID  = [[record getAttributeDataElement:0x0201] getNumberValue];
+	NSNumber *productID = [[record getAttributeDataElement:0x0202] getNumberValue];
+	NSNumber *version   = [[record getAttributeDataElement:0x0203] getNumberValue];
+	NSNumber *vendorSrc = [[record getAttributeDataElement:0x0205] getNumberValue];
+	if (!vendorID && !productID) return nil;
+
+	NSString *sourceLabel = ([vendorSrc unsignedIntegerValue] == 2) ? NSLocalizedString(@"USB-IF", @"") : NSLocalizedString(@"Bluetooth SIG", @"");
+	return [NSString stringWithFormat:NSLocalizedString(@"Device ID:\tVID 0x%04lX / PID 0x%04lX, v%.2f (%@)", @""),
+		(unsigned long)[vendorID unsignedIntegerValue], (unsigned long)[productID unsignedIntegerValue],
+		[version unsignedIntegerValue] / 256.0, sourceLabel];
+}
+
+// Final API audit (19-ago-2026), lote 6 — Hands-Free Profile SupportedFeatures bitmask. Only
+// the bits documented in the HFP spec as relevant from the AG's (phone's) side are decoded here
+// — this Mac is always the HF/carkit role, never the audio gateway, so bits that only matter to
+// an AG (e.g. in-band ringing, voice recognition) are the ones worth surfacing.
+-(NSString *)bluetoothHFPFeaturesInfoForDevice:(IOBluetoothDevice *)device {
+	IOBluetoothSDPServiceRecord *record = [self bluetoothSDPRecordForDevice:device matchingUUID16:kBluetoothSDPUUID16ServiceClassHandsFreeAudioGateway];
+	if (!record) record = [self bluetoothSDPRecordForDevice:device matchingUUID16:kBluetoothSDPUUID16ServiceClassHandsFree];
+	if (!record) return nil;
+
+	NSNumber *featuresNum = [[record getAttributeDataElement:0x0311] getNumberValue];
+	if (!featuresNum) return nil;
+	NSUInteger features = [featuresNum unsignedIntegerValue];
+
+	NSMutableArray<NSString *> *bits = [NSMutableArray array];
+	if (features & 0x0001) [bits addObject:NSLocalizedString(@"3-way calling", @"")];
+	if (features & 0x0002) [bits addObject:NSLocalizedString(@"Echo/noise cancellation", @"")];
+	if (features & 0x0004) [bits addObject:NSLocalizedString(@"Voice recognition", @"")];
+	if (features & 0x0008) [bits addObject:NSLocalizedString(@"In-band ring tone", @"")];
+	if (features & 0x0010) [bits addObject:NSLocalizedString(@"Voice tag / attach number", @"")];
+	if (![bits count]) return nil;
+	return [NSString stringWithFormat:NSLocalizedString(@"Hands-Free features:\t%@", @""), [bits componentsJoinedByString:@", "]];
+}
+
+// Final API audit (19-ago-2026), lote 6 — HID Profile detail: country code (0 = "not localized
+// for a specific country", per the HID spec) and remote-wakeup support.
+-(NSString *)bluetoothHIDDetailInfoForDevice:(IOBluetoothDevice *)device {
+	IOBluetoothSDPServiceRecord *record = [self bluetoothSDPRecordForDevice:device matchingUUID16:kBluetoothSDPUUID16ServiceClassHumanInterfaceDeviceService];
+	if (!record) return nil;
+
+	NSNumber *countryCode = [[record getAttributeDataElement:0x0203] getNumberValue];
+	NSNumber *remoteWake  = [[record getAttributeDataElement:0x020a] getNumberValue];
+	if (!countryCode && !remoteWake) return nil;
+
+	NSString *countryLabel = ([countryCode unsignedIntegerValue] == 0)
+		? NSLocalizedString(@"not localized", @"")
+		: [NSString stringWithFormat:@"%lu", (unsigned long)[countryCode unsignedIntegerValue]];
+	return [NSString stringWithFormat:NSLocalizedString(@"HID detail:\tcountry %@, remote wake %@", @""),
+		countryLabel, [remoteWake boolValue] ? NSLocalizedString(@"yes", @"") : NSLocalizedString(@"no", @"")];
+}
+
 -(NSString *)bluetoothExtraInfoForDevice:(IOBluetoothDevice *)device {
 	NSMutableArray<NSString*> *lines = [NSMutableArray array];
 
@@ -650,6 +732,20 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		BluetoothClockOffset clockOffset = [device getClockOffset];
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Link diagnostics:\tscan mode %d, rep. mode %d, clock offset 0x%04x", @""),
 			scanMode, repMode, clockOffset]];
+	}
+
+	// Final API audit (19-ago-2026), lote 6 — SDP-attribute-derived fields.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_VIDPID_KEY, NO)) {
+		NSString *info = [self bluetoothVendorProductInfoForDevice:device];
+		if (info) [lines addObject:info];
+	}
+	if (HWGBTBoolForKey(HWG_BT_SHOW_HFPFEATURES_KEY, NO)) {
+		NSString *info = [self bluetoothHFPFeaturesInfoForDevice:device];
+		if (info) [lines addObject:info];
+	}
+	if (HWGBTBoolForKey(HWG_BT_SHOW_HIDDETAIL_KEY, NO)) {
+		NSString *info = [self bluetoothHIDDetailInfoForDevice:device];
+		if (info) [lines addObject:info];
 	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
@@ -775,6 +871,11 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[self checkboxWithKey:HWG_BT_SHOW_FAVORITE_KEY     title:NSLocalizedString(@"Favorite flag + last used date", @"") defaultOn:NO],
 		// Final API audit (19-ago-2026), lote 4 — OFF by default (troubleshooting-oriented).
 		[self checkboxWithKey:HWG_BT_SHOW_LINKDIAG_KEY title:NSLocalizedString(@"Link diagnostics (page scan mode, clock offset)", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 6 — SDP-attribute fields, OFF by default (not
+		// every device advertises these records, and the info is fairly technical).
+		[self checkboxWithKey:HWG_BT_SHOW_VIDPID_KEY title:NSLocalizedString(@"Device ID (VID/PID/version, via SDP)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_BT_SHOW_HFPFEATURES_KEY title:NSLocalizedString(@"Hands-Free supported features (via SDP)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_BT_SHOW_HIDDETAIL_KEY title:NSLocalizedString(@"HID detail: country code, remote wake (via SDP)", @"") defaultOn:NO],
 		// Added 17-ago-2026 — OFF by default: SDP service names are often verbose/technical
 		// (e.g. "AVRCP Target", "Handsfree Audio Gateway"), not something every user wants
 		// cluttering the notification by default.
