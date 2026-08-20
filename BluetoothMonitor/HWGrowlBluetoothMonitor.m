@@ -39,6 +39,11 @@
 // for the "Type" field above) and favorite/last-used, both from IOBluetoothDevice.
 #define HWG_BT_SHOW_SERVICECLASS_KEY @"HWGBluetoothShowServiceClassBits"
 #define HWG_BT_SHOW_FAVORITE_KEY     @"HWGBluetoothShowFavoriteLastUsed"
+// Final API audit (19-ago-2026), lote 4 — link diagnostics (page scan mode/repetition/period,
+// clock offset), all public read-only properties on IOBluetoothDevice (getPageScanMode/
+// getPageScanRepetitionMode/getPageScanPeriodMode/getClockOffset). Mostly of interest for
+// troubleshooting a flaky/slow-to-reconnect device, not everyday use — OFF by default.
+#define HWG_BT_SHOW_LINKDIAG_KEY @"HWGBluetoothShowLinkDiagnostics"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -182,10 +187,17 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	if (poweredOn && !onEnabled) return;
 	if (!poweredOn && !offEnabled) return;
 
+	// Final API audit (19-ago-2026), lote 4 — adapter identity in the notification body itself
+	// (name + address), both public IOBluetoothHostController properties already available on
+	// the `controller` object this method already holds — previously unused past the power-state
+	// check. Useful on Macs with more than one Bluetooth radio (e.g. an external USB dongle).
+	NSString *description = [NSString stringWithFormat:NSLocalizedString(@"%@\t%@", @""),
+		[controller nameAsString] ?: @"", [controller addressAsString] ?: @""];
+
 	NSData *iconData = [HWGResolveIconNamed(poweredOn ? @"Bluetooth-Radio-On" : @"Bluetooth-Radio-Off") TIFFRepresentation];
 	[delegate notifyWithName:poweredOn ? @"BluetoothRadioOn" : @"BluetoothRadioOff"
 							 title:poweredOn ? NSLocalizedString(@"Bluetooth Turned On", @"") : NSLocalizedString(@"Bluetooth Turned Off", @"")
-					 description:@""
+					 description:description
 							  icon:iconData
 			  identifierString:@"HWGrowlBluetoothRadioPower"
 				  contextString:nil
@@ -585,6 +597,18 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		}
 	}
 
+	// Final API audit (19-ago-2026), lote 4 — link diagnostics: page scan settings (how the
+	// remote device listens for a page/connection request) and the clock offset used to speed
+	// up reconnection. Mostly meaningful when troubleshooting a slow/flaky reconnect, not for
+	// everyday reading, hence grouped as one compact line rather than 4 separate ones.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_LINKDIAG_KEY, NO)) {
+		BluetoothPageScanMode scanMode = [device getPageScanMode];
+		BluetoothPageScanRepetitionMode repMode = [device getPageScanRepetitionMode];
+		BluetoothClockOffset clockOffset = [device getClockOffset];
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Link diagnostics:\tscan mode %d, rep. mode %d, clock offset 0x%04x", @""),
+			scanMode, repMode, clockOffset]];
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -706,6 +730,8 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		// Final API audit (18-ago-2026), lote 3 — OFF by default.
 		[self checkboxWithKey:HWG_BT_SHOW_SERVICECLASS_KEY title:NSLocalizedString(@"Service class bits (Audio/Telephony/Rendering/etc.)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_BT_SHOW_FAVORITE_KEY     title:NSLocalizedString(@"Favorite flag + last used date", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 4 — OFF by default (troubleshooting-oriented).
+		[self checkboxWithKey:HWG_BT_SHOW_LINKDIAG_KEY title:NSLocalizedString(@"Link diagnostics (page scan mode, clock offset)", @"") defaultOn:NO],
 		// Added 17-ago-2026 — OFF by default: SDP service names are often verbose/technical
 		// (e.g. "AVRCP Target", "Handsfree Audio Gateway"), not something every user wants
 		// cluttering the notification by default.

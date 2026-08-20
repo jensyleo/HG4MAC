@@ -49,6 +49,13 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Bluetooth Monitor batch 4 — link diagnostics, adapter identity in radio notification
+Link diagnostics field (page scan mode/repetition mode, clock offset — all public
+`IOBluetoothDevice` properties), off by default, troubleshooting-oriented. Also added the
+adapter's own name and address to the `BluetoothRadioOn`/`BluetoothRadioOff` notification body,
+which previously had none — useful on Macs with more than one Bluetooth radio. 8/27 candidates
+done for this module.
+
 ### Added: Bluetooth Monitor batch 3 — service class bits, favorite/last-used
 Service-class bitmask (Audio/Telephony/Rendering/etc. — separate from the device-type field
 already shown) and favorite flag + last-used date. "Class-of-Device minor completo" from the
