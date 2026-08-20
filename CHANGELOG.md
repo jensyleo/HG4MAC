@@ -9,6 +9,12 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Volume Monitor batches 1-2 — bus/sector info, honest low-space figure
+Bus name + native sector size (DiskArbitration, off by default). A second, more accurate
+"actually available" figure (accounting for reclaimable purgeable space on APFS) added as an
+extra informational line on the Low Disk Space notification — the existing trigger threshold
+math is untouched, so this doesn't change when the alert fires for existing users.
+
 ### Added: USB Monitor batches 1-3 — 7 more IOUSBHostFamilyDefinitions.h fields
 Number of USB configurations, USB spec version (bcdUSB, distinct from the already-shown
 negotiated speed), USB4/Thunderbolt tunnel indicator, a "requested more power than available"

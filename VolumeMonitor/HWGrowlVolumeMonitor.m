@@ -72,6 +72,16 @@
 #define HWG_VOLUME_SHOW_REMOVABLE_KEY     @"HWGVolumeShowRemovable"
 #define HWG_VOLUME_SHOW_READONLY_KEY      @"HWGVolumeShowReadOnly"
 #define HWG_VOLUME_SHOW_CASESENSITIVE_KEY @"HWGVolumeShowCaseSensitive"
+// Final API audit (19-ago-2026), lote 1 — kDADiskDescriptionBusNameKey + MediaBlockSizeKey,
+// verified against DADisk.h (public header). OFF by default (technical/diagnostic).
+#define HWG_VOLUME_SHOW_BUSINFO_KEY @"HWGVolumeShowBusInfo"
+// Final API audit (19-ago-2026), lote 2 — NSURLVolumeAvailableCapacityForImportantUsageKey
+// (macOS 10.13+, public NSURL.h), a more honest "actually available" figure than the raw
+// statfs f_bavail the Low Disk Space poll's TRIGGER already uses — it accounts for purgeable/
+// optimized-storage space macOS could reclaim automatically on APFS. Added as an EXTRA
+// informational line only, not a replacement for the existing trigger math (which stays as-is
+// to avoid changing when the alert fires for anyone already relying on it). OFF by default.
+#define HWG_VOLUME_LOWSPACE_SHOW_IMPORTANTUSAGE_KEY @"HWGVolumeLowSpaceShowImportantUsage"
 
 // Per-device-type "Notify" toggle (Icons tab) — same mechanism as USB/Thunderbolt/Bluetooth
 // Monitor's. Gates only the MOUNT notification for that category; unmount always notifies
@@ -887,6 +897,36 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 	return result;
 }
 
+// Final API audit (19-ago-2026), lote 1 — 2 more DiskArbitration keys, verified against
+// DADisk.h (public header), same DA lookup pattern as -interfaceDescriptionForMountedPath:
+// above: kDADiskDescriptionBusNameKey (e.g. "AppleUSBXHCI", distinct from the already-read
+// DeviceProtocolKey — sharper bus identification, useful mainly for diagnostics) and
+// kDADiskDescriptionMediaBlockSizeKey (native sector size, 512/4096 — real but low-value,
+// included for completeness).
+- (NSString *)busAndBlockSizeInfoForMountedPath:(NSString *)path {
+	if (!daSession || ![path length]) return nil;
+	struct statfs sfs;
+	if (statfs([path fileSystemRepresentation], &sfs) != 0) return nil;
+	NSString *devPath = [NSString stringWithUTF8String:sfs.f_mntfromname];
+	NSString *bsd = [devPath lastPathComponent];
+	if (![bsd length]) return nil;
+
+	DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, daSession, [bsd UTF8String]);
+	if (!disk) return nil;
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+	CFDictionaryRef descRef = DADiskCopyDescription(disk);
+	if (descRef) {
+		NSDictionary *desc = (__bridge_transfer NSDictionary *)descRef;
+		NSString *busName = desc[(__bridge NSString *)kDADiskDescriptionBusNameKey];
+		if ([busName length]) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Bus: %@", @""), busName]];
+
+		NSNumber *blockSize = desc[(__bridge NSString *)kDADiskDescriptionMediaBlockSizeKey];
+		if (blockSize) [parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Sector size: %@ bytes", @""), blockSize]];
+	}
+	CFRelease(disk);
+	return [parts count] ? [parts componentsJoinedByString:@", "] : nil;
+}
+
 // F30: best-effort device-type guess for an already-mounted path — same DA lookup as
 // -interfaceDescriptionForMountedPath: above, reused via HWGDeviceCategoryFromInfo (see its
 // doc comment for the accuracy caveats: this is a heuristic, not a guarantee).
@@ -1105,6 +1145,7 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		BOOL showInterface = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_INTERFACE_KEY, NO);
 		BOOL showSMART     = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_SMART_KEY, YES);
 		BOOL showFileVault = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_FILEVAULT_KEY, YES);
+		BOOL showBusInfo   = HWGVolumeBoolForKey(HWG_VOLUME_SHOW_BUSINFO_KEY, NO);
 
 		NSMutableArray<NSString*> *extraLines = [NSMutableArray array];
 		if (showPath && [volume path]) [extraLines addObject:[volume path]];
@@ -1127,6 +1168,12 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 			if ([interface length]) {
 				[extraLines addObject:[NSString stringWithFormat:NSLocalizedString(@"Interface: %@", @""), interface]];
 			}
+		}
+
+		// Final API audit (19-ago-2026), lote 1.
+		if (showBusInfo) {
+			NSString *busInfo = [self busAndBlockSizeInfoForMountedPath:[volume path]];
+			if ([busInfo length]) [extraLines addObject:busInfo];
 		}
 
 		if (showFSType || showSize) {
@@ -1375,6 +1422,10 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		[self checkboxWithKey:HWG_VOLUME_SHOW_REMOVABLE_KEY title:NSLocalizedString(@"Removable / ejectable flags", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_VOLUME_SHOW_READONLY_KEY title:NSLocalizedString(@"Read-only flag", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_VOLUME_SHOW_CASESENSITIVE_KEY title:NSLocalizedString(@"Case-sensitivity", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_VOLUME_SHOW_BUSINFO_KEY title:NSLocalizedString(@"Bus name + sector size", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 2 — extra line on the Low Disk Space notification.
+		[self checkboxWithKey:HWG_VOLUME_LOWSPACE_SHOW_IMPORTANTUSAGE_KEY title:NSLocalizedString(@"Low Disk Space: show space actually available (incl. purgeable)", @"") defaultOn:NO],
 	];
 	// Build top-down (cursor starts at 0, grows downward) in a FLIPPED content view — see
 	// HWGVolumeFlippedContentView above. This fixes two related problems at once:
@@ -1541,9 +1592,22 @@ static void hwgDiskDisappearedCallback(DADiskRef disk, void *context) {
 		if (!wasBelow && freePercent <= thresholdPercent) {
 			[self.pathsBelowSpaceThreshold addObject:path];
 			NSData *iconData = [HWGResolveIconNamed(@"Device-Critical") TIFFRepresentation];
+			NSString *description = [NSString stringWithFormat:NSLocalizedString(@"%@ has %.0f%% free space left.", @""), path, freePercent];
+
+			// Final API audit (19-ago-2026), lote 2 — extra info line only, doesn't affect
+			// the trigger above.
+			if (HWGVolumeBoolForKey(HWG_VOLUME_LOWSPACE_SHOW_IMPORTANTUSAGE_KEY, NO)) {
+				NSURL *url = [NSURL fileURLWithPath:path];
+				NSNumber *importantUsage = nil;
+				if ([url getResourceValue:&importantUsage forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil] && importantUsage) {
+					NSString *bytesStr = [NSByteCountFormatter stringFromByteCount:[importantUsage longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+					description = [description stringByAppendingFormat:@"\n%@", [NSString stringWithFormat:NSLocalizedString(@"Actually available (incl. purgeable): %@", @""), bytesStr]];
+				}
+			}
+
 			[delegate notifyWithName:@"VolumeLowSpace"
 									 title:NSLocalizedString(@"Low Disk Space", @"")
-							 description:[NSString stringWithFormat:NSLocalizedString(@"%@ has %.0f%% free space left.", @""), path, freePercent]
+							 description:description
 									  icon:iconData
 					  identifierString:[NSString stringWithFormat:@"HWGrowlVolumeLowSpace-%@", path]
 						  contextString:nil
