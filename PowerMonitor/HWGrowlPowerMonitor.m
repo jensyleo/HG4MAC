@@ -32,6 +32,17 @@
 #define HWG_POWER_SHOW_CYCLES_KEY        @"HWGPowerShowCycleCount"
 #define HWG_POWER_SHOW_HEALTH_KEY        @"HWGPowerShowBatteryHealth"
 #define HWG_POWER_SHOW_HEALTH_CONDITION_KEY @"HWGPowerShowBatteryHealthCondition"
+// Final API audit (19-ago-2026), lote 1 — 3 more fields on the periodic health check, all
+// from the SAME public IOPSKeys.h dict already read for BatteryHealthCondition above.
+#define HWG_POWER_SHOW_HEALTH_COARSE_KEY @"HWGPowerShowBatteryHealthCoarse"
+#define HWG_POWER_SHOW_FAILURE_MODES_KEY @"HWGPowerShowBatteryFailureModes"
+#define HWG_POWER_SHOW_INTERNAL_FAILURE_KEY @"HWGPowerShowInternalFailure"
+// Final API audit (19-ago-2026), lote 2 — same periodic health check.
+#define HWG_POWER_SHOW_CAPACITY_KEY @"HWGPowerShowDesignNominalCapacity"
+#define HWG_POWER_SHOW_MAXERR_KEY   @"HWGPowerShowMaxErr"
+// Final API audit (19-ago-2026), lote 3 — on the regular power-source-change notification
+// (not the periodic health check), since these are per-source-reading fields, not health stats.
+#define HWG_POWER_SHOW_DIAGNOSTICS_KEY @"HWGPowerShowDiagnostics"
 #define HWG_POWER_HEALTH_VALUE_KEY       @"HWGPowerHealthCheckIntervalValue"
 #define HWG_POWER_HEALTH_UNIT_KEY        @"HWGPowerHealthCheckIntervalUnit"   // 0=days, 1=weeks, 2=months
 #define HWG_POWER_LAST_HEALTH_CHECK_KEY  @"HWGPowerLastHealthCheckDate"
@@ -149,6 +160,83 @@ static NSString *HWGCopyBatteryHealthCondition(void) {
 	return result;
 }
 
+// Final API audit (19-ago-2026), lote 1 — 3 more fields from the SAME public IOPSKeys.h dict
+// already read by HWGCopyBatteryHealthCondition above, previously unread by this file: a
+// coarser sibling health signal (Good/Fair/Poor — kIOPSBatteryHealthKey), enumerated battery
+// failure modes (kIOPSBatteryFailureModesKey, a CFArray of short strings — e.g. "Cell
+// Imbalance", "Fuse Blown"), and a simple internal-failure boolean (kIOPSInternalFailureKey).
+// A separate self-contained fetch rather than extending HWGCopyBatteryHealthCondition, to avoid
+// touching that already-verified function.
+static void HWGCopyBatteryHealthExtras(NSString **outCoarseHealth, NSArray<NSString*> **outFailureModes, BOOL *outInternalFailure) {
+	*outCoarseHealth = nil;
+	*outFailureModes = nil;
+	*outInternalFailure = NO;
+
+	CFTypeRef blob = IOPSCopyPowerSourcesInfo();
+	if (!blob) return;
+	CFArrayRef list = IOPSCopyPowerSourcesList(blob);
+	if (list) {
+		CFIndex count = CFArrayGetCount(list);
+		for (CFIndex i = 0; i < count; i++) {
+			CFDictionaryRef desc = IOPSGetPowerSourceDescription(blob, CFArrayGetValueAtIndex(list, i));
+			if (!desc) continue;
+
+			CFStringRef coarse = CFDictionaryGetValue(desc, CFSTR(kIOPSBatteryHealthKey));
+			if (coarse) *outCoarseHealth = (__bridge NSString *)coarse;
+
+			CFArrayRef failureModes = CFDictionaryGetValue(desc, CFSTR(kIOPSBatteryFailureModesKey));
+			if (failureModes && CFGetTypeID(failureModes) == CFArrayGetTypeID()) {
+				*outFailureModes = (__bridge NSArray<NSString*> *)failureModes;
+			}
+
+			if (CFDictionaryGetValue(desc, CFSTR(kIOPSInternalFailureKey)) == kCFBooleanTrue) {
+				*outInternalFailure = YES;
+			}
+
+			if (*outCoarseHealth || *outFailureModes || *outInternalFailure) break;
+		}
+		CFRelease(list);
+	}
+	CFRelease(blob);
+}
+
+// Final API audit (19-ago-2026), lote 2 — DesignCapacity/NominalCapacity (documented IOPSKeys.h
+// equivalent of the undocumented AppleSmartBattery registry values HWGCopyBatteryHealth above
+// already uses for its own health-percent math — kept as a separate, publicly-sourced
+// cross-check rather than replacing that existing calculation) and MaxErr (the battery's own
+// self-reported percentage error margin on capacity reporting). kIOPSHealthConfidenceKey was
+// deliberately NOT added — Apple's own header marks it deprecated since 10.6 and states current
+// power sources no longer publish it.
+static void HWGCopyBatteryCapacityDetail(NSInteger *outDesignCapacity, NSInteger *outNominalCapacity, NSInteger *outMaxErrPercent) {
+	*outDesignCapacity = -1;
+	*outNominalCapacity = -1;
+	*outMaxErrPercent = -1;
+
+	CFTypeRef blob = IOPSCopyPowerSourcesInfo();
+	if (!blob) return;
+	CFArrayRef list = IOPSCopyPowerSourcesList(blob);
+	if (list) {
+		CFIndex count = CFArrayGetCount(list);
+		for (CFIndex i = 0; i < count; i++) {
+			CFDictionaryRef desc = IOPSGetPowerSourceDescription(blob, CFArrayGetValueAtIndex(list, i));
+			if (!desc) continue;
+
+			CFNumberRef designCap = CFDictionaryGetValue(desc, CFSTR(kIOPSDesignCapacityKey));
+			if (designCap) CFNumberGetValue(designCap, kCFNumberNSIntegerType, outDesignCapacity);
+
+			CFNumberRef nominalCap = CFDictionaryGetValue(desc, CFSTR(kIOPSNominalCapacityKey));
+			if (nominalCap) CFNumberGetValue(nominalCap, kCFNumberNSIntegerType, outNominalCapacity);
+
+			CFNumberRef maxErr = CFDictionaryGetValue(desc, CFSTR(kIOPSMaxErrKey));
+			if (maxErr) CFNumberGetValue(maxErr, kCFNumberNSIntegerType, outMaxErrPercent);
+
+			if (*outDesignCapacity >= 0 || *outNominalCapacity >= 0 || *outMaxErrPercent >= 0) break;
+		}
+		CFRelease(list);
+	}
+	CFRelease(blob);
+}
+
 @interface HWGrowlPowerMonitor ()
 
 +(NSInteger)batteryPercentageForPowerSourceDescription:(CFDictionaryRef)description;
@@ -169,6 +257,14 @@ static NSString *HWGCopyBatteryHealthCondition(void) {
 // constant ("Normal"/"Service Recommended"/"Replace Soon"/"Replace Now"), cleaner than the
 // existing raw-capacity-ratio math in HWGCopyBatteryHealth (kept as-is, this is additive).
 @property (nonatomic, strong) NSString *batteryHealthCondition;
+// Final API audit (19-ago-2026), lote 3 — one combined "diagnostics" line built from several
+// more public IOPSKeys.h fields, all read from the same dict already in hand: Voltage/Current/
+// Temperature (present and reliable mainly for UPS-type sources — internal Apple Silicon
+// batteries frequently omit or zero these, a real platform limitation, not a bug in this code),
+// the raw PowerSourceState string, Name (which UPS/source this is, useful with multiple), the
+// hardware serial number, and Vendor/Product ID + vendor-specific data (meaningful for
+// USB/network UPS sources, essentially never for the internal battery).
+@property (nonatomic, strong) NSString *diagnosticsLine;
 
 -(id)initWithPowerSourceDescription:(CFDictionaryRef)description;
 
@@ -247,6 +343,46 @@ static NSString *HWGCopyBatteryHealthCondition(void) {
 
 		CFStringRef healthCondition = CFDictionaryGetValue(description, CFSTR(kIOPSBatteryHealthConditionKey));
 		if (healthCondition) self.batteryHealthCondition = (__bridge NSString *)healthCondition;
+
+		// Final API audit (19-ago-2026), lote 3.
+		NSMutableArray<NSString *> *diagParts = [NSMutableArray array];
+
+		CFNumberRef voltage = CFDictionaryGetValue(description, CFSTR(kIOPSVoltageKey));
+		CFNumberRef current = CFDictionaryGetValue(description, CFSTR(kIOPSCurrentKey));
+		CFNumberRef temperature = CFDictionaryGetValue(description, CFSTR(kIOPSTemperatureKey));
+		NSInteger voltageValue = 0, currentValue = 0, temperatureValue = 0;
+		BOOL hasVoltage = voltage && CFNumberGetValue(voltage, kCFNumberNSIntegerType, &voltageValue);
+		BOOL hasCurrent = current && CFNumberGetValue(current, kCFNumberNSIntegerType, &currentValue);
+		BOOL hasTemperature = temperature && CFNumberGetValue(temperature, kCFNumberNSIntegerType, &temperatureValue);
+		if (hasVoltage || hasCurrent || hasTemperature) {
+			NSMutableArray<NSString *> *electrical = [NSMutableArray array];
+			if (hasVoltage) [electrical addObject:[NSString stringWithFormat:NSLocalizedString(@"%ld mV", @""), (long)voltageValue]];
+			if (hasCurrent) [electrical addObject:[NSString stringWithFormat:NSLocalizedString(@"%ld mA", @""), (long)currentValue]];
+			if (hasTemperature) [electrical addObject:[NSString stringWithFormat:NSLocalizedString(@"%.1f°C", @""), temperatureValue / 100.0]];
+			[diagParts addObject:[electrical componentsJoinedByString:@", "]];
+		}
+
+		CFStringRef stateString = CFDictionaryGetValue(description, CFSTR(kIOPSPowerSourceStateKey));
+		if (stateString) [diagParts addObject:[NSString stringWithFormat:NSLocalizedString(@"State: %@", @""), (__bridge NSString *)stateString]];
+
+		CFStringRef name = CFDictionaryGetValue(description, CFSTR(kIOPSNameKey));
+		if (name) [diagParts addObject:[NSString stringWithFormat:NSLocalizedString(@"Name: %@", @""), (__bridge NSString *)name]];
+
+		CFStringRef serial = CFDictionaryGetValue(description, CFSTR(kIOPSHardwareSerialNumberKey));
+		if (serial) [diagParts addObject:[NSString stringWithFormat:NSLocalizedString(@"Serial: %@", @""), (__bridge NSString *)serial]];
+
+		// Vendor/Product ID + vendor data are meaningful mainly for USB/network UPS sources —
+		// the internal battery essentially never publishes these, which is expected, not a bug.
+		CFNumberRef vendorID = CFDictionaryGetValue(description, CFSTR(kIOPSVendorIDKey));
+		CFNumberRef productID = CFDictionaryGetValue(description, CFSTR(kIOPSProductIDKey));
+		NSInteger vendorIDValue = 0, productIDValue = 0;
+		BOOL hasVendorID = vendorID && CFNumberGetValue(vendorID, kCFNumberNSIntegerType, &vendorIDValue);
+		BOOL hasProductID = productID && CFNumberGetValue(productID, kCFNumberNSIntegerType, &productIDValue);
+		if (hasVendorID || hasProductID) {
+			[diagParts addObject:[NSString stringWithFormat:NSLocalizedString(@"VID/PID: 0x%04lX/0x%04lX", @""), (long)vendorIDValue, (long)productIDValue]];
+		}
+
+		if ([diagParts count]) self.diagnosticsLine = [diagParts componentsJoinedByString:@" · "];
 	}
 	return self;
 }
@@ -308,6 +444,13 @@ static NSString *HWGCopyBatteryHealthCondition(void) {
 		if (time) {
 			if ([description length]) [description appendString:@"\n"];
 			[description appendString:time];
+		}
+		// Final API audit (19-ago-2026), lote 3 — off by default: fairly technical, and several
+		// of these fields are commonly empty on an internal Apple Silicon battery (see the
+		// property's own doc comment).
+		if (self.diagnosticsLine && HWGPowerBoolForKey(HWG_POWER_SHOW_DIAGNOSTICS_KEY, NO)) {
+			if ([description length]) [description appendString:@"\n"];
+			[description appendString:self.diagnosticsLine];
 		}
 	}
 	return description;
@@ -1079,6 +1222,43 @@ static void powerSourceChanged(void *context) {
 			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Condition: %@", @""), condition]];
 		}
 	}
+
+	// Final API audit (19-ago-2026), lote 1.
+	BOOL showCoarse = HWGPowerBoolForKey(HWG_POWER_SHOW_HEALTH_COARSE_KEY, NO);
+	BOOL showFailureModes = HWGPowerBoolForKey(HWG_POWER_SHOW_FAILURE_MODES_KEY, NO);
+	BOOL showInternalFailure = HWGPowerBoolForKey(HWG_POWER_SHOW_INTERNAL_FAILURE_KEY, NO);
+	if (showCoarse || showFailureModes || showInternalFailure) {
+		NSString *coarseHealth = nil;
+		NSArray<NSString*> *failureModes = nil;
+		BOOL internalFailure = NO;
+		HWGCopyBatteryHealthExtras(&coarseHealth, &failureModes, &internalFailure);
+
+		if (showCoarse && [coarseHealth length]) {
+			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Health (overall): %@", @""), coarseHealth]];
+		}
+		if (showFailureModes && [failureModes count]) {
+			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery failures: %@", @""), [failureModes componentsJoinedByString:@", "]]];
+		}
+		if (showInternalFailure && internalFailure) {
+			[parts addObject:NSLocalizedString(@"⚠️ Internal battery failure reported", @"")];
+		}
+	}
+
+	// Final API audit (19-ago-2026), lote 2.
+	BOOL showCapacity = HWGPowerBoolForKey(HWG_POWER_SHOW_CAPACITY_KEY, NO);
+	BOOL showMaxErr = HWGPowerBoolForKey(HWG_POWER_SHOW_MAXERR_KEY, NO);
+	if (showCapacity || showMaxErr) {
+		NSInteger designCapacity = -1, nominalCapacity = -1, maxErrPercent = -1;
+		HWGCopyBatteryCapacityDetail(&designCapacity, &nominalCapacity, &maxErrPercent);
+
+		if (showCapacity && designCapacity >= 0 && nominalCapacity >= 0) {
+			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Capacity: %ld mAh now vs. %ld mAh new", @""), (long)nominalCapacity, (long)designCapacity]];
+		}
+		if (showMaxErr && maxErrPercent >= 0) {
+			[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"Reporting error margin: ±%ld%%", @""), (long)maxErrPercent]];
+		}
+	}
+
 	if (![parts count]) return;
 
 	@autoreleasepool {
@@ -1197,6 +1377,9 @@ static void powerSourceChanged(void *context) {
 		[self checkboxWithKey:HWG_POWER_SHOW_PERCENTAGE_KEY title:NSLocalizedString(@"Battery percentage", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_TIME_KEY       title:NSLocalizedString(@"Time remaining / time to charge", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_POWER_SHOW_SOURCE_CHANGE_KEY title:NSLocalizedString(@"Show old → new power source when it changes", @"") defaultOn:YES],
+		// Final API audit (19-ago-2026), lote 3 — voltage/current/temperature/name/serial/VID-PID,
+		// off by default (technical, and several fields are commonly absent on internal batteries).
+		[self checkboxWithKey:HWG_POWER_SHOW_DIAGNOSTICS_KEY title:NSLocalizedString(@"Diagnostics (voltage, current, temperature, name, serial, VID/PID)", @"") defaultOn:NO],
 	];
 	// #8: battery health/cycle count — own header/section since it's a SEPARATE periodic
 	// notification (see checkBatteryHealthDue), not part of the regular status notice above.
@@ -1206,6 +1389,13 @@ static void powerSourceChanged(void *context) {
 		// Added 17-ago-2026 — kIOPSBatteryHealthConditionKey, public IOPSKeys.h. OFF by
 		// default: mostly redundant with the % above for most users, opt-in extra.
 		[self checkboxWithKey:HWG_POWER_SHOW_HEALTH_CONDITION_KEY title:NSLocalizedString(@"Battery condition (Normal/Service Recommended…)", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1 — same periodic health-check notification.
+		[self checkboxWithKey:HWG_POWER_SHOW_HEALTH_COARSE_KEY title:NSLocalizedString(@"Overall health (Good/Fair/Poor)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_POWER_SHOW_FAILURE_MODES_KEY title:NSLocalizedString(@"Battery failure modes, if any (Cell Imbalance, Fuse Blown…)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_POWER_SHOW_INTERNAL_FAILURE_KEY title:NSLocalizedString(@"Internal battery failure warning", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 2 — same periodic health check.
+		[self checkboxWithKey:HWG_POWER_SHOW_CAPACITY_KEY title:NSLocalizedString(@"Capacity (current vs. new, in mAh)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_POWER_SHOW_MAXERR_KEY title:NSLocalizedString(@"Capacity reporting error margin", @"") defaultOn:NO],
 		// Added 17-ago-2026 — extra fields on "Power Adapter Changed" (Family/Adapter ID/Serial),
 		// same IOPSCopyExternalPowerAdapterDetails() dict already read for wattage.
 		[self checkboxWithKey:HWG_POWER_ADAPTER_SHOW_DETAILS_KEY title:NSLocalizedString(@"Adapter details (family/ID/serial) on change", @"") defaultOn:NO],

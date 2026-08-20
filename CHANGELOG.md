@@ -9,6 +9,13 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Power Monitor batches 1-3 — 9 more IOPSKeys.h fields
+Battery health (coarse Good/Fair/Poor), battery failure modes, internal-failure flag, design/
+nominal capacity, capacity reporting error margin (all on the periodic health-check
+notification), and a combined "Diagnostics" line (voltage/current/temperature/name/serial/VID-
+PID) on the regular power-source-change notification. All off by default. Deliberately excluded
+`kIOPSHealthConfidenceKey` — Apple's own header marks it deprecated since 10.6.
+
 ### Removed: 3 Intel-only features pulled from this build (documented for HG4MAC-INTEL)
 Thermal Monitor's CPU Power Limited and Hardware Thermal Warning Level, and Thunderbolt
 Monitor's real GPU identity/location/VRAM in eGPU notifications, were all implemented and
