@@ -49,6 +49,12 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Bluetooth Monitor batch 5 — subsystem state (CoreBluetooth)
+New "Bluetooth Status Changed" notification for restarting/unauthorized/unsupported subsystem
+states, via `CBCentralManagerDelegate` — the one remaining audit candidate reachable through
+public API without implementing a full BLE scanning subsystem. Off by default. 9/27 candidates
+done for this module.
+
 ### Added: Bluetooth Monitor batch 4 — link diagnostics, adapter identity in radio notification
 Link diagnostics field (page scan mode/repetition mode, clock offset — all public
 `IOBluetoothDevice` properties), off by default, troubleshooting-oriented. Also added the

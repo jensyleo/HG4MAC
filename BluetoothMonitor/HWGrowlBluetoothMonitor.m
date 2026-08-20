@@ -12,6 +12,7 @@
 #import "HWGIconPickerView.h"
 #import <stdlib.h>
 #import <IOBluetooth/IOBluetooth.h>
+#import <CoreBluetooth/CoreBluetooth.h>
 #include <IOKit/IOKitLib.h>
 
 // F33: individually configurable fields in the Bluetooth connect notification's extra
@@ -44,6 +45,13 @@
 // getPageScanRepetitionMode/getPageScanPeriodMode/getClockOffset). Mostly of interest for
 // troubleshooting a flaky/slow-to-reconnect device, not everyday use — OFF by default.
 #define HWG_BT_SHOW_LINKDIAG_KEY @"HWGBluetoothShowLinkDiagnostics"
+// Final API audit (19-ago-2026), lote 5 — subsystem-level state (resetting/unauthorized/
+// unsupported), via CBCentralManager's push delegate callback (CoreBluetooth, not classic
+// IOBluetooth — this is the one candidate from the audit's remaining list that's genuinely
+// reachable through public API without owning a full BLE scanning/RFCOMM/HFP subsystem).
+// PoweredOn/PoweredOff are deliberately NOT re-reported here — those are already covered by
+// the classic-API radio on/off notification above, and reporting both would duplicate it.
+#define HWG_BT_NOTIFY_SUBSYSTEM_KEY @"HWGBluetoothNotifySubsystemState"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -98,7 +106,7 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // defaultController far less often).
 #define HWG_BT_RADIO_POLL_INTERVAL 30.0
 
-@interface HWGrowlBluetoothMonitor ()
+@interface HWGrowlBluetoothMonitor () <CBCentralManagerDelegate>
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL starting;
@@ -110,6 +118,9 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @property (nonatomic, strong) NSTimer *radioPowerPollTimer;
 // -1 = no baseline read yet this launch, 0/1 = last known adapter power state (off/on).
 @property (nonatomic, assign) NSInteger lastKnownRadioPowerState;
+// Final API audit (19-ago-2026), lote 5 — kept only to receive -centralManagerDidUpdateState:
+// (push). Never used for scanning/connecting to BLE peripherals.
+@property (nonatomic, strong) CBCentralManager *subsystemStateManager;
 
 @end
 
@@ -121,6 +132,7 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @synthesize prefsView;
 @synthesize radioPowerPollTimer;
 @synthesize lastKnownRadioPowerState;
+@synthesize subsystemStateManager;
 
 -(void)dealloc {
 	[connectionNotification unregister];
@@ -136,6 +148,31 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // rather than duplicating its logic.
 -(void)radioPowerNotificationFired:(NSNotification *)note {
 	[self pollRadioPowerState];
+}
+
+// Final API audit (19-ago-2026), lote 5 — CBCentralManagerDelegate's one required method,
+// called every time the subsystem's state changes. Only Resetting/Unauthorized/Unsupported are
+// reported as notifications here; PoweredOn/Off/Unknown are deliberately skipped (see the
+// HWG_BT_NOTIFY_SUBSYSTEM_KEY doc comment for why).
+-(void)centralManagerDidUpdateState:(CBCentralManager *)central {
+	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_SUBSYSTEM_KEY, NO)) return;
+
+	NSString *label = nil;
+	switch (central.state) {
+		case CBManagerStateResetting:    label = NSLocalizedString(@"Bluetooth is restarting", @""); break;
+		case CBManagerStateUnauthorized: label = NSLocalizedString(@"This app is no longer authorized to use Bluetooth", @""); break;
+		case CBManagerStateUnsupported:  label = NSLocalizedString(@"Bluetooth Low Energy is not supported on this Mac", @""); break;
+		default: return;
+	}
+
+	NSData *iconData = [HWGResolveIconNamed(@"HWGPrefsBluetooth-Module") TIFFRepresentation];
+	[delegate notifyWithName:@"BluetoothSubsystemStateChanged"
+							 title:NSLocalizedString(@"Bluetooth Status", @"")
+					 description:label
+							  icon:iconData
+			  identifierString:@"HWGrowlBluetoothSubsystemState"
+				  contextString:nil
+							plugin:self];
 }
 
 -(id)init {
@@ -218,6 +255,12 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 												  name:IOBluetoothHostControllerPoweredOffNotification
 												object:nil];
 	[self updateRadioPowerPollState];
+	// Final API audit (19-ago-2026), lote 5 — CBCentralManager's delegate is the only public,
+	// push-based way to observe subsystem-level states (resetting/unauthorized/unsupported)
+	// that IOBluetoothHostController's powerState alone can't distinguish. Queue explicitly
+	// off the main queue's default dispatch behavior isn't needed here — nil means "main queue",
+	// which is what every other delegate callback in this file already assumes.
+	self.subsystemStateManager = [[CBCentralManager alloc] initWithDelegate:self queue:nil options:@{CBCentralManagerOptionShowPowerAlertKey: @NO}];
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
 	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
@@ -785,6 +828,9 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		// see the key defines' doc comment for why sharing those would be a real conflict.
 		@[@"Bluetooth Radio On", @"Bluetooth-Radio-On", HWG_BT_NOTIFY_RADIO_ON_KEY, @NO],
 		@[@"Bluetooth Radio Off", @"Bluetooth-Radio-Off", HWG_BT_NOTIFY_RADIO_OFF_KEY, @NO],
+		// Final API audit (19-ago-2026), lote 5 — subsystem-level state (restarting/unauthorized/
+		// unsupported), reuses the module icon since there's no dedicated art for this rare event.
+		@[@"Bluetooth Status Changed", @"HWGPrefsBluetooth-Module", HWG_BT_NOTIFY_SUBSYSTEM_KEY, @NO],
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.
@@ -845,19 +891,21 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", nil];
+	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Bluetooth Connected", @""), @"BluetoothConnected",
 			  NSLocalizedString(@"Bluetooth Disconnected", @""), @"BluetoothDisconnected",
 			  NSLocalizedString(@"Bluetooth Radio On", @""), @"BluetoothRadioOn",
-			  NSLocalizedString(@"Bluetooth Radio Off", @""), @"BluetoothRadioOff", nil];
+			  NSLocalizedString(@"Bluetooth Radio Off", @""), @"BluetoothRadioOff",
+			  NSLocalizedString(@"Bluetooth Status Changed", @""), @"BluetoothSubsystemStateChanged", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a Bluetooth Device is connected", @""), @"BluetoothConnected",
 			  NSLocalizedString(@"Sent when a Bluetooth Device is disconnected", @""), @"BluetoothDisconnected",
 			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned on (System Settings/Control Center toggle)", @""), @"BluetoothRadioOn",
-			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned off", @""), @"BluetoothRadioOff", nil];
+			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned off", @""), @"BluetoothRadioOff",
+			  NSLocalizedString(@"Sent when the Bluetooth subsystem is restarting, becomes unauthorized, or is unsupported", @""), @"BluetoothSubsystemStateChanged", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];
