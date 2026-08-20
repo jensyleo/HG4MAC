@@ -33,6 +33,29 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator);
 #define HWG_USB_SHOW_SERIAL_KEY       @"HWGUSBShowSerialNumber"
 #define HWG_USB_SHOW_FIRMWARE_KEY     @"HWGUSBShowFirmwareVersion"
 #define HWG_USB_SHOW_LOCATION_KEY     @"HWGUSBShowLocationID"
+// Final API audit (19-ago-2026), lote 1 — 3 more standard IOUSBHostDevice registry properties,
+// verified against IOUSBHostFamilyDefinitions.h (public IOKit header): "bNumConfigurations"
+// (device descriptor field, distinct from bDeviceClass already read above), "bcdUSB" (the USB
+// *specification* version the device claims to implement — can diverge from "Device Speed",
+// the already-read NEGOTIATED speed, e.g. a USB 3.0 device forced onto a USB 2.0 port), and
+// "UsbTunnel" (boolean — device is connected via a USB4/Thunderbolt tunnel; the one
+// Thunderbolt-adjacent field that's genuinely public API, unlike anything needing
+// IOThunderboltFamily). All OFF by default, same pattern as Serial/Firmware/Location above.
+#define HWG_USB_SHOW_NUMCONFIGS_KEY   @"HWGUSBShowNumConfigurations"
+#define HWG_USB_SHOW_SPECVERSION_KEY  @"HWGUSBShowSpecVersion"
+#define HWG_USB_SHOW_TUNNEL_KEY       @"HWGUSBShowTunnel"
+// Final API audit (19-ago-2026), lote 2 — "kUSBFailedRequestedPower" (IOUSBHostFamilyDefinitions.h,
+// public), a direct signal that the device asked for more current than the port could grant —
+// stronger/more specific than manually comparing Current Required vs. Current Available above
+// (a device can fail this check even when Required <= Available, if the ORIGINAL request during
+// enumeration was higher and got renegotiated down). OFF by default.
+#define HWG_USB_SHOW_FAILEDPOWER_KEY  @"HWGUSBShowFailedRequestedPower"
+// Final API audit (19-ago-2026), lote 3 — 2 fields that live on the PORT node (IOUSBHostPort),
+// not the device node this monitor otherwise reads directly: "removable" (the closest public,
+// real analog to "is this device built-in/non-removable", per IOUSBHostFamilyDefinitions.h —
+// there's no direct device-level "built-in" key) and "UsbConnector" (USB-C vs. USB-A/other).
+// Both OFF by default.
+#define HWG_USB_SHOW_PORTINFO_KEY     @"HWGUSBShowPortInfo"
 
 static BOOL HWGUSBBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -444,6 +467,65 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 		}
 	}
 
+	// Final API audit (19-ago-2026), lote 1 — same IORegistryEntryCreateCFProperty pattern,
+	// all OFF by default.
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_NUMCONFIGS_KEY, NO)) {
+		CFTypeRef numConfigsRef = IORegistryEntryCreateCFProperty(device, CFSTR("bNumConfigurations"), kCFAllocatorDefault, 0);
+		if (numConfigsRef) {
+			if (CFGetTypeID(numConfigsRef) == CFNumberGetTypeID()) {
+				int numConfigs = 0;
+				CFNumberGetValue((CFNumberRef)numConfigsRef, kCFNumberIntType, &numConfigs);
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Configurations:\t%d", @""), numConfigs]];
+			}
+			CFRelease(numConfigsRef);
+		}
+	}
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_SPECVERSION_KEY, NO)) {
+		CFTypeRef bcdUSBRef = IORegistryEntryCreateCFProperty(device, CFSTR("bcdUSB"), kCFAllocatorDefault, 0);
+		if (bcdUSBRef) {
+			if (CFGetTypeID(bcdUSBRef) == CFNumberGetTypeID()) {
+				int bcdUSB = 0;
+				CFNumberGetValue((CFNumberRef)bcdUSBRef, kCFNumberIntType, &bcdUSB);
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"USB spec:\t%d.%02d", @""), (bcdUSB >> 8) & 0xFF, bcdUSB & 0xFF]];
+			}
+			CFRelease(bcdUSBRef);
+		}
+	}
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_TUNNEL_KEY, NO)) {
+		CFTypeRef tunnelRef = IORegistryEntryCreateCFProperty(device, CFSTR("UsbTunnel"), kCFAllocatorDefault, 0);
+		if (tunnelRef) {
+			if (tunnelRef == kCFBooleanTrue) {
+				[lines addObject:NSLocalizedString(@"Connection:\tUSB4/Thunderbolt tunnel", @"")];
+			}
+			CFRelease(tunnelRef);
+		}
+	}
+
+	// Final API audit (19-ago-2026), lote 2. The header doesn't document this key's exact type
+	// (unlike most others in IOUSBHostFamilyDefinitions.h), so this handles it defensively:
+	// either a straight boolean, or a non-zero number, both count as "failed".
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_FAILEDPOWER_KEY, NO)) {
+		CFTypeRef failedPowerRef = IORegistryEntryCreateCFProperty(device, CFSTR("kUSBFailedRequestedPower"), kCFAllocatorDefault, 0);
+		if (failedPowerRef) {
+			BOOL failed = NO;
+			if (CFGetTypeID(failedPowerRef) == CFBooleanGetTypeID()) {
+				failed = (failedPowerRef == kCFBooleanTrue);
+			} else if (CFGetTypeID(failedPowerRef) == CFNumberGetTypeID()) {
+				int value = 0;
+				CFNumberGetValue((CFNumberRef)failedPowerRef, kCFNumberIntType, &value);
+				failed = (value != 0);
+			}
+			if (failed) [lines addObject:NSLocalizedString(@"⚠️ Device requested more power than the port could provide", @"")];
+			CFRelease(failedPowerRef);
+		}
+	}
+
+	// Final API audit (19-ago-2026), lote 3.
+	if (HWGUSBBoolForKey(HWG_USB_SHOW_PORTINFO_KEY, NO)) {
+		NSString *portInfo = [self usbPortInfoForDevice:device];
+		if (portInfo) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Port:\t%@", @""), portInfo]];
+	}
+
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
 
@@ -452,6 +534,53 @@ static const uint8_t kHWGUSBHubDeviceClass = 9;
 // (the same public property System Information reads for "Solid State: Yes/No"). Walks down
 // a few levels of children looking for the first one that has it — nil for anything that
 // isn't storage at all (keyboards, hubs, etc. simply never have this property anywhere below them).
+// Final API audit (19-ago-2026), lote 3 — walks UP to the parent port node (mirrors
+// usbStorageMediumLabelForDevice: below, which walks DOWN to a child), looking for "removable"
+// and "UsbConnector". "UsbConnector"'s numeric meaning isn't documented in
+// IOUSBHostFamilyDefinitions.h (unlike most other keys there, which have an inline comment) —
+// rather than guess a USB-C/USB-A mapping and risk silently mislabeling it, this reports the
+// raw code number as-is.
+-(NSString *)usbPortInfoForDevice:(io_object_t)device {
+	io_object_t current = device;
+	BOOL ownsCurrent = NO;
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+
+	for (int depth = 0; depth < 4; depth++) {
+		CFTypeRef removableRef = IORegistryEntryCreateCFProperty(current, CFSTR("removable"), kCFAllocatorDefault, 0);
+		if (removableRef) {
+			if (CFGetTypeID(removableRef) == CFBooleanGetTypeID()) {
+				BOOL removable = (removableRef == kCFBooleanTrue);
+				[parts addObject:removable ? NSLocalizedString(@"removable", @"") : NSLocalizedString(@"built-in", @"")];
+			}
+			CFRelease(removableRef);
+		}
+		CFTypeRef connectorRef = IORegistryEntryCreateCFProperty(current, CFSTR("UsbConnector"), kCFAllocatorDefault, 0);
+		if (connectorRef) {
+			if (CFGetTypeID(connectorRef) == CFNumberGetTypeID()) {
+				int connectorCode = -1;
+				CFNumberGetValue((CFNumberRef)connectorRef, kCFNumberIntType, &connectorCode);
+				[parts addObject:[NSString stringWithFormat:NSLocalizedString(@"connector type code %d", @""), connectorCode]];
+			}
+			CFRelease(connectorRef);
+		}
+		if ([parts count]) {
+			if (ownsCurrent) IOObjectRelease(current);
+			return [parts componentsJoinedByString:@", "];
+		}
+
+		io_object_t parent = IO_OBJECT_NULL;
+		if (IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) != KERN_SUCCESS || !parent) {
+			if (ownsCurrent) IOObjectRelease(current);
+			return nil;
+		}
+		if (ownsCurrent) IOObjectRelease(current);
+		current = parent;
+		ownsCurrent = YES;
+	}
+	if (ownsCurrent) IOObjectRelease(current);
+	return nil;
+}
+
 -(NSString *)usbStorageMediumLabelForDevice:(io_object_t)device {
 	io_object_t current = device;
 	BOOL ownsCurrent = NO;
@@ -645,6 +774,14 @@ static void usbDeviceRemoved(void *refCon, io_iterator_t iterator) {
 		[self checkboxWithKey:HWG_USB_SHOW_SERIAL_KEY       title:NSLocalizedString(@"Serial number", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_USB_SHOW_FIRMWARE_KEY     title:NSLocalizedString(@"Firmware/release number", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_USB_SHOW_LOCATION_KEY     title:NSLocalizedString(@"Port location ID", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_USB_SHOW_NUMCONFIGS_KEY   title:NSLocalizedString(@"Number of USB configurations", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_USB_SHOW_SPECVERSION_KEY  title:NSLocalizedString(@"USB specification version (bcdUSB)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_USB_SHOW_TUNNEL_KEY       title:NSLocalizedString(@"USB4/Thunderbolt tunnel indicator", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 2.
+		[self checkboxWithKey:HWG_USB_SHOW_FAILEDPOWER_KEY  title:NSLocalizedString(@"Warn if device requested more power than the port could provide", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 3.
+		[self checkboxWithKey:HWG_USB_SHOW_PORTINFO_KEY     title:NSLocalizedString(@"Port info (removable/built-in, connector type code)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

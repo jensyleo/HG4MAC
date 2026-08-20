@@ -9,6 +9,12 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: USB Monitor batches 1-3 — 7 more IOUSBHostFamilyDefinitions.h fields
+Number of USB configurations, USB spec version (bcdUSB, distinct from the already-shown
+negotiated speed), USB4/Thunderbolt tunnel indicator, a "requested more power than available"
+warning, and port-level info (removable/built-in, connector type code — reported as a raw code
+since the header doesn't document its numeric meaning). All off by default.
+
 ### Added: Power Monitor batches 1-3 — 9 more IOPSKeys.h fields
 Battery health (coarse Good/Fair/Poor), battery failure modes, internal-failure flag, design/
 nominal capacity, capacity reporting error margin (all on the periodic health-check
