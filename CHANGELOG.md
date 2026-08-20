@@ -9,6 +9,16 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Display Monitor — stereo mode, scale ratio, wide gamut
+CGDisplayIsStereo, an explicit pixel/point scale ratio, and NSScreen.canRepresentDisplayGamut:
+(a real P3-vs-sRGB boolean). All off by default. Thermal Monitor audited and confirmed already
+complete — no public, Apple-Silicon-functional gaps remain.
+
+### Added: Network Monitor — unsatisfied-path reason
+`nw_path_get_unsatisfied_reason`, read from the same push callback as the already-implemented
+path-status notification. Appended as a parenthetical only when the path becomes Unsatisfied and
+a reason is actually available.
+
 ### Added: Volume Monitor batches 1-2 — bus/sector info, honest low-space figure
 Bus name + native sector size (DiskArbitration, off by default). A second, more accurate
 "actually available" figure (accounting for reclaimable purgeable space on APFS) added as an

@@ -1316,6 +1316,23 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 	}
 }
 
+// Final API audit (19-ago-2026) — nw_path_unsatisfied_reason_not_available means "no reason
+// given", not "no reason exists to report" — returns nil for that case so the caller can just
+// omit the parenthetical instead of showing a useless "(No reason available)".
+// nw_path_unsatisfied_reason_vpn_inactive requires macOS 14+ (this app's deployment target is
+// 13.0), so it's handled in its own @available-guarded branch rather than a plain switch case.
+-(NSString *)pathUnsatisfiedReasonLabel:(nw_path_unsatisfied_reason_t)reason {
+	if (@available(macOS 14.0, *)) {
+		if (reason == nw_path_unsatisfied_reason_vpn_inactive) return NSLocalizedString(@"a required VPN is not active", @"");
+	}
+	switch (reason) {
+		case nw_path_unsatisfied_reason_cellular_denied:      return NSLocalizedString(@"cellular access denied", @"");
+		case nw_path_unsatisfied_reason_wifi_denied:          return NSLocalizedString(@"Wi-Fi access denied", @"");
+		case nw_path_unsatisfied_reason_local_network_denied: return NSLocalizedString(@"local network access denied", @"");
+		default: return nil;
+	}
+}
+
 -(NSString *)pathQualityLabel:(nw_link_quality_t)quality {
 	switch (quality) {
 		case nw_link_quality_minimal:  return NSLocalizedString(@"Minimal", @"");
@@ -1352,9 +1369,17 @@ static void HWGReachabilityCallback(SCNetworkReachabilityRef target, SCNetworkRe
 
 	if (haveLastKnownPathStatus && (NSInteger)status != lastKnownPathStatus) {
 		if ([self boolForKey:HWG_NET_NOTIFY_PATH_STATUS_KEY default:NO]) {
+			NSString *pathDescription = [NSString stringWithFormat:@"%@ → %@", [self pathStatusLabel:(nw_path_status_t)lastKnownPathStatus], [self pathStatusLabel:status]];
+			// Final API audit (19-ago-2026) — nw_path_get_unsatisfied_reason, a companion call
+			// to nw_path_get_status already read above, from the SAME update-handler callback
+			// (push, no extra polling). Only meaningful when the path just became Unsatisfied.
+			if (status == nw_path_status_unsatisfied) {
+				NSString *reasonLabel = [self pathUnsatisfiedReasonLabel:nw_path_get_unsatisfied_reason(path)];
+				if (reasonLabel) pathDescription = [pathDescription stringByAppendingFormat:@" (%@)", reasonLabel];
+			}
 			[delegate notifyWithName:@"NetworkPathStatusChanged"
 								 title:NSLocalizedString(@"Network Path Status Changed", @"")
-							description:[NSString stringWithFormat:@"%@ → %@", [self pathStatusLabel:(nw_path_status_t)lastKnownPathStatus], [self pathStatusLabel:status]]
+							description:pathDescription
 								  icon:HWGResolveIconDataNamed(@"HWGPrefsNetwork-Module")
 					  identifierString:@"HWGrowlNetworkPathStatus"
 						  contextString:nil

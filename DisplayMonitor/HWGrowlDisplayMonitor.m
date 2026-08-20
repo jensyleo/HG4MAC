@@ -37,6 +37,17 @@
 #define HWG_DISPLAY_SHOW_VRR_KEY   @"HWGDisplayShowVRRRange"
 #define HWG_DISPLAY_SHOW_EDR_KEY   @"HWGDisplayShowEDRHeadroom"
 #define HWG_DISPLAY_SHOW_NOTCH_KEY @"HWGDisplayShowNotch"
+// Final API audit (19-ago-2026), lote 1 — 3 more real, header-verified public fields via an
+// agent audit: CGDisplayIsStereo (CGDirectDisplay.h, legacy stereo/3D hardware — low practical
+// value on modern Macs but genuinely unread), an explicit pixel/point scale ratio (both
+// CGDisplayModeGetPixelWidth/Height and matchingScreen.frame.size are already read individually
+// for the Resolution line above, just never combined into their own ratio — useful for an
+// external 4K/5K display running an odd/non-2x HiDPI scale), and NSScreen.canRepresentDisplayGamut:
+// (macOS 10.12+, a real boolean P3-vs-sRGB check — sharper than the existing Color space line's
+// string-matched localizedName). All OFF by default.
+#define HWG_DISPLAY_SHOW_STEREO_KEY      @"HWGDisplayShowStereo"
+#define HWG_DISPLAY_SHOW_SCALE_RATIO_KEY @"HWGDisplayShowScaleRatio"
+#define HWG_DISPLAY_SHOW_WIDEGAMUT_KEY   @"HWGDisplayShowWideGamut"
 // Final API audit (18-ago-2026) — CGDisplayIsAsleep, per-display, diffed the same way as the
 // existing mode/role change detection: a display can sleep/wake without ever leaving
 // CGGetOnlineDisplayList (its CGDirectDisplayID stays valid the whole time), so this needs its
@@ -378,6 +389,27 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		if (colorSpace.localizedName) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Color space:\t%@", @""), colorSpace.localizedName]];
 		}
+	}
+	// Final API audit (19-ago-2026), lote 1.
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_STEREO_KEY, NO)) {
+		if (CGDisplayIsStereo(displayID)) {
+			[lines addObject:NSLocalizedString(@"Stereo (3D) mode:\tYes", @"")];
+		}
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_SCALE_RATIO_KEY, NO) && matchingScreen) {
+		CGDisplayModeRef ratioMode = CGDisplayCopyDisplayMode(displayID);
+		if (ratioMode) {
+			NSSize points = matchingScreen.frame.size;
+			if (points.width > 0) {
+				double ratio = CGDisplayModeGetPixelWidth(ratioMode) / points.width;
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Scale ratio:\t%.2fx", @""), ratio]];
+			}
+			CGDisplayModeRelease(ratioMode);
+		}
+	}
+	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_WIDEGAMUT_KEY, NO) && matchingScreen) {
+		BOOL wideGamut = [matchingScreen canRepresentDisplayGamut:NSDisplayGamutP3];
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"P3 wide gamut:\t%@", @""), wideGamut ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
 	}
 	if (HWGDisplayBoolForKey(HWG_DISPLAY_SHOW_BUILTIN_KEY, NO)) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Built-in:\t%@", @""), CGDisplayIsBuiltin(displayID) ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
@@ -786,6 +818,10 @@ static void HWGDisplayReconfigurationCallback(CGDirectDisplayID display, CGDispl
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_VRR_KEY  title:NSLocalizedString(@"Variable refresh rate range (ProMotion, macOS 12+)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_EDR_KEY  title:NSLocalizedString(@"HDR/EDR headroom", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_DISPLAY_SHOW_NOTCH_KEY title:NSLocalizedString(@"Notch / camera housing presence (macOS 12+)", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_STEREO_KEY      title:NSLocalizedString(@"Stereo (3D) mode", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_SCALE_RATIO_KEY title:NSLocalizedString(@"Pixel/point scale ratio", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_DISPLAY_SHOW_WIDEGAMUT_KEY   title:NSLocalizedString(@"P3 wide gamut (Yes/No)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
