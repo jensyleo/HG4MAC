@@ -101,6 +101,19 @@
 // standard DIS characteristics, so waiting for ALL of them would hang forever on those.
 #define HWG_BT_GATT_COALESCE_DELAY 1.5
 
+// Final API audit (19-ago-2026) — per-level RSSI notifications, retomando el pendiente
+// documentado el 13-ago-2026 (ver TODO.md). Mismo mecanismo anti-spam que NetworkMonitor's
+// Wi-Fi bars (-pollWifiSignal:): baseline en la primera lectura (sin notificar), solo notifica
+// en un cambio de NIVEL (no de dBm crudo), y aplica un cooldown por-dispositivo tras cada aviso
+// para que un valor oscilando justo en el borde de un umbral no dispare repetidamente. A
+// diferencia de Wi-Fi (que expone un slider configurable de 0-60s), este cooldown es un valor
+// fijo — Bluetooth no tenía ninguna UI de configuración de intervalo previa a reutilizar, y
+// agregar un slider nuevo solo para esto se consideró fuera de alcance de este pendiente
+// puntual.
+#define HWG_BT_SIGNAL_POLL_INTERVAL 10.0
+#define HWG_BT_SIGNAL_COOLDOWN      15.0
+#define HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX @"HWGBluetoothNotifySignalBar"   // + 0/1/2/3/4
+
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -182,6 +195,11 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @property (nonatomic, strong) NSMutableDictionary<NSUUID *, CBPeripheral *> *bleKnownPeripherals;
 @property (nonatomic, strong) NSMutableDictionary<NSUUID *, NSMutableDictionary<NSString *, NSString *> *> *bleGATTInfo;
 @property (nonatomic, strong) NSMutableDictionary<NSUUID *, NSTimer *> *bleCoalesceTimers;
+// Final API audit (19-ago-2026) — per-level RSSI signal notifications. Keyed by device
+// address (same normalization already used for the HID-battery lookup elsewhere in this file).
+@property (nonatomic, strong) NSTimer *signalPollTimer;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *lastKnownSignalBars;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *lastSignalNoteTimeByAddress;
 
 @end
 
@@ -200,12 +218,16 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @synthesize bleKnownPeripherals;
 @synthesize bleGATTInfo;
 @synthesize bleCoalesceTimers;
+@synthesize signalPollTimer;
+@synthesize lastKnownSignalBars;
+@synthesize lastSignalNoteTimeByAddress;
 
 -(void)dealloc {
 	[connectionNotification unregister];
 	[radioPowerPollTimer invalidate];
 	[pairedDevicesPollTimer invalidate];
 	[blePollTimer invalidate];
+	[signalPollTimer invalidate];
 	for (NSTimer *timer in bleCoalesceTimers.allValues) [timer invalidate];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	// ARC handles the release; no [super dealloc].
@@ -257,6 +279,8 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	self.bleKnownPeripherals = [NSMutableDictionary dictionary];
 	self.bleGATTInfo = [NSMutableDictionary dictionary];
 	self.bleCoalesceTimers = [NSMutableDictionary dictionary];
+	self.lastKnownSignalBars = [NSMutableDictionary dictionary];
+	self.lastSignalNoteTimeByAddress = [NSMutableDictionary dictionary];
 	return self;
 }
 
@@ -365,6 +389,57 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 						  contextString:nil
 									plugin:self];
 		}
+	}
+}
+
+// Final API audit (19-ago-2026) — retoma el pendiente del 13-ago-2026: notificaciones por nivel
+// de señal, con el mismo mecanismo anti-spam de NetworkMonitor's -pollWifiSignal: (baseline en
+// la primera lectura, solo notifica en cambio de NIVEL, cooldown por-dispositivo tras cada
+// aviso). No hay notificación push de RSSI en IOBluetooth — se poll·ea el RSSI de cada
+// dispositivo actualmente CONECTADO (rawRSSI solo es válido en ese estado, ver el comentario ya
+// existente en -bluetoothExtraInfoForDevice:).
+-(void)pollBluetoothSignalLevels {
+	for (IOBluetoothDevice *device in [IOBluetoothDevice pairedDevices]) {
+		if (![device isConnected]) continue;
+		NSString *address = [device addressString];
+		if (!address) continue;
+
+		BluetoothHCIRSSIValue rssi = [device rawRSSI];
+		if (rssi == 127) continue;   // 127 = "not available" per IOBluetooth
+		NSInteger bars = HWGBluetoothBarsForRSSI(rssi);
+
+		NSNumber *previousBarsNum = lastKnownSignalBars[address];
+		if (!previousBarsNum) {   // first sighting for this device — baseline only, no notification
+			lastKnownSignalBars[address] = @(bars);
+			continue;
+		}
+		NSInteger previousBars = [previousBarsNum integerValue];
+		if (bars == previousBars) continue;   // no level change
+
+		NSDate *lastNote = lastSignalNoteTimeByAddress[address];
+		if (lastNote && [[NSDate date] timeIntervalSinceDate:lastNote] < HWG_BT_SIGNAL_COOLDOWN) continue;
+
+		NSString *barKey = [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingFormat:@"%ld", (long)bars];
+		lastKnownSignalBars[address] = @(bars);
+		lastSignalNoteTimeByAddress[address] = [NSDate date];
+		if (!HWGBTBoolForKey(barKey, NO)) continue;
+
+		BOOL improved = (bars > previousBars);
+		NSString *name = [device name] ?: address;
+		NSString *arrow = improved ? @"↑" : @"↓";
+		NSString *dir = improved ? NSLocalizedString(@"improved", @"Bluetooth signal got stronger")
+		                         : NSLocalizedString(@"degraded", @"Bluetooth signal got weaker");
+		NSString *description = [NSString stringWithFormat:
+			NSLocalizedString(@"%@\nSignal %@ %@ (%ld/4)", @"device name, arrow, improved/degraded, bars"),
+			name, arrow, dir, (long)bars];
+		NSData *iconData = [HWGResolveIconNamed([NSString stringWithFormat:@"Bluetooth-Signal-%ld", (long)bars]) TIFFRepresentation];
+		[delegate notifyWithName:@"BluetoothSignalChange"
+								 title:NSLocalizedString(@"Bluetooth Signal Changed", @"")
+						 description:description
+								  icon:iconData
+				  identifierString:[NSString stringWithFormat:@"HWGrowlBluetoothSignal-%@", address]
+					  contextString:nil
+								plugin:self];
 	}
 }
 
@@ -531,6 +606,12 @@ static CBUUID *HWGBTBatteryLevelCharUUID(void)    { return [CBUUID UUIDWithStrin
 															 selector:@selector(refreshConnectedBLEAccessories)
 															 userInfo:nil
 															  repeats:YES];
+	// Final API audit (19-ago-2026) — per-level RSSI signal notifications.
+	self.signalPollTimer = [NSTimer scheduledTimerWithTimeInterval:HWG_BT_SIGNAL_POLL_INTERVAL
+																  target:self
+																selector:@selector(pollBluetoothSignalLevels)
+																userInfo:nil
+																 repeats:YES];
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
 	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
@@ -1019,6 +1100,13 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 	if (HWGBTBoolForKey(HWG_BT_NOTIFY_DISCONNECT_KEY, YES)) {
 		[self bluetoothName:[device name] connected:NO iconName:[self bluetoothIconNameForDevice:device] extraInfo:nil];
 	}
+	// Final API audit (19-ago-2026) — drop the cached signal-level baseline so a later
+	// reconnect re-baselines instead of comparing against a stale reading from this session.
+	NSString *address = [device addressString];
+	if (address) {
+		[lastKnownSignalBars removeObjectForKey:address];
+		[lastSignalNoteTimeByAddress removeObjectForKey:address];
+	}
 	[note unregister];
 
 }
@@ -1203,11 +1291,13 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.
-		@[@"Signal — No Signal", @"Bluetooth-Signal-0"],
-		@[@"Signal — Weak", @"Bluetooth-Signal-1"],
-		@[@"Signal — Fair", @"Bluetooth-Signal-2"],
-		@[@"Signal — Good", @"Bluetooth-Signal-3"],
-		@[@"Signal — Excellent", @"Bluetooth-Signal-4"],
+		// Final API audit (19-ago-2026) — retomando el pendiente del 13-ago-2026: ahora con
+		// checkbox real de notify (con histéresis/cooldown, ver -pollBluetoothSignalLevels).
+		@[@"Signal — No Signal", @"Bluetooth-Signal-0", [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingString:@"0"], @NO],
+		@[@"Signal — Weak", @"Bluetooth-Signal-1", [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingString:@"1"], @NO],
+		@[@"Signal — Fair", @"Bluetooth-Signal-2", [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingString:@"2"], @NO],
+		@[@"Signal — Good", @"Bluetooth-Signal-3", [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingString:@"3"], @NO],
+		@[@"Signal — Excellent", @"Bluetooth-Signal-4", [HWG_BT_NOTIFY_SIGNAL_KEY_PREFIX stringByAppendingString:@"4"], @NO],
 	] width:iconsWidth];
 	iconPicker.translatesAutoresizingMaskIntoConstraints = YES;
 	iconPicker.frame = NSMakeRect(0, 0, iconsWidth, 0);
@@ -1220,13 +1310,10 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 	CGFloat iconsHeaderH = iconsHeader.fittingSize.height;
 	CGFloat iconsGap = 12;
 
-	// Explains why the 5 "Signal — …" rows above have no checkbox, since users naturally
-	// expect one there given every other row in this picker has it (feedback 13-ago-2026).
-	// Per-level RSSI notifications are technically possible but not implemented: RSSI
-	// fluctuates continuously (multipath/distance jitter, no hysteresis smoothing applied
-	// to it the way WiFi bars are), so a naive per-level trigger would fire repeatedly as
-	// the value crosses a threshold back and forth. Tracked as pending work.
-	NSTextField *signalNote = [NSTextField wrappingLabelWithString:NSLocalizedString(@"Note: the 5 signal-strength icons above have no notification checkbox — they only customize which image is shown at each RSSI level while “Signal strength” is enabled in General. Per-level signal notifications (e.g. “notify when signal drops to Weak”) are technically possible but not implemented yet, pending hysteresis logic to avoid notification spam from RSSI’s natural fluctuation.", @"")];
+	// Final API audit (19-ago-2026) — retomando el pendiente del 13-ago-2026: los 5 rows de
+	// arriba ahora SÍ tienen checkbox de notify real (con cooldown anti-spam, ver
+	// -pollBluetoothSignalLevels). Esta nota explica el mecanismo, ya no la ausencia del feature.
+	NSTextField *signalNote = [NSTextField wrappingLabelWithString:NSLocalizedString(@"The 5 signal-strength rows above both customize the icon shown at each RSSI level AND can notify when the signal crosses into that level (checked every 10s, only while a device is connected). To avoid spamming from RSSI's natural fluctuation, a level change only notifies after a 15s cooldown since the last signal notice for that device.", @"")];
 	signalNote.font = [NSFont systemFontOfSize:11];
 	signalNote.textColor = [NSColor tertiaryLabelColor];
 	signalNote.translatesAutoresizingMaskIntoConstraints = YES;
@@ -1260,7 +1347,7 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", @"BluetoothPaired", @"BluetoothUnpaired", @"BluetoothLEConnected", @"BluetoothLEDisconnected", nil];
+	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", @"BluetoothPaired", @"BluetoothUnpaired", @"BluetoothLEConnected", @"BluetoothLEDisconnected", @"BluetoothSignalChange", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Bluetooth Connected", @""), @"BluetoothConnected",
@@ -1271,7 +1358,8 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 			  NSLocalizedString(@"Bluetooth Device Paired", @""), @"BluetoothPaired",
 			  NSLocalizedString(@"Bluetooth Device Unpaired", @""), @"BluetoothUnpaired",
 			  NSLocalizedString(@"BLE Accessory Connected", @""), @"BluetoothLEConnected",
-			  NSLocalizedString(@"BLE Accessory Disconnected", @""), @"BluetoothLEDisconnected", nil];
+			  NSLocalizedString(@"BLE Accessory Disconnected", @""), @"BluetoothLEDisconnected",
+			  NSLocalizedString(@"Bluetooth Signal Changed", @""), @"BluetoothSignalChange", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a Bluetooth Device is connected", @""), @"BluetoothConnected",
@@ -1282,7 +1370,8 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 			  NSLocalizedString(@"Sent when a new Bluetooth device is paired with this Mac", @""), @"BluetoothPaired",
 			  NSLocalizedString(@"Sent when a previously-paired Bluetooth device is unpaired", @""), @"BluetoothUnpaired",
 			  NSLocalizedString(@"Sent when a BLE-only accessory (Device Information/Battery Service) connects", @""), @"BluetoothLEConnected",
-			  NSLocalizedString(@"Sent when a BLE-only accessory disconnects, including the reason if abnormal", @""), @"BluetoothLEDisconnected", nil];
+			  NSLocalizedString(@"Sent when a BLE-only accessory disconnects, including the reason if abnormal", @""), @"BluetoothLEDisconnected",
+			  NSLocalizedString(@"Sent when a connected Bluetooth device's signal strength level changes", @""), @"BluetoothSignalChange", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];

@@ -9,6 +9,13 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Bluetooth Monitor — per-level signal strength notifications
+Resolves a pending item from 13-ago-2026: the 5 signal-strength rows (No Signal/Weak/Fair/Good/
+Excellent) now have real notify checkboxes, not just icon customization. Uses the same
+anti-spam approach as Wi-Fi's signal bars — baseline on first reading, notify only on a level
+change, then a 15s per-device cooldown. Polled every 10s (rawRSSI has no push notification and
+is only valid while connected). All off by default.
+
 ### Added: Gamepad/Camera/Audio fields, Printer job priority + waste-toner fix
 Gamepad: controller attached-to-device flag, haptic actuator locations. Camera: manufacturer,
 linked devices (e.g. paired mic). Audio: clock source, model UID + manufacturer, supported
