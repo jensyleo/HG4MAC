@@ -4,10 +4,11 @@ All notable changes made in this fork on top of
 [`pranav-prakash/HardwareGrowler-NC`](https://github.com/pranav-prakash/HardwareGrowler-NC).
 Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-series)**.
 
-## v1.18.0 — 2026-08-18 (in progress)
+## v1.19.0 — 2026-08-20
 
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
-comments throughout the code). Adding one confirmed, tested feature at a time.
+comments throughout the code). 52 new/fixed fields + 1 resolved pending item (per-level
+Bluetooth signal notifications).
 
 ### Added: Bluetooth Monitor — per-level signal strength notifications
 Resolves a pending item from 13-ago-2026: the 5 signal-strength rows (No Signal/Weak/Fair/Good/
