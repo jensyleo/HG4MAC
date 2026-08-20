@@ -2676,7 +2676,21 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 
 // Lays out a vertical stack of checkboxes (optionally preceded by other rows already
 // pinned by the caller) inside `tab`, top-anchored to `topView`/`topAnchor`.
--(void)layoutRows:(NSArray<NSView*> *)rows inView:(NSView *)tab belowView:(NSView *)topView gap:(CGFloat)firstGap {
+//
+// BUG FIX (19-ago-2026) — this used to be `-(void)...` and every caller separately guessed a
+// fixed pixel height to pass to -scrollWrapping:height: (which forces the scrollable content
+// view to EXACTLY that height via a hard Auto Layout constraint). Every one of those guesses
+// eventually fell short as more checkboxes were added over time — the reported symptom each
+// time was "the last N checkboxes don't respond to clicks" (confirmed live, 19-ago-2026,
+// NetworkMonitor's Wi-Fi tab: the 2 most-recently-added rows painted fine but sat below the
+// scroll content's real hard-coded height, outside the NSClipView's actual hit-testable
+// bounds — same root cause and same fix philosophy as the Icons tab's HWGIconPickerView
+// column-width bug fixed earlier this session, just on the vertical axis instead of
+// horizontal). Now returns the REAL height this row stack needs — measured by forcing Auto
+// Layout to resolve real frames (-layoutSubtreeIfNeeded) rather than guessed — so every caller
+// can pass that real number to -scrollWrapping:height: instead of a constant that WILL go
+// stale the next time a row is added.
+-(CGFloat)layoutRows:(NSArray<NSView*> *)rows inView:(NSView *)tab belowView:(NSView *)topView gap:(CGFloat)firstGap {
 	NSView *previous = topView;
 	CGFloat gap = firstGap;
 	for (NSView *row in rows) {
@@ -2689,6 +2703,8 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		previous = row;
 		gap = 8;
 	}
+	[tab layoutSubtreeIfNeeded];
+	return CGRectGetMaxY(previous.frame) + 16;   // +16 bottom padding, matching every tab's own leading/top inset
 }
 
 -(NSView*)preferencePane {
@@ -2783,7 +2799,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[wifiFieldsHeader.topAnchor     constraintEqualToAnchor:cooldownCaption.bottomAnchor constant:18],
 		[wifiFieldsHeader.leadingAnchor  constraintEqualToAnchor:wifiTab.leadingAnchor constant:16],
 	]];
-	[self layoutRows:@[
+	CGFloat wifiContentHeight = [self layoutRows:@[
 		[self checkboxWithKey:HWG_WIFI_SHOW_SSID_KEY        title:NSLocalizedString(@"SSID (network name)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_BSSID_KEY       title:NSLocalizedString(@"BSSID (access point address)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_WIFI_SHOW_BAND_KEY        title:NSLocalizedString(@"Band (2.4/5/6 GHz)", @"") defaultOn:YES],
@@ -2806,11 +2822,11 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		// -isRealEthernetInterface: just READS this same key, unaffected by which tab shows it).
 		[self checkboxWithKey:HWG_ETH_SHOW_ALL_KEY          title:NSLocalizedString(@"Also report Wi-Fi's own link and AWDL/AirDrop events", @"") defaultOn:NO],
 	] inView:wifiTab belowView:wifiFieldsHeader gap:10];
+	CGFloat wifiTabHeight = MAX(560, wifiContentHeight);
 
 	NSTabViewItem *wifiItem = [[NSTabViewItem alloc] initWithIdentifier:@"wifi"];
 	wifiItem.label = NSLocalizedString(@"Wi-Fi", @"");
-	wifiItem.view = [self scrollWrapping:wifiTab height:560];
-	[tabs addTabViewItem:wifiItem];
+	wifiItem.view = [self scrollWrapping:wifiTab height:wifiTabHeight];
 
 	// --- Tab: Ethernet ---
 	// BUG FIX (18-ago-2026): was 200 — same fixed-constant risk class as the IP tab fix above.
@@ -2822,7 +2838,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[ethHeader.topAnchor     constraintEqualToAnchor:ethTab.topAnchor constant:16],
 		[ethHeader.leadingAnchor  constraintEqualToAnchor:ethTab.leadingAnchor constant:16],
 	]];
-	[self layoutRows:@[
+	CGFloat ethContentHeight = [self layoutRows:@[
 		[self checkboxWithKey:HWG_ETH_SHOW_INTERFACE_KEY title:NSLocalizedString(@"Interface name (en0, en5…)", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_SPEED_KEY     title:NSLocalizedString(@"Speed", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_ETH_SHOW_MODE_KEY      title:NSLocalizedString(@"Mode / duplex", @"") defaultOn:YES],
@@ -2832,15 +2848,12 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 
 	NSTabViewItem *ethItem = [[NSTabViewItem alloc] initWithIdentifier:@"ethernet"];
 	ethItem.label = NSLocalizedString(@"Ethernet", @"");
-	ethItem.view = [self scrollWrapping:ethTab height:240];
-	[tabs addTabViewItem:ethItem];
+	ethItem.view = [self scrollWrapping:ethTab height:MAX(240, ethContentHeight)];
 
 	// --- Tab: IP ---
-	// BUG FIX (18-ago-2026): was 230 — same fixed-constant risk class as elsewhere in this app
-	// (-scrollWrapping:height: forces the CONTENT view to exactly this height, so undersizing
-	// it clips/hides the newly added rows below the fold, same failure class as the Icons tab
-	// bug fixed 17-ago-2026). Bumped after adding 6 rows (Config method/MTU/Type/MAC/DNS search/
-	// DHCP detail).
+	// BUG FIX (19-ago-2026): height is now DERIVED from -layoutRows:'s real measurement
+	// (see that method's comment) instead of a hardcoded guess — it can never fall short of
+	// what the row stack actually needs again, regardless of how many rows get added later.
 	NSView *ipTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 465)];
 	NSTextField *ipHeader = [self sectionHeaderWithTitle:NSLocalizedString(@"Notification fields", @"")];
 	[ipTab addSubview:ipHeader];
@@ -2848,7 +2861,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[ipHeader.topAnchor     constraintEqualToAnchor:ipTab.topAnchor constant:16],
 		[ipHeader.leadingAnchor  constraintEqualToAnchor:ipTab.leadingAnchor constant:16],
 	]];
-	[self layoutRows:@[
+	CGFloat ipContentHeight = [self layoutRows:@[
 		[self checkboxWithKey:HWG_IP_SHOW_IPV4_KEY        title:NSLocalizedString(@"IPv4 address", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_IP_SHOW_IPV6_KEY        title:NSLocalizedString(@"IPv6 address", @"") defaultOn:YES],
 		[self checkboxWithKey:HWG_IP_SHOW_GATEWAY_KEY     title:NSLocalizedString(@"Gateway (per interface)", @"") defaultOn:YES],
@@ -2869,8 +2882,7 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 
 	NSTabViewItem *ipItem = [[NSTabViewItem alloc] initWithIdentifier:@"ip"];
 	ipItem.label = NSLocalizedString(@"IP", @"");
-	ipItem.view = [self scrollWrapping:ipTab height:465];
-	[tabs addTabViewItem:ipItem];
+	ipItem.view = [self scrollWrapping:ipTab height:MAX(465, ipContentHeight)];
 
 	// --- Tab: VPN (F34 #4 — split out of "Other" 22-jul-2026, own dedicated tab) ---
 	NSView *vpnTab = [[HWGFlippedContentView alloc] initWithFrame:NSMakeRect(0, 0, tabs.bounds.size.width, 120)];
@@ -2897,11 +2909,15 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 		[vpnCaption.leadingAnchor  constraintEqualToAnchor:vpnTab.leadingAnchor constant:16],
 		[vpnCaption.trailingAnchor constraintLessThanOrEqualToAnchor:vpnTab.trailingAnchor constant:-16],
 	]];
+	// BUG FIX (19-ago-2026) — same "measure the real thing instead of guessing" fix as
+	// -layoutRows: above, applied here directly since the caption (a wrapping label, whose
+	// height depends on how many lines it wraps to) extends below the last checkbox row.
+	[vpnTab layoutSubtreeIfNeeded];
+	CGFloat vpnContentHeight = CGRectGetMaxY(vpnCaption.frame) + 16;
 
 	NSTabViewItem *vpnItem = [[NSTabViewItem alloc] initWithIdentifier:@"vpn"];
 	vpnItem.label = NSLocalizedString(@"VPN", @"");
-	vpnItem.view = [self scrollWrapping:vpnTab height:120];
-	[tabs addTabViewItem:vpnItem];
+	vpnItem.view = [self scrollWrapping:vpnTab height:MAX(120, vpnContentHeight)];
 
 	// --- Tab: Other (catch-all reserved for FUTURE fields that don't fit Wi-Fi/Ethernet/IP/VPN) ---
 	// CORRECTION (19-ago-2026): the 4 batch-5 notify toggles that briefly lived here were moved
@@ -2923,7 +2939,6 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	NSTabViewItem *otherItem = [[NSTabViewItem alloc] initWithIdentifier:@"other"];
 	otherItem.label = NSLocalizedString(@"Other", @"");
 	otherItem.view = [self scrollWrapping:otherTab height:120];
-	[tabs addTabViewItem:otherItem];
 
 	// --- Tab: Icons (per-event icon overrides) ---
 	// NOTE: deliberately NOT using -scrollWrapping:height: here (unlike the other tabs
@@ -3008,6 +3023,13 @@ static void scCallback(SCDynamicStoreRef store, CFArrayRef changedKeys, void *in
 	NSTabViewItem *iconsItem = [[NSTabViewItem alloc] initWithIdentifier:@"icons"];
 	iconsItem.label = NSLocalizedString(@"Icons", @"");
 	iconsItem.view = iconsScroll;
+
+	// Tab order (19-ago-2026, feedback del usuario): IP, Ethernet, Wi-Fi, VPN, Other, Icons.
+	[tabs addTabViewItem:ipItem];
+	[tabs addTabViewItem:ethItem];
+	[tabs addTabViewItem:wifiItem];
+	[tabs addTabViewItem:vpnItem];
+	[tabs addTabViewItem:otherItem];
 	[tabs addTabViewItem:iconsItem];
 
 	prefsView = tabs;

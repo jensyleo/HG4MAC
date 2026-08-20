@@ -1037,15 +1037,22 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	// matching how "Connected"/"Needs Attention" already worked. General is for configuring
 	// HOW a notification looks/behaves (which fields it shows, thresholds, polling); WHETHER a
 	// given event notifies at all — and its icon — belongs with the icon it's paired with.
+	// BUG FIX (19-ago-2026): the >= constraint below only protects `v`'s OWN intrinsic size —
+	// it does nothing for -scrollWrapping:height:, which forces the scroll content to an
+	// independent, separately hardcoded constant (previously 500) via a hard `==` constraint.
+	// Two hardcoded numbers that both had to be kept in sync by hand was exactly how this kept
+	// falling out of date (same failure class confirmed live in Network Monitor's Wi-Fi tab,
+	// 19-ago-2026: rows painted fine but sat outside the scroll view's real hit-testable
+	// bounds). Now measured directly instead: force Auto Layout to resolve real frames, then
+	// use the LAST row's actual bottom edge, so this can never fall short again regardless of
+	// how many rows get added later.
 	[v.bottomAnchor constraintGreaterThanOrEqualToAnchor:previous.bottomAnchor constant:16].active = YES;
+	[v layoutSubtreeIfNeeded];
+	CGFloat generalContentHeight = CGRectGetMaxY(previous.frame) + 16;
 
 	NSTabViewItem *generalItem = [[NSTabViewItem alloc] initWithIdentifier:@"general"];
 	generalItem.label = NSLocalizedString(@"General", @"");
-	// BUG FIX (17-ago-2026): was 420, a hand-guessed constant not tied to the actual row count —
-	// same risk class already confirmed live in Network Monitor's Wi-Fi tab (adding a row here
-	// without growing this pushes it past the document view's own bounds, where it renders but
-	// doesn't respond to clicks). Bumped with margin after adding the "Sharing status" row.
-	generalItem.view = [self scrollWrapping:v height:500];
+	generalItem.view = [self scrollWrapping:v height:MAX(500, generalContentHeight)];
 	[tabs addTabViewItem:generalItem];
 
 	// --- Tab: Icons ---

@@ -49,6 +49,21 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Fixed (structurally): General-tab checkbox lists could clip their last rows (Network/Printer)
+Same root cause class as the Icons tab fix below, but on the vertical axis: Network Monitor's
+Wi-Fi/Ethernet/IP/VPN tabs and Printer Monitor's General tab wrap their checkbox lists in an
+NSScrollView whose content height was forced to a hand-guessed constant — every time a new
+checkbox was added, someone had to remember to bump that number, and Wi-Fi's (13 rows after this
+session's audit batches) fell short, sitting the last rows outside the scroll view's real
+hit-testable bounds. `-layoutRows:` now returns the real measured height (forcing Auto Layout to
+resolve real frames via `-layoutSubtreeIfNeeded` and reading the last row's actual bottom edge)
+instead of every caller guessing a constant — audited all 13 modules; Power/Volume Monitor
+already computed their General-tab height dynamically from actual row count and needed no fix;
+Camera/Gamepad/Display/Audio/Thermal/Thunderbolt/Scanner/Bluetooth/USB don't wrap their General
+tab in a height-constrained scroll view at all, so aren't exposed to this bug class.
+
+Also reordered Network Monitor's tabs per user request: IP, Ethernet, Wi-Fi, VPN, Other, Icons.
+
 ### Fixed (structurally): Icons tab "Notify?" checkbox could land outside the clickable area
 Root cause found with certainty this time: the 18-ago fix capped the name column at a fixed
 240pt to keep long labels from pushing the row's controls out of bounds — but 240pt plus the
