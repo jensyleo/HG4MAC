@@ -75,6 +75,32 @@
 #define HWG_BT_NOTIFY_UNPAIRED_KEY @"HWGBluetoothNotifyUnpaired"
 #define HWG_BT_PAIRED_POLL_INTERVAL 15.0
 
+// Final API audit (19-ago-2026), lote 8 — real BLE (Low Energy) subsystem, via the SAME
+// CBCentralManager already created for subsystem-state tracking (batch 5). Covers 4 audit
+// candidates that classic IOBluetooth genuinely cannot see at all, because this monitor talks
+// BR/EDR (registerForConnectNotifications: only fires for a classic ACL connection):
+//   - BLE-ONLY accessory connect/disconnect (a device that never does a classic pairing —
+//     e.g. many fitness trackers, some LE-only keyboards/beacons — is invisible to everything
+//     above this comment in the file).
+//   - BLE Device Information Service (manufacturer/model/serial/firmware/hardware/software
+//     revision — GATT service 0x180A, standard Bluetooth SIG characteristics).
+//   - BLE generic battery (GATT Battery Service 0x180F, Battery Level characteristic 0x2A19 —
+//     the standards-based equivalent of the Apple-only private battery selectors already used
+//     for AirPods/Magic-anything earlier in this file).
+//   - BLE disconnect reason (the `error` parameter CoreBluetooth's own disconnect delegate
+//     callback already carries, for free, once we're connected to read the above).
+// Deliberately scoped to devices advertising Device Information or Battery Service specifically
+// (`retrieveConnectedPeripheralsWithServices:` requires an explicit service list — Apple's
+// public API has no "give me every connected BLE peripheral regardless of service" call), so a
+// BLE accessory that exposes neither service (e.g. a beacon with only a proprietary service)
+// stays outside this feature's reach — documented as a real, permanent limitation, not a bug.
+#define HWG_BT_NOTIFY_BLE_CONNECT_KEY    @"HWGBluetoothNotifyBLEConnect"
+#define HWG_BT_NOTIFY_BLE_DISCONNECT_KEY @"HWGBluetoothNotifyBLEDisconnect"
+// How long to wait after the last GATT value arrives before sending the connect notification
+// with whatever was actually readable — some accessories only implement a subset of the
+// standard DIS characteristics, so waiting for ALL of them would hang forever on those.
+#define HWG_BT_GATT_COALESCE_DELAY 1.5
+
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
 	return stored ? [stored boolValue] : def;
@@ -128,7 +154,7 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // defaultController far less often).
 #define HWG_BT_RADIO_POLL_INTERVAL 30.0
 
-@interface HWGrowlBluetoothMonitor () <CBCentralManagerDelegate>
+@interface HWGrowlBluetoothMonitor () <CBCentralManagerDelegate, CBPeripheralDelegate>
 
 @property (nonatomic, weak) id<HWGrowlPluginControllerProtocol> delegate;
 @property (nonatomic, assign) BOOL starting;
@@ -147,6 +173,15 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // establishes a baseline, same "no notification on first sighting" pattern as radio power.
 @property (nonatomic, strong) NSTimer *pairedDevicesPollTimer;
 @property (nonatomic, strong) NSSet<NSString *> *lastKnownPairedAddresses;
+// Final API audit (19-ago-2026), lote 8 — BLE subsystem state. `bleKnownPeripherals` keeps a
+// strong reference to every CBPeripheral we've ever connected to (CoreBluetooth doesn't retain
+// them for us); `bleGATTInfo` accumulates each one's field values as they arrive one at a time;
+// `bleCoalesceTimers` holds the pending "send the notification now" debounce timer per
+// peripheral identifier.
+@property (nonatomic, strong) NSTimer *blePollTimer;
+@property (nonatomic, strong) NSMutableDictionary<NSUUID *, CBPeripheral *> *bleKnownPeripherals;
+@property (nonatomic, strong) NSMutableDictionary<NSUUID *, NSMutableDictionary<NSString *, NSString *> *> *bleGATTInfo;
+@property (nonatomic, strong) NSMutableDictionary<NSUUID *, NSTimer *> *bleCoalesceTimers;
 
 @end
 
@@ -161,11 +196,17 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 @synthesize subsystemStateManager;
 @synthesize pairedDevicesPollTimer;
 @synthesize lastKnownPairedAddresses;
+@synthesize blePollTimer;
+@synthesize bleKnownPeripherals;
+@synthesize bleGATTInfo;
+@synthesize bleCoalesceTimers;
 
 -(void)dealloc {
 	[connectionNotification unregister];
 	[radioPowerPollTimer invalidate];
 	[pairedDevicesPollTimer invalidate];
+	[blePollTimer invalidate];
+	for (NSTimer *timer in bleCoalesceTimers.allValues) [timer invalidate];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	// ARC handles the release; no [super dealloc].
 }
@@ -184,6 +225,10 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 // reported as notifications here; PoweredOn/Off/Unknown are deliberately skipped (see the
 // HWG_BT_NOTIFY_SUBSYSTEM_KEY doc comment for why).
 -(void)centralManagerDidUpdateState:(CBCentralManager *)central {
+	// Final API audit (19-ago-2026), lote 8 — re-scan for BLE accessories every time the
+	// subsystem becomes usable (covers both first launch and recovering from a restart/off).
+	if (central.state == CBManagerStatePoweredOn) [self refreshConnectedBLEAccessories];
+
 	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_SUBSYSTEM_KEY, NO)) return;
 
 	NSString *label = nil;
@@ -209,6 +254,9 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	// target is 13.0, so that range is unreachable.
 	self = [super init];
 	self.lastKnownRadioPowerState = -1;
+	self.bleKnownPeripherals = [NSMutableDictionary dictionary];
+	self.bleGATTInfo = [NSMutableDictionary dictionary];
+	self.bleCoalesceTimers = [NSMutableDictionary dictionary];
 	return self;
 }
 
@@ -320,6 +368,133 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 	}
 }
 
+#pragma mark BLE subsystem (Final API audit, 19-ago-2026, lote 8)
+
+// Standard Bluetooth SIG GATT UUIDs (Device Information Service 0x180A, Battery Service
+// 0x180F) — not vendor-specific, so these 16-bit values are safe to hardcode.
+static CBUUID *HWGBTDeviceInfoServiceUUID(void)   { return [CBUUID UUIDWithString:@"180A"]; }
+static CBUUID *HWGBTBatteryServiceUUID(void)      { return [CBUUID UUIDWithString:@"180F"]; }
+static CBUUID *HWGBTManufacturerCharUUID(void)    { return [CBUUID UUIDWithString:@"2A29"]; }
+static CBUUID *HWGBTModelCharUUID(void)           { return [CBUUID UUIDWithString:@"2A24"]; }
+static CBUUID *HWGBTSerialCharUUID(void)          { return [CBUUID UUIDWithString:@"2A25"]; }
+static CBUUID *HWGBTFirmwareCharUUID(void)        { return [CBUUID UUIDWithString:@"2A26"]; }
+static CBUUID *HWGBTHardwareCharUUID(void)        { return [CBUUID UUIDWithString:@"2A27"]; }
+static CBUUID *HWGBTSoftwareCharUUID(void)        { return [CBUUID UUIDWithString:@"2A28"]; }
+static CBUUID *HWGBTBatteryLevelCharUUID(void)    { return [CBUUID UUIDWithString:@"2A19"]; }
+
+// Re-scans for already-connected BLE accessories advertising Device Information or Battery
+// Service, and opens our own app-level GATT connection to any one we haven't seen yet this
+// launch. Called on a slow timer AND right after the subsystem comes back to PoweredOn, since
+// that's the only state in which this call is meaningful.
+-(void)refreshConnectedBLEAccessories {
+	if (subsystemStateManager.state != CBManagerStatePoweredOn) return;
+	NSArray<CBPeripheral *> *peripherals = [subsystemStateManager retrieveConnectedPeripheralsWithServices:@[HWGBTDeviceInfoServiceUUID(), HWGBTBatteryServiceUUID()]];
+	for (CBPeripheral *peripheral in peripherals) {
+		if (bleKnownPeripherals[peripheral.identifier]) continue;   // already connected/connecting
+		bleKnownPeripherals[peripheral.identifier] = peripheral;
+		bleGATTInfo[peripheral.identifier] = [NSMutableDictionary dictionary];
+		peripheral.delegate = self;
+		[subsystemStateManager connectPeripheral:peripheral options:nil];
+	}
+}
+
+-(void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral {
+	[peripheral discoverServices:@[HWGBTDeviceInfoServiceUUID(), HWGBTBatteryServiceUUID()]];
+}
+
+// Final API audit (19-ago-2026), lote 8 — this is where "BLE disconnect reason" comes from:
+// `error` is nil for a normal/requested disconnect, non-nil (with a real localizedDescription)
+// for an unexpected drop (out of range, accessory powered off, link-layer timeout, etc.).
+-(void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
+	[bleKnownPeripherals removeObjectForKey:peripheral.identifier];
+	[bleGATTInfo removeObjectForKey:peripheral.identifier];
+	[bleCoalesceTimers[peripheral.identifier] invalidate];
+	[bleCoalesceTimers removeObjectForKey:peripheral.identifier];
+
+	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_BLE_DISCONNECT_KEY, NO)) return;
+	NSString *reason = error ? [error localizedDescription] : NSLocalizedString(@"Disconnected normally", @"");
+	NSData *iconData = [HWGResolveIconNamed(@"Bluetooth-Off") TIFFRepresentation];
+	[delegate notifyWithName:@"BluetoothLEDisconnected"
+							 title:NSLocalizedString(@"BLE Accessory Disconnected", @"")
+					 description:[NSString stringWithFormat:@"%@\n%@", peripheral.name ?: peripheral.identifier.UUIDString, reason]
+							  icon:iconData
+			  identifierString:peripheral.identifier.UUIDString
+				  contextString:nil
+							plugin:self];
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error {
+	if (error) return;
+	for (CBService *service in peripheral.services) {
+		[peripheral discoverCharacteristics:nil forService:service];
+	}
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error {
+	if (error) return;
+	for (CBCharacteristic *characteristic in service.characteristics) {
+		[peripheral readValueForCharacteristic:characteristic];
+	}
+}
+
+-(void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error {
+	if (error || !characteristic.value) return;
+	NSMutableDictionary<NSString *, NSString *> *info = bleGATTInfo[peripheral.identifier];
+	if (!info) return;   // already disconnected/torn down before this arrived
+
+	CBUUID *uuid = characteristic.UUID;
+	if ([uuid isEqual:HWGBTManufacturerCharUUID()]) info[@"manufacturer"] = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTModelCharUUID()])   info[@"model"]        = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTSerialCharUUID()])  info[@"serial"]       = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTFirmwareCharUUID()])info[@"firmware"]     = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTHardwareCharUUID()])info[@"hardware"]     = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTSoftwareCharUUID()])info[@"software"]     = [[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];
+	else if ([uuid isEqual:HWGBTBatteryLevelCharUUID()] && characteristic.value.length >= 1) {
+		uint8_t percent = 0;
+		[characteristic.value getBytes:&percent length:1];
+		info[@"battery"] = [NSString stringWithFormat:@"%u%%", percent];
+	} else {
+		return;   // some other characteristic this monitor doesn't read (e.g. Appearance)
+	}
+
+	// Debounce: restart the "send now" timer on every field that arrives, so the notification
+	// waits for the burst of reads to finish rather than firing after just the first one.
+	[bleCoalesceTimers[peripheral.identifier] invalidate];
+	bleCoalesceTimers[peripheral.identifier] = [NSTimer scheduledTimerWithTimeInterval:HWG_BT_GATT_COALESCE_DELAY
+																				 target:self
+																			   selector:@selector(sendCoalescedBLEConnectNotificationTimer:)
+																			   userInfo:peripheral
+																				repeats:NO];
+}
+
+-(void)sendCoalescedBLEConnectNotificationTimer:(NSTimer *)timer {
+	CBPeripheral *peripheral = timer.userInfo;
+	[bleCoalesceTimers removeObjectForKey:peripheral.identifier];
+	if (!HWGBTBoolForKey(HWG_BT_NOTIFY_BLE_CONNECT_KEY, NO)) return;
+
+	NSDictionary<NSString *, NSString *> *info = bleGATTInfo[peripheral.identifier];
+	if (!info) return;   // disconnected before the debounce fired
+
+	NSMutableArray<NSString *> *lines = [NSMutableArray array];
+	if (info[@"manufacturer"]) [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), info[@"manufacturer"]]];
+	if (info[@"model"])        [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Model:\t%@", @""), info[@"model"]]];
+	if (info[@"serial"])       [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Serial:\t%@", @""), info[@"serial"]]];
+	if (info[@"firmware"])     [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Firmware:\t%@", @""), info[@"firmware"]]];
+	if (info[@"hardware"])     [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Hardware:\t%@", @""), info[@"hardware"]]];
+	if (info[@"software"])     [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Software:\t%@", @""), info[@"software"]]];
+	if (info[@"battery"])      [lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Battery:\t%@", @""), info[@"battery"]]];
+	if (![lines count]) return;   // accessory advertised the service but exposed nothing readable
+
+	NSData *iconData = [HWGResolveIconNamed(@"Bluetooth-On") TIFFRepresentation];
+	[delegate notifyWithName:@"BluetoothLEConnected"
+							 title:NSLocalizedString(@"BLE Accessory Connected", @"")
+					 description:[NSString stringWithFormat:@"%@\n%@", peripheral.name ?: peripheral.identifier.UUIDString, [lines componentsJoinedByString:@"\n"]]
+							  icon:iconData
+			  identifierString:peripheral.identifier.UUIDString
+				  contextString:nil
+							plugin:self];
+}
+
 -(void)postRegistrationInit {
 	self.starting = YES;
 	// Final API audit (18-ago-2026) — real push notifications for radio power state (see the
@@ -347,6 +522,15 @@ static NSInteger HWGBluetoothBarsForRSSI(NSInteger rssi) {
 																   userInfo:nil
 																	repeats:YES];
 	[self pollPairedDevices];   // baseline immediately rather than waiting for the first tick
+	// Final API audit (19-ago-2026), lote 8 — periodic re-scan for newly-connected BLE
+	// accessories. `retrieveConnectedPeripheralsWithServices:` only reflects the system's
+	// current connection state at the moment it's called, with no push equivalent, so this has
+	// to be polled — same "no push alternative exists" situation as pairing above.
+	self.blePollTimer = [NSTimer scheduledTimerWithTimeInterval:20.0
+															   target:self
+															 selector:@selector(refreshConnectedBLEAccessories)
+															 userInfo:nil
+															  repeats:YES];
 	// RE-ENABLED (10-ago-2026): was disabled after CONFIRMING this call made the whole
 	// process crash on macOS Tahoe 26.x with a TCC privacy-violation abort. Since found the
 	// actual root cause (see v1.10.8 in CHANGELOG.md): Xcode's default ad-hoc build left the
@@ -1011,6 +1195,11 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		// pairing is a different event from connecting, but there's no dedicated art for it.
 		@[@"Paired", @"Bluetooth-On", HWG_BT_NOTIFY_PAIRED_KEY, @NO],
 		@[@"Unpaired", @"Bluetooth-Off", HWG_BT_NOTIFY_UNPAIRED_KEY, @NO],
+		// Final API audit (19-ago-2026), lote 8 — BLE-only accessories (Device Information/
+		// Battery Service). Separate from "Connected/Disconnected (generic)" above, which only
+		// ever fires for a classic BR/EDR connection.
+		@[@"BLE Accessory Connected", @"Bluetooth-On", HWG_BT_NOTIFY_BLE_CONNECT_KEY, @NO],
+		@[@"BLE Accessory Disconnected", @"Bluetooth-Off", HWG_BT_NOTIFY_BLE_DISCONNECT_KEY, @NO],
 		// Reference/customization only (13-ago-2026, feedback del usuario) — the connect
 		// notification keeps the device-type icon above, it does NOT switch to one of these.
 		// No notifyKey: nothing separate to enable/disable here, just icon customization.
@@ -1071,7 +1260,7 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 #pragma mark HWGrowlPluginNotifierProtocol
 
 -(NSArray*)noteNames {
-	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", @"BluetoothPaired", @"BluetoothUnpaired", nil];
+	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", @"BluetoothRadioOn", @"BluetoothRadioOff", @"BluetoothSubsystemStateChanged", @"BluetoothPaired", @"BluetoothUnpaired", @"BluetoothLEConnected", @"BluetoothLEDisconnected", nil];
 }
 -(NSDictionary*)localizedNames {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Bluetooth Connected", @""), @"BluetoothConnected",
@@ -1080,7 +1269,9 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 			  NSLocalizedString(@"Bluetooth Radio Off", @""), @"BluetoothRadioOff",
 			  NSLocalizedString(@"Bluetooth Status Changed", @""), @"BluetoothSubsystemStateChanged",
 			  NSLocalizedString(@"Bluetooth Device Paired", @""), @"BluetoothPaired",
-			  NSLocalizedString(@"Bluetooth Device Unpaired", @""), @"BluetoothUnpaired", nil];
+			  NSLocalizedString(@"Bluetooth Device Unpaired", @""), @"BluetoothUnpaired",
+			  NSLocalizedString(@"BLE Accessory Connected", @""), @"BluetoothLEConnected",
+			  NSLocalizedString(@"BLE Accessory Disconnected", @""), @"BluetoothLEDisconnected", nil];
 }
 -(NSDictionary*)noteDescriptions {
 	return [NSDictionary dictionaryWithObjectsAndKeys:NSLocalizedString(@"Sent when a Bluetooth Device is connected", @""), @"BluetoothConnected",
@@ -1089,7 +1280,9 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 			  NSLocalizedString(@"Sent when the Bluetooth radio itself is turned off", @""), @"BluetoothRadioOff",
 			  NSLocalizedString(@"Sent when the Bluetooth subsystem is restarting, becomes unauthorized, or is unsupported", @""), @"BluetoothSubsystemStateChanged",
 			  NSLocalizedString(@"Sent when a new Bluetooth device is paired with this Mac", @""), @"BluetoothPaired",
-			  NSLocalizedString(@"Sent when a previously-paired Bluetooth device is unpaired", @""), @"BluetoothUnpaired", nil];
+			  NSLocalizedString(@"Sent when a previously-paired Bluetooth device is unpaired", @""), @"BluetoothUnpaired",
+			  NSLocalizedString(@"Sent when a BLE-only accessory (Device Information/Battery Service) connects", @""), @"BluetoothLEConnected",
+			  NSLocalizedString(@"Sent when a BLE-only accessory disconnects, including the reason if abnormal", @""), @"BluetoothLEDisconnected", nil];
 }
 -(NSArray*)defaultNotifications {
 	return [NSArray arrayWithObjects:@"BluetoothConnected", @"BluetoothDisconnected", nil];

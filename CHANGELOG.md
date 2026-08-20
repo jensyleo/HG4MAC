@@ -49,6 +49,13 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Bluetooth Monitor batch 8 — real BLE subsystem (accessory connect/disconnect, Device Information, battery, disconnect reason)
+New CoreBluetooth-based subsystem (reusing the CBCentralManager from batch 5): detects BLE-only
+accessories (never seen by classic IOBluetooth's connect notification), connects to read the
+standard Device Information Service and Battery Service GATT characteristics, and reports the
+disconnect reason when available. Off by default pending live hardware verification. 18/27
+candidates done for this module.
+
 ### Added: Bluetooth Monitor batch 5 — subsystem state (CoreBluetooth)
 New "Bluetooth Status Changed" notification for restarting/unauthorized/unsupported subsystem
 states, via `CBCentralManagerDelegate` — the one remaining audit candidate reachable through
