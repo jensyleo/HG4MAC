@@ -33,6 +33,13 @@
 #define HWG_GAMEPAD_SHOW_MOTION_KEY      @"HWGGamepadShowMotion"
 #define HWG_GAMEPAD_SHOW_LIGHTBAR_KEY    @"HWGGamepadShowLightbarColor"
 #define HWG_GAMEPAD_SHOW_PADDLES_KEY     @"HWGGamepadShowXboxElitePaddles"
+// Final API audit (19-ago-2026), lote 1 — 2 more real fields via an agent audit:
+// GCController.isAttachedToDevice (macOS 10.9+, distinguishes a controller physically docked/
+// attached to the host from a wireless one — genuinely new info) and
+// GCDeviceHaptics.supportedLocalities (macOS 11+, WHICH actuators exist — Left/Right Handle,
+// Triggers — refining the existing Haptics Yes/No into actual detail). Both OFF by default.
+#define HWG_GAMEPAD_SHOW_ATTACHED_KEY    @"HWGGamepadShowAttachedToDevice"
+#define HWG_GAMEPAD_SHOW_HAPTICS_LOCALITIES_KEY @"HWGGamepadShowHapticsLocalities"
 #define HWG_GAMEPAD_NOTIFY_KEY           @"HWGGamepadNotifyConnect"
 // Final API audit (18-ago-2026) — GCKeyboard/GCMouse/GCRacingWheel are separate device classes
 // exposed by GameController.framework, distinct from GCController (game controllers). Their
@@ -180,6 +187,27 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		if (controller.haptics) {
 			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Haptics:\t%@", @""), NSLocalizedString(@"Supported", @"")]];
 		}
+	}
+	// Final API audit (19-ago-2026), lote 1 — GCDeviceHaptics.supportedLocalities: WHICH
+	// actuators exist, refining the plain Yes/No above. Each locality is an opaque NS_TYPED_ENUM
+	// string constant (not guaranteed human-readable), so this maps only the documented ones by
+	// identity comparison rather than displaying the raw string.
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_HAPTICS_LOCALITIES_KEY, NO) && controller.haptics) {
+		NSSet<GCHapticsLocality> *localities = controller.haptics.supportedLocalities;
+		NSMutableArray<NSString *> *names = [NSMutableArray array];
+		if ([localities containsObject:GCHapticsLocalityLeftHandle])  [names addObject:NSLocalizedString(@"Left Handle", @"")];
+		if ([localities containsObject:GCHapticsLocalityRightHandle]) [names addObject:NSLocalizedString(@"Right Handle", @"")];
+		if ([localities containsObject:GCHapticsLocalityLeftTrigger]) [names addObject:NSLocalizedString(@"Left Trigger", @"")];
+		if ([localities containsObject:GCHapticsLocalityRightTrigger]) [names addObject:NSLocalizedString(@"Right Trigger", @"")];
+		if ([names count]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Haptic Actuators:\t%@", @""), [names componentsJoinedByString:@", "]]];
+		}
+	}
+	// Final API audit (19-ago-2026), lote 1 — GCController.isAttachedToDevice: physically
+	// docked/attached to the host vs. wireless/detached.
+	if (HWGGamepadBoolForKey(HWG_GAMEPAD_SHOW_ATTACHED_KEY, NO)) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Attached to device:\t%@", @""),
+			controller.isAttachedToDevice ? NSLocalizedString(@"Yes", @"") : NSLocalizedString(@"No", @"")]];
 	}
 	// Added 17-ago-2026 — GCController.motion (GCMotion), public, presence-only (doesn't
 	// activate sensors).
@@ -395,6 +423,9 @@ static BOOL HWGGamepadBoolForKey(NSString *key, BOOL def) {
 		// Touchpad/Haptics/Motion above.
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_LIGHTBAR_KEY      title:NSLocalizedString(@"Lightbar color (read-only)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_GAMEPAD_SHOW_PADDLES_KEY       title:NSLocalizedString(@"Xbox Elite paddles presence", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_HAPTICS_LOCALITIES_KEY title:NSLocalizedString(@"Haptic actuator locations", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_GAMEPAD_SHOW_ATTACHED_KEY           title:NSLocalizedString(@"Attached-to-device flag", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

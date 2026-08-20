@@ -9,6 +9,23 @@ Target: **macOS 13+**, developed/tested on **macOS 26 (Tahoe), Apple Silicon (M-
 Result of a final exhaustive public-API audit across all 13 monitors (see the "Final API audit"
 comments throughout the code). Adding one confirmed, tested feature at a time.
 
+### Added: Gamepad/Camera/Audio fields, Printer job priority + waste-toner fix
+Gamepad: controller attached-to-device flag, haptic actuator locations. Camera: manufacturer,
+linked devices (e.g. paired mic). Audio: clock source, model UID + manufacturer, supported
+sample rate range. All off by default.
+
+### Fixed: Printer Monitor — waste-toner marker showed the wrong "Supply Low" wording
+`marker-types` was already requested from the printer but silently discarded. A waste-toner
+marker's "level" means remaining capacity (how much empty space is left), so a low reading means
+the bin is nearly FULL — the opposite of every other marker type. The notification now reads
+"Printer Waste Bin Nearly Full" with "% capacity remaining" for waste markers specifically. Also
+added job priority as an optional field on Print Job Started.
+
+Thunderbolt Monitor and Scanner Monitor audited with no further changes — remaining candidates
+require either live Thunderbolt hardware to verify real IORegistry property names, or fall
+outside each file's own architecture (ImageCaptureCore/USB scanners belong to USB Monitor, not
+Scanner Monitor's eSCL-based design).
+
 ### Added: Display Monitor — stereo mode, scale ratio, wide gamut
 CGDisplayIsStereo, an explicit pixel/point scale ratio, and NSScreen.canRepresentDisplayGamut:
 (a real P3-vs-sRGB boolean). All off by default. Thermal Monitor audited and confirmed already

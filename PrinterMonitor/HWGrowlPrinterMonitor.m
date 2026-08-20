@@ -96,6 +96,8 @@
 // field on the existing "Printer Connected" notification instead.
 #define HWG_PRINTER_NOTIFY_REJECTING_KEY @"HWGPrinterNotifyRejectingJobs"
 #define HWG_PRINTER_SHOW_CAPABILITIES_KEY @"HWGPrinterShowCapabilities"
+// Final API audit (19-ago-2026), lote 1.
+#define HWG_PRINTER_SHOW_JOB_PRIORITY_KEY @"HWGPrinterShowJobPriority"
 
 static BOOL HWGPrinterBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -295,6 +297,11 @@ static NSString *HWGFormattedDuration(NSTimeInterval seconds) {
 @property (nonatomic, copy) NSString *name;    // e.g. "Black Cartridge" — from marker-names
 @property (nonatomic, copy) NSString *color;   // e.g. "black" / "#00FFFF" — from marker-colors, may be nil
 @property (nonatomic, assign) NSInteger level; // 0-100, or -1 per IPP spec meaning "not reported"
+// Final API audit (19-ago-2026) — marker-types (e.g. "toner-cartridge", "waste-toner",
+// "ink-cartridge") was already being REQUESTED (see requestedAttrs below) but silently
+// discarded — a "10% remaining" reading on a waste-toner marker means the waste bin is almost
+// FULL, the opposite of what "Supply Low" implies for every other marker type.
+@property (nonatomic, copy) NSString *type;    // e.g. "waste-toner" — from marker-types, may be nil
 @end
 @implementation HWGMarkerInfo
 @end
@@ -329,6 +336,7 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	ipp_attribute_t *levelsAttr = ippFindAttribute(response, "marker-levels", IPP_TAG_ZERO);
 	ipp_attribute_t *namesAttr  = ippFindAttribute(response, "marker-names", IPP_TAG_ZERO);
 	ipp_attribute_t *colorsAttr = ippFindAttribute(response, "marker-colors", IPP_TAG_ZERO);
+	ipp_attribute_t *typesAttr  = ippFindAttribute(response, "marker-types", IPP_TAG_ZERO);
 	if (!levelsAttr) { ippDelete(response); return nil; }
 
 	int count = ippGetCount(levelsAttr);
@@ -338,8 +346,10 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 		marker.level = ippGetInteger(levelsAttr, i);
 		const char *name = (namesAttr && i < ippGetCount(namesAttr)) ? ippGetString(namesAttr, i, NULL) : NULL;
 		const char *color = (colorsAttr && i < ippGetCount(colorsAttr)) ? ippGetString(colorsAttr, i, NULL) : NULL;
+		const char *type = (typesAttr && i < ippGetCount(typesAttr)) ? ippGetString(typesAttr, i, NULL) : NULL;
 		marker.name = name ? [NSString stringWithUTF8String:name] : [NSString stringWithFormat:NSLocalizedString(@"Supply %d", @""), i + 1];
 		marker.color = color ? [NSString stringWithUTF8String:color] : nil;
+		marker.type = type ? [NSString stringWithUTF8String:type] : nil;
 		[result addObject:marker];
 	}
 	ippDelete(response);
@@ -659,6 +669,12 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 				NSMutableArray<NSString*> *metaParts = [NSMutableArray array];
 				if (jobUser.length) [metaParts addObject:jobUser];
 				if (job->size > 0) [metaParts addObject:[NSString stringWithFormat:NSLocalizedString(@"%d KB", @""), job->size]];
+				// Final API audit (19-ago-2026) — cups_job_t.priority (1-100), already available
+				// on every job this loop iterates, previously unread. OFF by default: only
+				// meaningful when multiple jobs are actually competing for the same printer.
+				if (HWGPrinterBoolForKey(HWG_PRINTER_SHOW_JOB_PRIORITY_KEY, NO)) {
+					[metaParts addObject:[NSString stringWithFormat:NSLocalizedString(@"priority %d", @""), job->priority]];
+				}
 				if (metaParts.count) [lines addObject:[metaParts componentsJoinedByString:@" • "]];
 
 				// 12-ago-2026: own dedicated icon (crossed racing flags — one plain green for
@@ -763,9 +779,19 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 				// +printerIconConnected:NO's red-X Disconnected badge.
 				NSData *iconData = [HWGResolveIconNamed(@"PrinterMonitor-Icon-SupplyLow") TIFFRepresentation];
 				NSString *label = marker.color.length ? [NSString stringWithFormat:@"%@ (%@)", marker.name, marker.color] : marker.name;
+				// Final API audit (19-ago-2026) — marker-types was already requested but
+				// discarded until now. For a waste receptacle, "level" is remaining CAPACITY
+				// (how much empty space is left), so a LOW level means the bin is nearly FULL —
+				// the opposite framing of every other marker type, where low level means the
+				// consumable is running out.
+				BOOL isWaste = [marker.type rangeOfString:@"waste" options:NSCaseInsensitiveSearch].location != NSNotFound;
+				NSString *title = isWaste ? NSLocalizedString(@"Printer Waste Bin Nearly Full", @"") : NSLocalizedString(@"Printer Supply Low", @"");
+				NSString *description = isWaste
+					? [NSString stringWithFormat:NSLocalizedString(@"%@\n%@: %ld%% capacity remaining", @""), printerName, label, (long)marker.level]
+					: [NSString stringWithFormat:@"%@\n%@: %ld%%", printerName, label, (long)marker.level];
 				[delegate notifyWithName:@"PrinterSupplyLow"
-										 title:NSLocalizedString(@"Printer Supply Low", @"")
-								 description:[NSString stringWithFormat:@"%@\n%@: %ld%%", printerName, label, (long)marker.level]
+										 title:title
+								 description:description
 										  icon:iconData
 						  identifierString:[NSString stringWithFormat:@"HWGrowlPrinterSupply-%@", stateKey]
 							  contextString:nil
@@ -1025,9 +1051,13 @@ static NSArray<HWGMarkerInfo*> *HWGCopyMarkerLevelsForDest(cups_dest_t *dest) {
 	NSButton *sharedRow    = [self checkboxWithKey:HWG_PRINTER_SHOW_SHARED_KEY title:NSLocalizedString(@"Sharing status", @"") defaultOn:NO];
 	// Final API audit (18-ago-2026) — printer-type capability bits (Color/Duplex/Staple/Fax/MFP).
 	NSButton *capabilitiesRow = [self checkboxWithKey:HWG_PRINTER_SHOW_CAPABILITIES_KEY title:NSLocalizedString(@"Capabilities (color, duplex, fax, scanner…)", @"") defaultOn:NO];
+	// Final API audit (19-ago-2026), lote 1 — job priority, shown on "Print Job Started"
+	// (not the connect notification the rows above enrich), already available on every
+	// cups_job_t this monitor's job-tracking loop already iterates.
+	NSButton *jobPriorityRow = [self checkboxWithKey:HWG_PRINTER_SHOW_JOB_PRIORITY_KEY title:NSLocalizedString(@"Job priority (on Print Job Started)", @"") defaultOn:NO];
 	NSView *previous = infoHeader;
 	CGFloat gap = 10;
-	for (NSButton *r in @[locationRow, makeModelRow, connRow, sharedRow, capabilitiesRow]) {
+	for (NSButton *r in @[locationRow, makeModelRow, connRow, sharedRow, capabilitiesRow, jobPriorityRow]) {
 		[v addSubview:r];
 		[NSLayoutConstraint activateConstraints:@[
 			[r.topAnchor     constraintEqualToAnchor:previous.bottomAnchor constant:gap],

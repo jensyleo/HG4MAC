@@ -102,6 +102,16 @@
 // several fields shown per device).
 #define HWG_AUDIO_SHOW_BITDEPTH_KEY @"HWGAudioShowBitDepth"
 #define HWG_AUDIO_SHOW_LATENCY_KEY  @"HWGAudioShowLatency"
+// Final API audit (19-ago-2026), lote 1 — 3 more real fields via an agent audit, all from
+// AudioHardware(Base).h, same tier as bit depth/latency above (niche/pro-audio, OFF by default):
+// kAudioDevicePropertyClockSource (which external clock — Word Clock/S/PDIF/ADAT/Internal — the
+// device is synced to; losing clock sync mid-session is a common pro-audio failure mode),
+// kAudioDevicePropertyModelUID + kAudioObjectPropertyManufacturer (identity fields distinct from
+// the already-shown stable Device UID), and kAudioDevicePropertyAvailableNominalSampleRates (the
+// full supported range, vs. only the CURRENT rate already shown).
+#define HWG_AUDIO_SHOW_CLOCKSOURCE_KEY @"HWGAudioShowClockSource"
+#define HWG_AUDIO_SHOW_MODEL_KEY       @"HWGAudioShowModelManufacturer"
+#define HWG_AUDIO_SHOW_RATERANGE_KEY   @"HWGAudioShowSampleRateRange"
 
 static BOOL HWGAudioBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -543,6 +553,61 @@ static AudioObjectPropertyAddress kDefaultInputAddress = {
 			CFRelease(uid);
 		}
 	}
+	// Final API audit (19-ago-2026), lote 1 — Model UID + Manufacturer, distinct identity
+	// fields from the stable Device UID above.
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_MODEL_KEY, NO)) {
+		AudioObjectPropertyAddress modelAddress = { kAudioDevicePropertyModelUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+		CFStringRef modelUID = NULL;
+		UInt32 modelSize = sizeof(modelUID);
+		if (AudioObjectHasProperty(deviceID, &modelAddress) && AudioObjectGetPropertyData(deviceID, &modelAddress, 0, NULL, &modelSize, &modelUID) == noErr && modelUID) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Model UID:\t%@", @""), (__bridge NSString *)modelUID]];
+			CFRelease(modelUID);
+		}
+		AudioObjectPropertyAddress mfgAddress = { kAudioObjectPropertyManufacturer, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+		CFStringRef manufacturer = NULL;
+		UInt32 mfgSize = sizeof(manufacturer);
+		if (AudioObjectHasProperty(deviceID, &mfgAddress) && AudioObjectGetPropertyData(deviceID, &mfgAddress, 0, NULL, &mfgSize, &manufacturer) == noErr && manufacturer) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), (__bridge NSString *)manufacturer]];
+			CFRelease(manufacturer);
+		}
+	}
+	// Final API audit (19-ago-2026), lote 1 — kAudioDevicePropertyClockSource, resolved to a
+	// real label via kAudioDevicePropertyClockSourceNameForIDCFString (same translation pattern
+	// as -dataSourceLabelForDeviceID:sourceID: below).
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_CLOCKSOURCE_KEY, NO)) {
+		AudioObjectPropertyAddress clockAddress = { kAudioDevicePropertyClockSource, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+		if (AudioObjectHasProperty(deviceID, &clockAddress)) {
+			UInt32 clockSourceID = 0;
+			UInt32 clockSize = sizeof(clockSourceID);
+			if (AudioObjectGetPropertyData(deviceID, &clockAddress, 0, NULL, &clockSize, &clockSourceID) == noErr) {
+				NSString *clockLabel = [self clockSourceLabelForDeviceID:deviceID sourceID:clockSourceID];
+				[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Clock source:\t%@", @""), clockLabel]];
+			}
+		}
+	}
+	// Final API audit (19-ago-2026), lote 1 — kAudioDevicePropertyAvailableNominalSampleRates,
+	// the full supported range (vs. only the current rate shown above). Returns an array of
+	// AudioValueRange; devices commonly report a set of discrete ranges (e.g. 44100-44100,
+	// 48000-48000), collapsed here into a plain min-max span across all of them.
+	if (HWGAudioBoolForKey(HWG_AUDIO_SHOW_RATERANGE_KEY, NO)) {
+		AudioObjectPropertyAddress rangeAddress = { kAudioDevicePropertyAvailableNominalSampleRates, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+		if (AudioObjectHasProperty(deviceID, &rangeAddress)) {
+			UInt32 rangeSize = 0;
+			if (AudioObjectGetPropertyDataSize(deviceID, &rangeAddress, 0, NULL, &rangeSize) == noErr && rangeSize >= sizeof(AudioValueRange)) {
+				NSUInteger count = rangeSize / sizeof(AudioValueRange);
+				AudioValueRange *ranges = malloc(rangeSize);
+				if (ranges && AudioObjectGetPropertyData(deviceID, &rangeAddress, 0, NULL, &rangeSize, ranges) == noErr) {
+					double minRate = ranges[0].mMinimum, maxRate = ranges[0].mMaximum;
+					for (NSUInteger i = 1; i < count; i++) {
+						if (ranges[i].mMinimum < minRate) minRate = ranges[i].mMinimum;
+						if (ranges[i].mMaximum > maxRate) maxRate = ranges[i].mMaximum;
+					}
+					[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Supported sample rates:\t%.0f–%.0f Hz", @""), minRate, maxRate]];
+				}
+				free(ranges);
+			}
+		}
+	}
 	// Added 17-ago-2026 — kAudioDevicePropertyMute, public, standard scalar on virtually every
 	// device with a volume control. Read-only display here (not a change listener) — showing
 	// current state on connect/default-change, same tier as the other fields above.
@@ -802,6 +867,24 @@ static AudioObjectPropertyAddress kAliveAddress = {
 // localized label via kAudioDevicePropertyDataSourceNameForIDCFString rather than shown raw.
 -(NSString *)dataSourceLabelForDeviceID:(AudioDeviceID)deviceID sourceID:(UInt32)sourceID {
 	AudioObjectPropertyAddress nameAddress = { kAudioDevicePropertyDataSourceNameForIDCFString, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	AudioValueTranslation translation;
+	CFStringRef nameRef = NULL;
+	translation.mInputData = &sourceID;
+	translation.mInputDataSize = sizeof(sourceID);
+	translation.mOutputData = &nameRef;
+	translation.mOutputDataSize = sizeof(nameRef);
+	UInt32 size = sizeof(translation);
+	if (AudioObjectGetPropertyData(deviceID, &nameAddress, 0, NULL, &size, &translation) == noErr && nameRef) {
+		return CFBridgingRelease(nameRef);
+	}
+	return [NSString stringWithFormat:@"0x%08x", (unsigned)sourceID];
+}
+
+// Final API audit (19-ago-2026), lote 1 — same AudioValueTranslation pattern as
+// -dataSourceLabelForDeviceID:sourceID: above, for kAudioDevicePropertyClockSourceNameForIDCFString.
+-(NSString *)clockSourceLabelForDeviceID:(AudioDeviceID)deviceID sourceID:(UInt32)sourceID {
+	AudioObjectPropertyAddress nameAddress = { kAudioDevicePropertyClockSourceNameForIDCFString, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+	if (!AudioObjectHasProperty(deviceID, &nameAddress)) return [NSString stringWithFormat:@"0x%08x", (unsigned)sourceID];
 	AudioValueTranslation translation;
 	CFStringRef nameRef = NULL;
 	translation.mInputData = &sourceID;
@@ -1352,6 +1435,10 @@ static AudioObjectPropertyAddress kAliveAddress = {
 		// connect events elsewhere in the app).
 		[self checkboxWithKey:HWG_AUDIO_SHOW_BITDEPTH_KEY title:NSLocalizedString(@"Bit depth", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_AUDIO_SHOW_LATENCY_KEY  title:NSLocalizedString(@"Latency", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_AUDIO_SHOW_CLOCKSOURCE_KEY title:NSLocalizedString(@"Clock source (Word Clock/S-PDIF/ADAT/Internal)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_SHOW_MODEL_KEY       title:NSLocalizedString(@"Model UID + Manufacturer", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_AUDIO_SHOW_RATERANGE_KEY   title:NSLocalizedString(@"Supported sample rate range", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];

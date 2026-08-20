@@ -54,6 +54,14 @@
 // Final API audit (18-ago-2026) — max frame rate at the same "best supported format" already
 // used for HWG_CAMERA_SHOW_RESOLUTION_KEY above (AVFrameRateRange.maxFrameRate).
 #define HWG_CAMERA_SHOW_MAX_FRAMERATE_KEY   @"HWGCameraShowMaxFrameRate"
+// Final API audit (19-ago-2026), lote 1 — 2 more real, header-verified fields via an agent
+// audit: AVCaptureDevice.manufacturer (real on macOS, unlike .isConnected/.isSuspended/.modelID
+// which the header marks visionOS-only despite appearing in the shared AVCaptureDevice.h) and
+// .linkedDevices (macOS-only per its own API_UNAVAILABLE annotation — sibling devices sharing
+// the same physical hardware, e.g. an external iSight's camera+mic pairing). Both OFF by
+// default.
+#define HWG_CAMERA_SHOW_MANUFACTURER_KEY @"HWGCameraShowManufacturer"
+#define HWG_CAMERA_SHOW_LINKED_KEY       @"HWGCameraShowLinkedDevices"
 
 static BOOL HWGCameraBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -334,6 +342,20 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 			}
 		}
 	}
+	// Final API audit (19-ago-2026), lote 1.
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_MANUFACTURER_KEY, NO) && [device.manufacturer length]) {
+		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Manufacturer:\t%@", @""), device.manufacturer]];
+	}
+	if (HWGCameraBoolForKey(HWG_CAMERA_SHOW_LINKED_KEY, NO)) {
+		NSMutableArray<NSString *> *linkedNames = [NSMutableArray array];
+		for (AVCaptureDevice *linked in device.linkedDevices) {
+			if (linked.localizedName) [linkedNames addObject:linked.localizedName];
+		}
+		if ([linkedNames count]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Linked devices:\t%@", @""), [linkedNames componentsJoinedByString:@", "]]];
+		}
+	}
+
 	NSString *description = [lines count] ? [NSString stringWithFormat:@"%@\n%@", device.localizedName, [lines componentsJoinedByString:@"\n"]] : device.localizedName;
 
 	[delegate notifyWithName:@"CameraConnected"
@@ -600,6 +622,9 @@ static const NSTimeInterval kCameraInUseDebounceInterval = 1.0;
 		// Final API audit (18-ago-2026) — OFF by default.
 		[self checkboxWithKey:HWG_CAMERA_SHOW_MAX_FRAMERATE_KEY title:NSLocalizedString(@"Max frame rate", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_CAMERA_SHOW_SYSTEM_PREFERRED_KEY title:NSLocalizedString(@"System Preferred Camera (macOS 13+)", @"") defaultOn:NO],
+		// Final API audit (19-ago-2026), lote 1.
+		[self checkboxWithKey:HWG_CAMERA_SHOW_MANUFACTURER_KEY title:NSLocalizedString(@"Manufacturer", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_CAMERA_SHOW_LINKED_KEY       title:NSLocalizedString(@"Linked devices (e.g. paired microphone)", @"") defaultOn:NO],
 	];
 
 	[v addSubview:header];
