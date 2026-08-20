@@ -34,6 +34,11 @@
 #define HWG_BT_SHOW_ENCRYPTION_KEY @"HWGBluetoothShowEncryption"
 #define HWG_BT_SHOW_LINKTYPE_KEY   @"HWGBluetoothShowLinkType"
 #define HWG_BT_SHOW_INITIATOR_KEY  @"HWGBluetoothShowInitiator"
+// Final API audit (18-ago-2026), lote 3 — service-class bitmask (BluetoothGetServiceClassMajor,
+// a separate 11-bit field from deviceClassMajor/Minor, already used by -bluetoothTypeLabelForDevice:
+// for the "Type" field above) and favorite/last-used, both from IOBluetoothDevice.
+#define HWG_BT_SHOW_SERVICECLASS_KEY @"HWGBluetoothShowServiceClassBits"
+#define HWG_BT_SHOW_FAVORITE_KEY     @"HWGBluetoothShowFavoriteLastUsed"
 
 static BOOL HWGBTBoolForKey(NSString *key, BOOL def) {
 	id stored = [[NSUserDefaults standardUserDefaults] objectForKey:key];
@@ -550,6 +555,35 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Initiated by:\t%@", @""),
 			[device isIncoming] ? NSLocalizedString(@"Remote device", @"") : NSLocalizedString(@"This Mac", @"")]];
 	}
+	// Final API audit (18-ago-2026), lote 3 — service-class bits: an 11-bit bitmask separate
+	// from deviceClassMajor/Minor (which -bluetoothTypeLabelForDevice: already decodes for the
+	// "Type" field above) — this is the "what kind of SERVICE does this device offer" bitmask
+	// (Audio/Telephony/Rendering/etc.), which a device can set MULTIPLE bits of at once.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_SERVICECLASS_KEY, NO)) {
+		BluetoothServiceClassMajor serviceBits = BluetoothGetServiceClassMajor([device classOfDevice]);
+		NSMutableArray<NSString *> *serviceNames = [NSMutableArray array];
+		if (serviceBits & kBluetoothServiceClassMajorNetworking)     [serviceNames addObject:NSLocalizedString(@"Networking", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorRendering)      [serviceNames addObject:NSLocalizedString(@"Rendering", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorCapturing)      [serviceNames addObject:NSLocalizedString(@"Capturing", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorObjectTransfer) [serviceNames addObject:NSLocalizedString(@"Object Transfer", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorAudio)          [serviceNames addObject:NSLocalizedString(@"Audio", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorTelephony)      [serviceNames addObject:NSLocalizedString(@"Telephony", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorInformation)    [serviceNames addObject:NSLocalizedString(@"Information", @"")];
+		if (serviceBits & kBluetoothServiceClassMajorPositioning)    [serviceNames addObject:NSLocalizedString(@"Positioning", @"")];
+		if ([serviceNames count]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"Service class:\t%@", @""), [serviceNames componentsJoinedByString:@", "]]];
+		}
+	}
+	// Favorite flag + last-used date.
+	if (HWGBTBoolForKey(HWG_BT_SHOW_FAVORITE_KEY, NO)) {
+		NSMutableArray<NSString *> *bits = [NSMutableArray array];
+		if ([device isFavorite]) [bits addObject:NSLocalizedString(@"Favorite", @"")];
+		NSDate *lastUsed = [device recentAccessDate];
+		if (lastUsed) [bits addObject:[NSString stringWithFormat:NSLocalizedString(@"last used %@", @""), lastUsed]];
+		if ([bits count]) {
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"%@", @""), [bits componentsJoinedByString:@", "]]];
+		}
+	}
 
 	return [lines count] ? [lines componentsJoinedByString:@"\n"] : nil;
 }
@@ -669,6 +703,9 @@ static NSString *HWGBTNormalizedAddress(NSString *address) {
 		[self checkboxWithKey:HWG_BT_SHOW_ENCRYPTION_KEY title:NSLocalizedString(@"Link encryption state", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_BT_SHOW_LINKTYPE_KEY   title:NSLocalizedString(@"Link type (ACL/SCO/eSCO)", @"") defaultOn:NO],
 		[self checkboxWithKey:HWG_BT_SHOW_INITIATOR_KEY  title:NSLocalizedString(@"Who initiated the connection", @"") defaultOn:NO],
+		// Final API audit (18-ago-2026), lote 3 — OFF by default.
+		[self checkboxWithKey:HWG_BT_SHOW_SERVICECLASS_KEY title:NSLocalizedString(@"Service class bits (Audio/Telephony/Rendering/etc.)", @"") defaultOn:NO],
+		[self checkboxWithKey:HWG_BT_SHOW_FAVORITE_KEY     title:NSLocalizedString(@"Favorite flag + last used date", @"") defaultOn:NO],
 		// Added 17-ago-2026 — OFF by default: SDP service names are often verbose/technical
 		// (e.g. "AVRCP Target", "Handsfree Audio Gateway"), not something every user wants
 		// cluttering the notification by default.

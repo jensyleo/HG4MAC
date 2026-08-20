@@ -49,6 +49,12 @@ read-only field, and Xbox Elite paddle presence. All added as plain General-tab 
 following the same pattern already verified working in Thunderbolt/Camera Monitor — the shared
 `HWGIconPickerView` component was not touched. Pending live hardware verification (see `TODO.md`).
 
+### Added: Bluetooth Monitor batch 3 — service class bits, favorite/last-used
+Service-class bitmask (Audio/Telephony/Rendering/etc. — separate from the device-type field
+already shown) and favorite flag + last-used date. "Class-of-Device minor completo" from the
+audit is already substantially covered by the existing Type field; "SDP profile list" was
+already implemented before this session. 6/27 candidates done.
+
 ### Added/Fixed: Bluetooth Monitor batch 2 — encryption/link type/initiator, RSSI checkbox bug
 Link encryption state, link type (ACL/SCO/eSCO), and who initiated the connection — all off by
 default. Also fixed a real pre-existing bug found in passing: the RSSI checkbox showed unchecked
